@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Comfy Remote">
+  <rect width="512" height="512" rx="96" fill="#111312"/>
+  <rect x="92" y="92" width="328" height="328" rx="64" fill="#17231c" stroke="#486556" stroke-width="12"/>
+  <rect x="154" y="266" width="52" height="92" rx="10" fill="#5fe29b" opacity=".72"/>
+  <rect x="230" y="154" width="52" height="204" rx="10" fill="#5fe29b"/>
+  <rect x="306" y="218" width="52" height="140" rx="10" fill="#5fe29b" opacity=".86"/>
+</svg>
