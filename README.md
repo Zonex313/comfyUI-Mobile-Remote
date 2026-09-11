@@ -140,6 +140,12 @@ http://<Tailscale IPv4>:8188/mobile
 
 先在电脑端确认该工作流可以正常运行。自定义节点必须已经安装在这台电脑上。重新打开并同步工作流后再提交。
 
+## 更新日志
+
+当前版本 **0.1.1**。每个版本的改动说明见 [CHANGELOG.md](CHANGELOG.md)。
+
+升级方式：用新版本文件覆盖插件目录后，手机浏览器刷新一次页面；若改动了 Python 后端文件，再重启一次 ComfyUI。
+
 ## 卸载
 
 停止 ComfyUI，删除整个 `ComfyUI-Mobile-Remote` 目录后重新启动即可。插件没有修改 ComfyUI 核心文件。

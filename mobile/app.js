@@ -2,6 +2,9 @@
   "use strict";
 
   const $ = (id) => document.getElementById(id);
+  // 关闭大图后短暂屏蔽底部导航：关闭按钮正压在「设置」标签正上方，
+  // 若画面尚未落帧，用户的第二下点击会穿透到导航并误切页面。
+  const GALLERY_CLOSE_GUARD_MS = 450;
   const state = {
     online: false,
     status: null,
@@ -25,6 +28,7 @@
     galleryIndex: 0,
     galleryJobId: "",
     galleryLoadToken: 0,
+    galleryCloseGuardUntil: 0,
     jobDialogToken: 0,
     gallerySeenUrls: new Set(),
     favoritesOnly: false,
@@ -2561,14 +2565,17 @@
     const gallery = $("galleryDialog");
     if (!gallery?.open || gallery.classList.contains("is-closing")) return;
     state.galleryLoadToken += 1;
+    state.galleryCloseGuardUntil = performance.now() + GALLERY_CLOSE_GUARD_MS;
     gallery.classList.add("is-closing");
     const image = $("galleryImage");
     if (image) {
       image.onload = null;
       image.onerror = null;
     }
+    // 同步关闭：让对话框立刻离开顶层，不留"已隐藏但仍 open"的中间态。
+    // 卸图、清 ghost 等重活仍延后一帧，保持关闭不卡。
+    if (gallery.open) gallery.close();
     requestAnimationFrame(() => {
-      if (gallery.open) gallery.close();
       gallery.classList.remove("is-closing");
       if (image) {
         image.removeAttribute("src");
@@ -2581,6 +2588,12 @@
         state.galleryZoom.x = 0;
         state.galleryZoom.y = 0;
       }
+      // 上面这一帧的隐藏已经落屏，守卫从此刻再续一小段：
+      // 手机渲染慢时画面回网格可能滞后，靠它兜住用户的"第二下"。
+      requestAnimationFrame(() => {
+        const until = performance.now() + GALLERY_CLOSE_GUARD_MS;
+        if (state.galleryCloseGuardUntil < until) state.galleryCloseGuardUntil = until;
+      });
     });
   }
 
@@ -3447,7 +3460,16 @@
       topbar?.classList.toggle("is-scrolled", content.scrollTop > 12);
     }, { passive: true });
     document.querySelectorAll(".nav-button").forEach((button) => {
-      button.addEventListener("click", () => showView(button.dataset.target));
+      button.addEventListener("click", (event) => {
+        // 大图刚关闭的瞬间，画面可能还没落帧，而关闭按钮正压在导航上方；
+        // 此时落到导航上的点击是"第二下"误触，直接吞掉，不切页面。
+        if (performance.now() < state.galleryCloseGuardUntil) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        showView(button.dataset.target);
+      });
     });
     $("workflowSelect").addEventListener("change", (event) => loadWorkflow(event.target.value, true));
     $("sizePresetSelect").addEventListener("change", (event) => applySizePreset(event.target.value));

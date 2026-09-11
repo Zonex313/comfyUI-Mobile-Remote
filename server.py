@@ -1864,7 +1864,7 @@ def register_routes() -> None:
                 "gpu": gpu,
                 "tailscale_ips": tailscale_ips,
                 "mobile_urls": [f"http://{address}:{port}/mobile" for address in tailscale_ips],
-                "version": "0.1.0",
+                "version": "0.1.1",
                 "time": int(time.time() * 1000),
             },
             headers=NO_CACHE,
