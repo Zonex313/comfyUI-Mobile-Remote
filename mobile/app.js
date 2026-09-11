@@ -2572,10 +2572,15 @@
       image.onload = null;
       image.onerror = null;
     }
-    // 同步关闭：让对话框立刻离开顶层，不留"已隐藏但仍 open"的中间态。
-    // 卸图、清 ghost 等重活仍延后一帧，保持关闭不卡。
-    if (gallery.open) gallery.close();
-    requestAnimationFrame(() => {
+    // 关键：本帧只做上面这个 display:none（0.2ms），浏览器下一帧就能把网格画出来。
+    // dialog.close() 会触发整页样式重算，历史网格越大越慢（手机上几十毫秒），
+    // 若放在这里会把"大图消失"这一帧一起拖住，体感就是点了半天才关；
+    // 因此用两层 rAF 把它推到隐藏画面真正落屏之后再执行。
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      // 这两帧之间若又打开了新的预览（openGallery 会移除 is-closing），就放弃本次收尾，
+      // 否则会把刚打开的新图关掉。
+      if (!gallery.classList.contains("is-closing")) return;
+      if (gallery.open) gallery.close();
       gallery.classList.remove("is-closing");
       if (image) {
         image.removeAttribute("src");
@@ -2588,13 +2593,11 @@
         state.galleryZoom.x = 0;
         state.galleryZoom.y = 0;
       }
-      // 上面这一帧的隐藏已经落屏，守卫从此刻再续一小段：
+      // 这一帧隐藏已经落屏，守卫从此刻再续一小段：
       // 手机渲染慢时画面回网格可能滞后，靠它兜住用户的"第二下"。
-      requestAnimationFrame(() => {
-        const until = performance.now() + GALLERY_CLOSE_GUARD_MS;
-        if (state.galleryCloseGuardUntil < until) state.galleryCloseGuardUntil = until;
-      });
-    });
+      const until = performance.now() + GALLERY_CLOSE_GUARD_MS;
+      if (state.galleryCloseGuardUntil < until) state.galleryCloseGuardUntil = until;
+    }));
   }
 
   function openGallery(items, index, jobId = "") {
@@ -3498,7 +3501,25 @@
     });
 
     const gallery = $("galleryDialog");
-    $("closeGalleryButton").addEventListener("click", () => closeGalleryViewer());
+    // 关闭按钮：手指一抬就关，不等 click 事件。
+    // 部分手机的浏览器（如开启"强制缩放"）会重新引入数百毫秒的点击延迟，
+    // 只监听 click 会让用户觉得"点了没反应"，于是再补一下。
+    let closeTapStart = null;
+    const closeGalleryButton = $("closeGalleryButton");
+    closeGalleryButton.addEventListener("pointerdown", (event) => {
+      closeTapStart = { id: event.pointerId, x: event.clientX, y: event.clientY };
+    });
+    closeGalleryButton.addEventListener("pointercancel", () => { closeTapStart = null; });
+    closeGalleryButton.addEventListener("pointerup", (event) => {
+      const start = closeTapStart;
+      closeTapStart = null;
+      if (!start || start.id !== event.pointerId) return;
+      // 手指移动超过 12px 视为滑动，不当作点击
+      if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 12) return;
+      closeGalleryViewer();
+    });
+    // 键盘回车/空格等仍走 click；重复调用会被 closeGalleryViewer 自身的判断挡掉
+    closeGalleryButton.addEventListener("click", () => closeGalleryViewer());
     $("deleteGalleryButton").addEventListener("click", deleteCurrentGalleryImage);
     $("closePresetTagButton").addEventListener("click", () => $("presetTagDialog").close());
     $("presetTagSaveButton").addEventListener("click", savePresetTagEditor);

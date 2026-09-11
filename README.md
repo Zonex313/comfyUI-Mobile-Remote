@@ -142,7 +142,7 @@ http://<Tailscale IPv4>:8188/mobile
 
 ## 更新日志
 
-当前版本 **0.1.1**。每个版本的改动说明见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **0.1.2**。每个版本的改动说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 升级方式：用新版本文件覆盖插件目录后，手机浏览器刷新一次页面；若改动了 Python 后端文件，再重启一次 ComfyUI。
 

@@ -1,0 +1,11 @@
+# 统一使用 LF 换行：测试会用文件末尾标记切片源码，换行被改会直接导致测试失败
+* text=auto eol=lf
+
+# 二进制文件不做任何转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.exe binary
+*.zip binary
