@@ -1,0 +1,55 @@
+name: 发布说明
+
+# 推送版本标签时自动生成 Release；更新日志改动后也会同步已发布版本的说明。
+# 说明内容直接取自 CHANGELOG.md 中对应版本的段落。
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 从 CHANGELOG 生成说明文件
+        run: |
+          python3 - <<'PY'
+          import pathlib, re
+          text = pathlib.Path('CHANGELOG.md').read_text(encoding='utf-8')
+          for part in re.split(r'^##\s+', text, flags=re.M)[1:]:
+              lines = part.splitlines()
+              version = lines[0].split()[0].strip() if lines else ''
+              if not re.fullmatch(r'v\d+(\.\d+)*', version):
+                  continue
+              body = '\n'.join(lines[1:]).strip()
+              pathlib.Path('notes-%s.md' % version).write_text(body + '\n', encoding='utf-8')
+              print('生成说明:', version)
+          PY
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for file in notes-*.md; do
+            tag="${file#notes-}"
+            tag="${tag%.md}"
+            if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              echo "跳过 ${tag}：仓库里没有这个标签"
+              continue
+            fi
+            if gh release view "${tag}" >/dev/null 2>&1; then
+              echo "更新 ${tag}"
+              gh release edit "${tag}" --title "${tag}" --notes-file "${file}" || echo "!! 更新 ${tag} 失败"
+            else
+              echo "创建 ${tag}"
+              gh release create "${tag}" --title "${tag}" --notes-file "${file}" --verify-tag || echo "!! 创建 ${tag} 失败"
+            fi
+          done
