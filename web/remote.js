@@ -110,6 +110,31 @@ async function copyUrl(value) {
   }
 }
 
+const TAG_NODE_TYPE = "MobileTagCLIPTextEncode";
+
+// 把自制节点放到画布正中央；返回空串表示成功，否则是错误说明。
+function addTagNodeToCanvas() {
+  const graph = app?.graph;
+  const factory = globalThis.LiteGraph;
+  if (!graph || typeof factory?.createNode !== "function") return "画布还没准备好";
+  const node = factory.createNode(TAG_NODE_TYPE);
+  if (!node) return "找不到节点类型，确认插件已加载后刷新页面";
+  graph.add(node);
+  try {
+    const canvas = app.canvas;
+    const rect = canvas.canvas.getBoundingClientRect();
+    const scale = canvas.ds?.scale || 1;
+    const offset = canvas.ds?.offset || [0, 0];
+    node.pos = [
+      (rect.width / 2) / scale - offset[0] - (node.size?.[0] || 340) / 2,
+      (rect.height / 2) / scale - offset[1] - (node.size?.[1] || 200) / 2,
+    ];
+    canvas.selectNode?.(node, false);
+    canvas.setDirty?.(true, true);
+  } catch { /* 定位失败就用默认位置 */ }
+  return "";
+}
+
 function mountPanel(container) {
   const root = element("section", "mobile-remote-panel");
   root.setAttribute("aria-label", "手机远程连接");
@@ -269,6 +294,27 @@ function mountPanel(container) {
   const workflowNote = element("section", "mobile-remote-card");
   workflowNote.append(element("p", "mobile-remote-note", "工作流处于打开状态才可以被手机读取"));
   connectView.append(workflowNote);
+
+  const nodeCard = element("section", "mobile-remote-card");
+  const nodeButton = button("把随机标签节点加入画布", "plus", "加入随机标签节点");
+  nodeButton.node.classList.add("mobile-remote-primary");
+  const nodeNote = element(
+    "p",
+    "mobile-remote-note",
+    "点一下就把「CLIP文本编码丨随机标签」放到画布中央，接上 CLIP 与提示词即可使用",
+  );
+  nodeButton.node.addEventListener("click", () => {
+    const error = addTagNodeToCanvas();
+    const original = "加入随机标签节点";
+    nodeButton.caption.textContent = error ? "加入失败" : "已加入画布";
+    nodeNote.textContent = error || "已放到画布中央，可拖动到合适位置";
+    window.setTimeout(() => {
+      nodeButton.caption.textContent = original;
+      nodeNote.textContent = "点一下就把「CLIP文本编码丨随机标签」放到画布中央，接上 CLIP 与提示词即可使用";
+    }, 2000);
+  });
+  nodeCard.append(nodeButton.node, nodeNote);
+  connectView.append(nodeCard);
 
   const cloud = makeCard("Cloudflare", "cloud", "临时公网");
   const tunnelActions = element("div", "mobile-remote-tunnel-actions");
