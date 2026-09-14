@@ -205,7 +205,26 @@ function mountPanel(container) {
   const root = element("section", "mobile-remote-panel");
   root.setAttribute("aria-label", "手机远程连接");
   const header = element("header", "mobile-remote-header");
-  const heading = element("h2", "mobile-remote-heading", "手机远程");
+  const heading = element("h2", "mobile-remote-heading");
+  const headingText = element("span", "", "手机远程");
+  const versionTag = element("span", "mobile-remote-version", "");
+  // 版本号小字贴在「手机远程」右下角
+  versionTag.style.fontSize = "9px";
+  versionTag.style.fontWeight = "500";
+  versionTag.style.opacity = "0.55";
+  versionTag.style.marginLeft = "4px";
+  versionTag.style.letterSpacing = "0";
+  versionTag.style.verticalAlign = "-1px"; // 往右下压一点
+  // 不能改成 flex：标题会被挤成两行（"手机远/程"），保持块级且禁止换行
+  heading.style.whiteSpace = "nowrap";
+  heading.append(headingText, versionTag);
+  void fetch("/mobile/api/status", { cache: "no-store" })
+    .then((response) => response.json())
+    .then((body) => {
+      const version = body?.version ? String(body.version) : "";
+      if (version) setText(versionTag, `v${version}`);
+    })
+    .catch(() => { /* 版本号拿不到就不显示 */ });
   const refreshButton = button("刷新连接状态", "refresh");
   const tagsButton = button("标签管理", "list", "标签管理");
   tagsButton.node.classList.add("mobile-remote-tags-entry");
