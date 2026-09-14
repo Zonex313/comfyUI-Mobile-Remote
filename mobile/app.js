@@ -1517,9 +1517,14 @@
       state.workflowPickerEl = document.getElementById("workflowPickerField");
     }
     if (state.workflowPickerEl) {
-      const schedulerIdx = advanced.findIndex((field) => field.input === "scheduler");
-      const insertAt = schedulerIdx === -1 ? advancedNodes.length : (trio.length ? 1 : 0) + schedulerIdx + 1;
-      advancedNodes.splice(insertAt, 0, state.workflowPickerEl);
+      // 高级参数固定顺序：
+      // ① 批量数量+种子  ② 采样步数/CFG/重绘幅度  ③ 选择工作流  ④ 采样器  ⑤ 调度器  ⑥ 其余
+      // 前两组可能已经直接插进 DOM（高级区上方），所以只数还在数组里的，保证排在它们后面
+      const lead = advancedNodes.filter((node) => {
+        const cls = node?.classList;
+        return Boolean(cls && (cls.contains("pair-row") || cls.contains("trio-row")));
+      }).length;
+      advancedNodes.splice(lead, 0, state.workflowPickerEl);
     }
     $("advancedFields").replaceChildren(...advancedNodes);
     $("modelFields").replaceChildren(...model.map((field) => renderField(field, fieldIndex(field))));
