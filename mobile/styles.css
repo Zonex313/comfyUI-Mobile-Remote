@@ -2193,6 +2193,14 @@ select:focus {
   gap: 10px;
 }
 
+.settings-hint {
+  margin: 0;
+  padding: 0 0 24px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .bottom-nav {
   position: relative;
   z-index: 30;
