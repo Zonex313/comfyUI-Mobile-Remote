@@ -151,6 +151,15 @@ function makeUpdateButton(onApply) {
       state.hasUpdate = false;
     }
     paint();
+    if (force) {
+      // 手动点击必须有反馈：没新版就明确说「已是最新」
+      entry.caption.textContent = state.hasUpdate
+        ? "立即更新"
+        : state.info?.ok === false
+          ? "检查失败"
+          : "已是最新";
+      window.setTimeout(() => paint(), 1800);
+    }
   };
 
   entry.node.addEventListener("click", () => {
