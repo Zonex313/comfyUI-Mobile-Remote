@@ -1455,6 +1455,7 @@
       !isNegativeField(field)
       && !isSizeField(field)
       && field !== batch
+      && field !== seed            // batch/seed 由固定的「批量数量+种子」行渲染，不能再进普通列表
       && !isModelField(field)
       && field.group !== "basic"   // 服务端标为 basic 的（提示词/模型/尺寸）必须留在外面
     ));
@@ -1489,10 +1490,8 @@
       });
       if (advancedContent) {
         advancedContent.querySelectorAll(":scope > .pair-row").forEach((node) => node.remove());
-        // 「选择工作流」必须永远是高级参数的第一行，插行要插在它后面
-        const picker = advancedContent.querySelector("#workflowPickerField");
-        if (picker) picker.after(pairRow);
-        else advancedContent.prepend(pairRow);
+        // 固定顺序第 1 位：批量数量 + 种子
+        advancedContent.prepend(pairRow);
       } else {
         advancedNodes.push(pairRow);
       }
@@ -1505,9 +1504,15 @@
       const trioRow = document.createElement("div");
       trioRow.className = "trio-row";
       trio.forEach((field) => trioRow.append(renderField(field, fieldIndex(field), true)));
-      advancedNodes.push(trioRow);
+      // 固定顺序第 2 位：采样步数 / CFG / 重绘幅度，排在「选择工作流」之前
+      const pickerForTrio = advancedContent?.querySelector("#workflowPickerField");
+      if (advancedContent && pickerForTrio) pickerForTrio.before(trioRow);
+      else advancedNodes.push(trioRow);
     }
-    advancedNodes.push(...advanced.map((field) => renderField(field, fieldIndex(field))));
+    // 固定顺序第 3 位是「选择工作流」（静态元素），之后依次是采样器、调度器，再是其余
+    const advancedRank = (field) => (field.input === "sampler_name" ? 0 : field.input === "scheduler" ? 1 : 2);
+    const orderedAdvanced = advanced.slice().sort((left, right) => advancedRank(left) - advancedRank(right));
+    advancedNodes.push(...orderedAdvanced.map((field) => renderField(field, fieldIndex(field))));
     if (!state.workflowPickerEl) {
       state.workflowPickerEl = document.getElementById("workflowPickerField");
     }
