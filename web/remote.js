@@ -153,13 +153,14 @@ function makeUpdateButton(onApply) {
     }
     paint();
     if (force) {
-      // 手动点击必须有反馈：没新版就明确说「已是最新」
-      entry.caption.textContent = state.hasUpdate
-        ? "立即更新"
-        : state.info?.ok === false
-          ? "检查失败"
-          : "已是最新";
-      window.setTimeout(() => paint(), 1800);
+      // 手动点击必须有反馈：已是最新就短暂变绿，跟「链接已复制」用同一套样式
+      const isLatest = !state.hasUpdate && state.info?.ok !== false;
+      entry.node.classList.toggle("is-copied", isLatest);
+      entry.caption.textContent = state.hasUpdate ? "立即更新" : isLatest ? "已是最新" : "检查失败";
+      window.setTimeout(() => {
+        entry.node.classList.remove("is-copied");
+        paint();
+      }, 1800);
     }
   };
 
