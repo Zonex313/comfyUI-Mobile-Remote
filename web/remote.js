@@ -111,6 +111,61 @@ async function copyUrl(value) {
 }
 
 const TAG_NODE_TYPE = "MobileTagCLIPTextEncode";
+const UPDATE_API = "/mobile/api/update";
+
+// 更新检测按钮：平时是「检查更新」，发现新版就变成粉蓝高亮的「立即更新」。
+function makeUpdateButton(onApply) {
+  const entry = button("检查更新", "refresh", "检查更新");
+  entry.node.classList.add("mobile-remote-update");
+  const state = { hasUpdate: false, info: null, busy: false };
+
+  const paint = () => {
+    const ready = state.hasUpdate && !state.busy;
+    entry.caption.textContent = state.busy ? "处理中" : ready ? "立即更新" : "检查更新";
+    entry.node.title = ready
+      ? `发现新版本 ${state.info?.latest || ""}，点击更新`
+      : "检查更新";
+    if (ready) {
+      // 粉蓝高亮（内联样式，不动样式表）
+      entry.node.style.background = "linear-gradient(100deg, rgba(240,180,196,0.95), rgba(126,180,212,0.95))";
+      entry.node.style.color = "#1b1d27";
+      entry.node.style.borderColor = "transparent";
+      entry.node.style.boxShadow = "0 0 10px rgba(126,180,212,0.45)";
+      entry.node.style.fontWeight = "700";
+    } else {
+      entry.node.style.background = "";
+      entry.node.style.color = "";
+      entry.node.style.borderColor = "";
+      entry.node.style.boxShadow = "";
+      entry.node.style.fontWeight = "";
+    }
+  };
+
+  const check = async (force) => {
+    try {
+      const response = await fetch(force ? `${UPDATE_API}?force=1` : UPDATE_API, { cache: "no-store" });
+      const body = await response.json();
+      state.info = body;
+      state.hasUpdate = Boolean(body?.ok && body.has_update);
+    } catch {
+      state.hasUpdate = false;
+    }
+    paint();
+  };
+
+  entry.node.addEventListener("click", () => {
+    if (state.busy) return;
+    if (state.hasUpdate) {
+      void onApply(state, paint);
+      return;
+    }
+    void check(true);
+  });
+
+  paint();
+  void check(false); // 启动时静默检查一次
+  return entry;
+}
 
 // 把自制节点放到画布正中央；返回空串表示成功，否则是错误说明。
 function addTagNodeToCanvas() {
@@ -147,7 +202,17 @@ function mountPanel(container) {
   backButton.node.classList.add("mobile-remote-tags-back");
   backButton.node.hidden = true;
   const headerActions = element("div", "mobile-remote-header-actions");
-  headerActions.append(tagsButton.node, refreshButton.node);
+  const updateButton = makeUpdateButton(async (state, paint) => {
+    // 第 3 步（下载并覆盖）还没接上，先把当前状态写进按钮提示
+    state.busy = true;
+    paint();
+    window.setTimeout(() => {
+      state.busy = false;
+      paint();
+      window.alert(`发现新版本 ${state.info?.latest || ""}，自动更新功能正在开发中`);
+    }, 300);
+  });
+  headerActions.append(tagsButton.node, updateButton.node, refreshButton.node);
   header.append(heading, headerActions);
   const readError = element("p", "mobile-remote-error mobile-remote-read-error");
   readError.setAttribute("role", "alert");
