@@ -49,7 +49,8 @@ let lastSources = [];
 // 电脑端当前打开着的所有工作流（不只前台那一个，后台标签页也算）
 function openWorkflowSources() {
   const store = app.extensionManager?.workflow || app.workflowManager;
-  const list = store?.workflows || store?.openWorkflows || [];
+  // 注意：store.workflows 是整个工作流库（几百个），openWorkflows 才是打开着的标签页
+  const list = store?.openWorkflows || store?.openedWorkflows || store?.workflows || [];
   const sources = [];
   for (const item of Array.isArray(list) ? list : []) {
     const source = item?.path || item?.filename || item?.id || "";

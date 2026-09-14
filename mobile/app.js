@@ -1449,13 +1449,13 @@
     } else {
       state.multiModelList = [];
     }
+    // 手机端只把提示词、负向提示词、图像尺寸、模型选择留在外面，
+    // 其余所有参数（包括 steps/cfg/denoise/seed 和节点带来的新参数）一律进"高级参数"。
     const advancedBase = fields.filter((field) => (
       !isNegativeField(field)
       && !isSizeField(field)
       && field !== batch
-      && field !== seed
       && !isModelField(field)
-      && (field.group !== "basic" || ADVANCED_INPUTS.has(field.input))
     ));
     const trio = advancedBase.filter((field) => ["steps", "cfg", "denoise"].includes(field.input));
     const advanced = advancedBase.filter((field) => !trio.includes(field));
@@ -1488,7 +1488,10 @@
       });
       if (advancedContent) {
         advancedContent.querySelectorAll(":scope > .pair-row").forEach((node) => node.remove());
-        advancedContent.prepend(pairRow);
+        // 「选择工作流」必须永远是高级参数的第一行，插行要插在它后面
+        const picker = advancedContent.querySelector("#workflowPickerField");
+        if (picker) picker.after(pairRow);
+        else advancedContent.prepend(pairRow);
       } else {
         advancedNodes.push(pairRow);
       }
