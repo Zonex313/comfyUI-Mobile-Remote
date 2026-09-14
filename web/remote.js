@@ -167,7 +167,7 @@ function makeUpdateButton(onApply) {
   entry.node.addEventListener("click", () => {
     if (state.busy) return;
     if (state.hasUpdate) {
-      void onApply(state, paint);
+      void onApply(state, paint, entry);
       return;
     }
     void check(true);
@@ -213,15 +213,28 @@ function mountPanel(container) {
   backButton.node.classList.add("mobile-remote-tags-back");
   backButton.node.hidden = true;
   const headerActions = element("div", "mobile-remote-header-actions");
-  const updateButton = makeUpdateButton(async (state, paint) => {
-    // 第 3 步（下载并覆盖）还没接上，先把当前状态写进按钮提示
+  const updateButton = makeUpdateButton(async (state, paint, entry) => {
     state.busy = true;
     paint();
-    window.setTimeout(() => {
+    try {
+      const response = await fetch(`${UPDATE_API}/apply?confirm=1`, { method: "POST", cache: "no-store" });
+      const body = await response.json();
+      if (body?.ok) {
+        state.hasUpdate = false;
+        state.busy = false;
+        paint();
+        entry.caption.textContent = "已更新";
+        window.alert(`已更新到 ${body.updated_to}（${body.copied_count} 个文件）\n旧版本备份在 ${body.backup}\n请重启 ComfyUI 生效`);
+      } else {
+        state.busy = false;
+        paint();
+        window.alert(`更新失败：${body?.error || "未知错误"}`);
+      }
+    } catch (error) {
       state.busy = false;
       paint();
-      window.alert(`发现新版本 ${state.info?.latest || ""}，自动更新功能正在开发中`);
-    }, 300);
+      window.alert(`更新失败：${error?.message || error}`);
+    }
   });
   headerActions.append(tagsButton.node, updateButton.node, refreshButton.node);
   header.append(heading, headerActions);

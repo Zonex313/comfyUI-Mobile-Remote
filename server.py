@@ -280,6 +280,52 @@ def _update_plan(archive_path: Path) -> dict[str, Any]:
     return {"work": work, "root": root, "replace": replace, "skip": skip}
 
 
+def _apply_update_files(source_root: Path, target_root: Path, backup_root: Path) -> dict[str, Any]:
+    """把 source_root 里的项目文件覆盖到 target_root，先整目录备份。
+
+    任何一步失败都会用备份把 target_root 还原回去。
+    个人数据不在归档里，也不会被碰。
+    """
+    copied: list[str] = []
+    backup_root.mkdir(parents=True, exist_ok=True)
+    restored = False
+    try:
+        for path in sorted(target_root.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(target_root)
+            if rel.parts[0] in UPDATE_SKIP_NAMES or rel.name in UPDATE_SKIP_NAMES:
+                continue
+            destination = backup_root / rel
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+        for path in sorted(source_root.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(source_root)
+            if rel.parts[0] in UPDATE_SKIP_NAMES or rel.name in UPDATE_SKIP_NAMES:
+                continue
+            destination = target_root / rel
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            copied.append(str(rel))
+    except Exception:
+        LOG.exception("[Mobile Remote] update failed, rolling back")
+        try:
+            for path in sorted(backup_root.rglob("*")):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(backup_root)
+                destination = target_root / rel
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, destination)
+            restored = True
+        except Exception:
+            LOG.exception("[Mobile Remote] rollback failed")
+        return {"ok": False, "copied": copied, "restored": restored, "error": "更新失败，已尝试回滚"}
+    return {"ok": True, "copied": copied, "restored": False, "error": ""}
+
+
 def _fetch_remote_version() -> str:
     import urllib.request
 
@@ -2064,7 +2110,7 @@ def register_routes() -> None:
                 "gpu": gpu,
                 "tailscale_ips": tailscale_ips,
                 "mobile_urls": [f"http://{address}:{port}/mobile" for address in tailscale_ips],
-                "version": "0.1.2",
+                "version": "0.2.0",
                 "time": int(time.time() * 1000),
             },
             headers=NO_CACHE,
@@ -2119,22 +2165,45 @@ def register_routes() -> None:
         except Exception as exc:
             LOG.info("[Mobile Remote] update download failed: %s", exc)
             return web.json_response({"ok": False, "error": f"下载或解压失败：{exc}"})
+        confirm = request.query.get("confirm") == "1"
+        if not confirm:
+            LOG.info(
+                "[Mobile Remote] update plan: %d replace / %d skip (dry run)",
+                len(plan["replace"]),
+                len(plan["skip"]),
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "dry_run": True,
+                "current": current,
+                "latest": latest,
+                "zip_url": zip_url,
+                    "replace_count": len(plan["replace"]),
+                    "skip_count": len(plan["skip"]),
+                    "will_replace": plan["replace"][:400],
+                    "will_skip": plan["skip"][:80],
+                }
+            )
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backup_root = PLUGIN_ROOT / ".runtime" / f"backup-{stamp}"
+        result = await asyncio.to_thread(_apply_update_files, plan["root"], PLUGIN_ROOT, backup_root)
+        if not result["ok"]:
+            return web.json_response({"ok": False, "error": result["error"], "copied": len(result["copied"])})
         LOG.info(
-            "[Mobile Remote] update plan: %d replace / %d skip (dry run)",
-            len(plan["replace"]),
-            len(plan["skip"]),
+            "[Mobile Remote] updated to %s: %d files, backup at %s",
+            latest,
+            len(result["copied"]),
+            backup_root,
         )
         return web.json_response(
             {
                 "ok": True,
-                "dry_run": True,
-                "current": current,
-                "latest": latest,
-                "zip_url": zip_url,
-                "replace_count": len(plan["replace"]),
-                "skip_count": len(plan["skip"]),
-                "will_replace": plan["replace"][:400],
-                "will_skip": plan["skip"][:80],
+                "dry_run": False,
+                "updated_to": latest,
+                "copied_count": len(result["copied"]),
+                "backup": str(backup_root.relative_to(PLUGIN_ROOT)),
+                "message": "更新完成，请重启 ComfyUI 生效",
             }
         )
 
