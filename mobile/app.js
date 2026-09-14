@@ -1456,6 +1456,7 @@
       && !isSizeField(field)
       && field !== batch
       && !isModelField(field)
+      && field.group !== "basic"   // 服务端标为 basic 的（提示词/模型/尺寸）必须留在外面
     ));
     const trio = advancedBase.filter((field) => ["steps", "cfg", "denoise"].includes(field.input));
     const advanced = advancedBase.filter((field) => !trio.includes(field));

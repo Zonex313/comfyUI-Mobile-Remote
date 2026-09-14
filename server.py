@@ -98,13 +98,13 @@ BASIC_INPUTS = {
     "width",
     "height",
     "batch_size",
-    "seed",
-    "noise_seed",
-    "steps",
-    "cfg",
-    "denoise",
-    "sampler_name",
-    "scheduler",
+    "unet_name",
+    "vae_name",
+    "clip_name",
+    "lora_name",
+    "model",
+    "positive_text",
+    "negative_text",
 }
 
 FIELD_ORDER = {
