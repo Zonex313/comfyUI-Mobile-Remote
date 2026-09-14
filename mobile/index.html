@@ -11,11 +11,12 @@
   <title>Comfy Remote</title>
   <link rel="manifest" href="/mobile/manifest.webmanifest">
   <link rel="icon" href="/mobile/assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202609246">
-  <script src="/mobile/assets/preset-catalog.js?v=202609246" defer></script>
-  <script src="/mobile/assets/settings-sync.js?v=202609246" defer></script>
-  <script src="/mobile/assets/progress-sync.js?v=202609246" defer></script>
-  <script src="/mobile/assets/app.js?v=202609246" defer></script>
+  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202609248">
+  <script src="/mobile/assets/preset-catalog.js?v=202609248" defer></script>
+  <script src="/mobile/assets/preset-engine.js?v=202609248" defer></script>
+  <script src="/mobile/assets/settings-sync.js?v=202609248" defer></script>
+  <script src="/mobile/assets/progress-sync.js?v=202609248" defer></script>
+  <script src="/mobile/assets/app.js?v=202609248" defer></script>
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -166,6 +167,7 @@
           </div>
         </div>
         <div class="settings-list">
+          <p class="settings-hint">工作流处于打开状态才可以被手机读取</p>
           <div class="settings-row">
             <span>手机设置同步</span>
             <strong id="settingsSyncDetail">读取设置</strong>
@@ -202,7 +204,6 @@
             电脑端界面
           </a>
         </div>
-        <p class="settings-hint">工作流处于打开状态才可以被手机读取</p>
       </section>
     </main>
 

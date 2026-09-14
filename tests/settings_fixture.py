@@ -41,7 +41,7 @@ async def index(_request):
 @routes.get("/mobile/assets/{filename}")
 async def asset(request):
     name = request.match_info["filename"]
-    if name not in {"app.js", "settings-sync.js", "preset-catalog.js", "progress-sync.js", "styles.css", "icon.svg", "prompt-presets.json"}:
+    if name not in {"app.js", "settings-sync.js", "preset-catalog.js", "preset-engine.js", "progress-sync.js", "styles.css", "icon.svg", "prompt-presets.json"}:
         raise web.HTTPNotFound()
     return web.FileResponse(ROOT / "mobile" / name, headers={"Cache-Control":"no-store"})
 

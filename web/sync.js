@@ -34,6 +34,44 @@ function activeWorkflowInfo(workflow) {
   return { source, name: name || "当前工作流" };
 }
 
+// 只有「已保存到磁盘」的工作流才同步给手机：
+// 未保存的（新版前端叫 Unsaved Workflow）不进手机列表，避免刷出一堆同名条目。
+function isSavedWorkflow(info) {
+  const name = String(info?.name || "").trim();
+  const source = String(info?.source || "").trim();
+  if (!name || /unsaved|untitled|未保存|未命名/i.test(name)) return false;
+  if (!source || source === "current-workflow" || /unsaved|untitled/i.test(source)) return false;
+  return true;
+}
+
+let lastSources = [];
+
+// 电脑端当前打开着的所有工作流（不只前台那一个，后台标签页也算）
+function openWorkflowSources() {
+  const store = app.extensionManager?.workflow || app.workflowManager;
+  const list = store?.workflows || store?.openWorkflows || [];
+  const sources = [];
+  for (const item of Array.isArray(list) ? list : []) {
+    const source = item?.path || item?.filename || item?.id || "";
+    if (source) sources.push(String(source));
+  }
+  return sources;
+}
+
+// 告诉服务端"电脑端开着哪些工作流"：手机端列表只显示这些，全关掉就是空列表。
+async function markOpen(sources = null) {
+  const payload = Array.isArray(sources) ? sources : openWorkflowSources();
+  lastSources = payload;
+  try {
+    await fetch("/mobile/api/workflows/active", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify({ sources: payload }),
+    });
+  } catch { /* 心跳失败不影响本地使用 */ }
+}
+
 async function syncCurrentWorkflow(force = false) {
   if (syncing || !app?.graph || typeof app.graphToPrompt !== "function") return;
 
@@ -43,7 +81,10 @@ async function syncCurrentWorkflow(force = false) {
   } catch {
     graphFingerprint = `${Date.now()}`;
   }
-  if (!force && graphFingerprint === lastFingerprint) return;
+  if (!force && graphFingerprint === lastFingerprint) {
+    await markOpen(lastSources); // 图没变也要发心跳，否则"打开集合"会超时失效
+    return;
+  }
 
   syncing = true;
   try {
@@ -53,6 +94,10 @@ async function syncCurrentWorkflow(force = false) {
     if (!prompt || typeof prompt !== "object" || Object.keys(prompt).length === 0) return;
 
     const info = activeWorkflowInfo(workflow);
+    if (!isSavedWorkflow(info)) {
+      await markOpen(); // 未保存的不进列表，但其它打开的标签页要照常上报
+      return;
+    }
     const response = await fetch("/mobile/api/workflows/sync", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -69,6 +114,7 @@ async function syncCurrentWorkflow(force = false) {
       throw new Error(body.error || `HTTP ${response.status}`);
     }
     lastFingerprint = graphFingerprint;
+    await markOpen();
     console.info(`${LOG_PREFIX} synced “${body.workflow.name}” for /mobile`);
   } catch (error) {
     console.warn(`${LOG_PREFIX} workflow sync skipped`, error);
@@ -92,6 +138,17 @@ app.registerExtension({
     }, 15000);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") scheduleSync(800, false);
+    });
+    // 关掉页面 = 关掉工作流，立刻从手机列表里撤掉
+    window.addEventListener("beforeunload", () => {
+      try {
+        fetch("/mobile/api/workflows/active", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sources: [] }),
+          keepalive: true,
+        });
+      } catch { /* 忽略 */ }
     });
   },
 

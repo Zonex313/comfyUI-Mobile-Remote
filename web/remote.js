@@ -265,7 +265,10 @@ function mountPanel(container) {
     "公网链接暴露是非常危险的事，所以即便是临时公网，也请务必保护好自己的链接避免外泄！",
   ));
   connectView.append(warning);
-  connectView.append(element("p", "mobile-remote-note", "工作流处于打开状态才可以被手机读取"));
+
+  const workflowNote = element("section", "mobile-remote-card");
+  workflowNote.append(element("p", "mobile-remote-note", "工作流处于打开状态才可以被手机读取"));
+  connectView.append(workflowNote);
 
   const cloud = makeCard("Cloudflare", "cloud", "临时公网");
   const tunnelActions = element("div", "mobile-remote-tunnel-actions");

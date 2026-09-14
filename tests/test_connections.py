@@ -117,6 +117,7 @@ class MobileGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/mobile/assets/progress-sync.js", boot)
         self.assertEqual(index_script_paths(), [
             "/mobile/assets/preset-catalog.js",
+            "/mobile/assets/preset-engine.js",
             "/mobile/assets/settings-sync.js",
             "/mobile/assets/progress-sync.js",
             "/mobile/assets/app.js",

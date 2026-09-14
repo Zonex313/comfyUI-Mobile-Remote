@@ -40,7 +40,7 @@ REQUEST_HEADERS = {"content-type", "content-length", "accept", "accept-encoding"
                    "if-range", "if-none-match", "if-modified-since"}
 GET_PATHS = (
     r"/mobile/?", r"/mobile/manifest\.webmanifest",
-    r"/mobile/assets/(?:app\.js|settings-sync\.js|preset-catalog\.js|progress-sync\.js|styles\.css|icon\.svg|prompt-presets\.json)",
+    r"/mobile/assets/(?:app\.js|settings-sync\.js|preset-catalog\.js|preset-engine\.js|progress-sync\.js|styles\.css|icon\.svg|prompt-presets\.json)",
     r"/mobile/api/(?:status|settings|progress|workflows|jobs|favorites/file|preview)",
     r"/mobile/api/workflows/[a-f0-9]{20}",
     r"/mobile/api/jobs/[A-Za-z0-9_-]{1,128}", r"/view", r"/ws",

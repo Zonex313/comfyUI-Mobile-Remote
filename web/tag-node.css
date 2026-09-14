@@ -1,0 +1,271 @@
+/* 「CLIP文本编码丨随机标签」节点面板 —— 布局对齐手机端标签面板 */
+
+.mtr-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  border-radius: 6px;
+  /* 必须是不透明底：否则画布上其它节点会从面板下面透上来 */
+  background: #14161f;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  font-family: inherit;
+}
+
+.mtr-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.mtr-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: #8c93ad;
+  font-size: 10px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mtr-copy {
+  flex: 0 0 auto;
+  height: 20px;
+  padding: 0 9px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 5px;
+  color: #d6dae8;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mtr-copy:hover { background: rgba(255, 255, 255, 0.12); }
+.mtr-copy:active { background: rgba(255, 255, 255, 0.2); }
+
+.mtr-random {
+  flex: 0 0 auto;
+  height: 20px;
+  padding: 0 9px;
+  border: 1px solid rgba(214, 180, 255, 0.42);
+  border-radius: 5px;
+  color: #eadcff;
+  background: rgba(160, 120, 220, 0.22);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.mtr-random:active { background: rgba(160, 120, 220, 0.38); }
+
+.mtr-rows {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 2.5px 3.5px;
+  padding: 4px;
+  align-content: start;
+}
+
+.mtr-row {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  min-height: 23px;
+  padding: 2px 5px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.mtr-row.is-skipped { opacity: 0.3; }
+.mtr-row:hover { background: rgba(255, 255, 255, 0.07); }
+
+.mtr-row-label {
+  flex: 0 0 auto;
+  min-width: 2.6em;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  color: #8c93ad;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.mtr-row-label:hover { color: #ffffff; }
+
+.mtr-divider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 9px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 1px;
+  margin: 0 3.5px;
+  align-self: center;
+}
+
+.mtr-values {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0;
+  overflow: hidden;
+}
+
+.mtr-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  height: 18px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: #f1f3f9;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.mtr-chip.no-ellipsis { flex: 0 0 auto; max-width: none; overflow: visible; text-overflow: clip; }
+.mtr-chip.tight { font-size: 9.2px; padding: 0 2px; }
+.mtr-chip:hover { background: rgba(255, 255, 255, 0.12); }
+
+.mtr-chip.locked {
+  color: #f0d0d8;
+  font-weight: 700;
+  background: rgba(240, 180, 196, 0.14);
+  border-color: rgba(240, 180, 196, 0.42);
+  box-shadow: 0 0 5px rgba(126, 180, 212, 0.16);
+}
+
+.mtr-chip.ignored {
+  opacity: 0.38;
+  color: #72788e;
+  text-decoration: line-through;
+}
+
+.mtr-sep {
+  flex: 0 0 auto;
+  height: 18px;
+  color: rgba(255, 255, 255, 0.25);
+  font-size: 8.5px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mtr-error {
+  grid-column: 1 / -1;
+  color: #ff9db1;
+  font-size: 10px;
+  padding: 6px;
+}
+
+/* ---- 标签编辑弹层 ---- */
+.mtr-popup {
+  position: fixed;
+  z-index: 100000;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(18, 20, 30, 0.98);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  color: #eef0f8;
+  font-size: 11px;
+}
+
+.mtr-popup-head { display: flex; align-items: baseline; gap: 6px; }
+.mtr-popup-eyebrow { color: #8c93ad; font-size: 10px; }
+.mtr-popup-head strong { font-size: 12px; }
+
+.mtr-flags { display: flex; gap: 6px; }
+
+.mtr-flag {
+  flex: 1 1 0;
+  height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #cfd4e6;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.mtr-flag.active {
+  color: #f0d0d8;
+  border-color: rgba(240, 180, 196, 0.5);
+  background: rgba(240, 180, 196, 0.16);
+}
+
+.mtr-input {
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: #eef0f8;
+  font-size: 11px;
+  outline: none;
+}
+
+.mtr-pool-head { color: #8c93ad; font-size: 10px; margin-top: 2px; }
+
+.mtr-pool {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mtr-pool-chip {
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.045);
+  color: #dfe3f0;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.mtr-pool-chip.active {
+  color: #f0d0d8;
+  border-color: rgba(240, 180, 196, 0.5);
+  background: rgba(240, 180, 196, 0.18);
+}

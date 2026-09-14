@@ -4,6 +4,7 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const MobilePresetCatalog = require('../mobile/preset-catalog.js');
+const MobilePresetEngine = require('../mobile/preset-engine.js');
 
 class Storage {
   constructor(values = {}) { this.values = new Map(Object.entries(values)); }
@@ -66,6 +67,7 @@ function loadApp(storage = new Storage()) {
     localStorage: storage,
     crypto: { randomUUID: () => 'test-client' },
     MobilePresetCatalog,
+    MobilePresetEngine,
     window: {
       MobileProgressStore: class {},
       MobileSingleFlight: class { constructor() {} },
@@ -75,6 +77,7 @@ function loadApp(storage = new Storage()) {
     },
   };
   context.window.MobilePresetCatalog = MobilePresetCatalog;
+  context.window.MobilePresetEngine = MobilePresetEngine;
   vm.createContext(context);
   const api = vm.runInContext(instrumented, context, { filename: 'mobile/app.js' });
   return { api, storage };

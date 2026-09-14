@@ -174,8 +174,72 @@ def _load_record(workflow_id: str) -> dict[str, Any]:
     return _read_json(path)
 
 
+# 电脑端"当前打开着哪个工作流"的标记；超时未收到心跳就当作已关闭。
+ACTIVE_WORKFLOW_PATH = PLUGIN_ROOT / ".runtime" / "active_workflow.json"
+ACTIVE_WORKFLOW_TTL_MS = 60000
+
+
+def _open_workflow_sources() -> set[str] | None:
+    """电脑端当前打开着的工作流来源集合；None = 标记失效（当作全关）。"""
+    try:
+        data = _read_json(ACTIVE_WORKFLOW_PATH)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    stamped = int(data.get("at") or 0)
+    if (time.time() * 1000 - stamped) > ACTIVE_WORKFLOW_TTL_MS:
+        return None
+    sources = data.get("sources")
+    if not isinstance(sources, list):
+        return None
+    return {str(item) for item in sources if isinstance(item, str) and item}
+
+
+def _remember_open_source(source: str) -> None:
+    """把刚同步的工作流来源并入"打开集合"，避免刚同步就被过滤掉。"""
+    if not source:
+        return
+    current = _open_workflow_sources() or set()
+    current.add(source)
+    try:
+        _write_json_atomic(
+            ACTIVE_WORKFLOW_PATH, {"sources": sorted(current), "at": int(time.time() * 1000)}
+        )
+    except OSError:
+        LOG.debug("[Mobile Remote] open workflow marker not written")
+
+
+# 「没保存就同步」产生的垃圾工作流：名字里带 Unsaved Workflow 的一律不收，见到就删。
+BLOCKED_WORKFLOW_NAME = re.compile(r"unsaved\s*workflow", re.IGNORECASE)
+
+
+def _blocked_workflow_name(name: Any) -> bool:
+    return bool(BLOCKED_WORKFLOW_NAME.search(str(name or "")))
+
+
+def _purge_blocked_records() -> int:
+    """删除目录里所有名字被拉黑的工作流记录，返回删除条数。"""
+    WORKFLOW_ROOT.mkdir(parents=True, exist_ok=True)
+    removed = 0
+    for path in WORKFLOW_ROOT.glob("*.json"):
+        try:
+            record = _read_json(path)
+        except Exception:
+            continue
+        if not _blocked_workflow_name(record.get("name")):
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            LOG.warning("[Mobile Remote] failed to remove blocked workflow %s", path)
+    return removed
+
+
 def _list_records() -> list[dict[str, Any]]:
     WORKFLOW_ROOT.mkdir(parents=True, exist_ok=True)
+    _purge_blocked_records()
     records: list[dict[str, Any]] = []
     for path in WORKFLOW_ROOT.glob("*.json"):
         try:
@@ -196,6 +260,9 @@ def _list_records() -> list[dict[str, Any]]:
             )
         except Exception as exc:
             LOG.warning("[Mobile Remote] ignoring unreadable workflow %s: %s", path, exc)
+    # 手机只读"电脑端当前打开着"的工作流：打开几个就显示几个，全部关掉就是空列表
+    open_sources = _open_workflow_sources()
+    records = [item for item in records if item.get("source") in open_sources] if open_sources else []
     records.sort(key=lambda item: (item.get("synced_at", 0), item.get("name", "")), reverse=True)
     return records
 
@@ -361,6 +428,13 @@ def _prompt_role_hints(prompt: dict[str, Any]) -> dict[str, str]:
     }
 
 
+# 自制节点上只给电脑端用的控件。手机端不应该把它们当成可编辑字段，
+# 否则手机界面上会凭空多出「标签模式」这类开关，操作手感就变了。
+NODE_HIDDEN_INPUTS: dict[str, frozenset[str]] = {
+    "MobileTagCLIPTextEncode": frozenset({"标签模式", "每次随机", "tag_mode"}),
+}
+
+
 def _infer_fields(prompt: Any) -> list[dict[str, Any]]:
     if not isinstance(prompt, dict):
         return []
@@ -380,6 +454,8 @@ def _infer_fields(prompt: Any) -> list[dict[str, Any]]:
         for input_name, value in inputs.items():
             input_name = str(input_name)
             if input_name.lower() in SENSITIVE_INPUT_NAMES or input_name.startswith("_"):
+                continue
+            if input_name in NODE_HIDDEN_INPUTS.get(class_type, ()):
                 continue
             if _is_link(value, prompt):
                 continue
@@ -1778,7 +1854,7 @@ def _get_mobile_jobs_payload(
 
 
 def _asset_response(filename: str) -> web.StreamResponse:
-    allowed = {"app.js", "settings-sync.js", "preset-catalog.js", "progress-sync.js", "styles.css", "icon.svg", "prompt-presets.json"}
+    allowed = {"app.js", "settings-sync.js", "preset-catalog.js", "preset-engine.js", "progress-sync.js", "styles.css", "icon.svg", "prompt-presets.json"}
     if filename not in allowed:
         raise web.HTTPNotFound()
     path = MOBILE_ROOT / filename
@@ -1902,6 +1978,22 @@ def register_routes() -> None:
     async def mobile_workflows(_request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "workflows": _list_records()}, headers=NO_CACHE)
 
+    @routes.post("/mobile/api/workflows/active")
+    async def mobile_set_active_workflow(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, web.HTTPBadRequest):
+            payload = {}
+        raw = (payload or {}).get("sources") if isinstance(payload, dict) else None
+        if not isinstance(raw, list):
+            raw = []
+        sources = sorted({str(item)[:500] for item in raw if isinstance(item, str) and item.strip()})
+        try:
+            _write_json_atomic(ACTIVE_WORKFLOW_PATH, {"sources": sources, "at": int(time.time() * 1000)})
+        except OSError as exc:
+            return _json_error("记录当前工作流失败", 500, str(exc))
+        return web.json_response({"ok": True, "sources": sources})
+
     @routes.post("/mobile/api/workflows/sync")
     async def mobile_sync_workflow(request: web.Request) -> web.Response:
         try:
@@ -1922,6 +2014,11 @@ def register_routes() -> None:
 
         raw_name = str(payload.get("name") or workflow.get("name") or "当前工作流").strip()
         name = re.sub(r"[\x00-\x1f]", "", raw_name)[:120] or "当前工作流"
+        if _blocked_workflow_name(name):
+            # 未保存的工作流不进手机列表；顺手把历史遗留的清掉
+            _purge_blocked_records()
+            LOG.info("[Mobile Remote] skipped unsaved workflow %r", name)
+            return web.json_response({"ok": True, "skipped": True, "workflow": {"id": "", "name": name, "field_count": 0}})
         source = str(payload.get("source") or workflow.get("id") or name)[:500]
         identity = str(workflow.get("id") or source or name)
         workflow_id = hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()[:20]
@@ -1939,6 +2036,7 @@ def register_routes() -> None:
         except OSError as exc:
             LOG.exception("[Mobile Remote] failed to store workflow")
             return _json_error("保存工作流失败", 500, str(exc))
+        _remember_open_source(source)
         fields = _infer_fields(prompt)
         return web.json_response(
             {
