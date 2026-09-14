@@ -75,5 +75,35 @@ class ApplyUpdateTests(unittest.TestCase):
             self.assertIn(name, server.UPDATE_SKIP_NAMES)
 
 
+    def test_stale_project_files_are_removed_but_personal_data_is_safe(self):
+        with tempfile.TemporaryDirectory(prefix="upd-stale-") as tmp:
+            base = Path(tmp)
+            target, source, backup = base / "plugin", base / "src", base / "bak"
+            _write(target, "server.py", "old")
+            _write(target, "web/removed.js", "gone in new version")
+            _write(target, "mobile_settings.json", "PERSONAL")
+            _write(target, "workflows/keep.json", "PERSONAL")
+            _write(source, "server.py", "new")
+            _write(source, "web/remote.js", "new")
+            result = server._apply_update_files(source, target, backup)
+            self.assertTrue(result["ok"])
+            self.assertFalse((target / "web/removed.js").exists())
+            self.assertEqual(result["removed"], ["web/removed.js"])
+            self.assertEqual((target / "mobile_settings.json").read_text(encoding="utf-8"), "PERSONAL")
+            self.assertEqual((target / "workflows/keep.json").read_text(encoding="utf-8"), "PERSONAL")
+
+    def test_backup_pruning_keeps_only_recent(self):
+        with tempfile.TemporaryDirectory(prefix="upd-prune-") as tmp:
+            runtime = Path(tmp) / ".runtime"
+            for name in ("backup-20260101-000000", "backup-20260102-000000", "backup-20260103-000000"):
+                (runtime / name).mkdir(parents=True)
+            (runtime / "backup-20260103-000000" / "server.py").write_text("x", encoding="utf-8")
+            with mock.patch.object(server, "PLUGIN_ROOT", Path(tmp)):
+                removed = server._prune_backups()
+            self.assertEqual(removed, 1)
+            left = sorted(p.name for p in runtime.glob("backup-*"))
+            self.assertEqual(left, ["backup-20260102-000000", "backup-20260103-000000"])
+
+
 if __name__ == "__main__":
     unittest.main()

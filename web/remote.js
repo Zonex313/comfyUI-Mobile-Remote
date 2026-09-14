@@ -236,7 +236,11 @@ function mountPanel(container) {
     state.busy = true;
     paint();
     try {
-      const response = await fetch(`${UPDATE_API}/apply?confirm=1`, { method: "POST", cache: "no-store" });
+      const confirmed = encodeURIComponent(state.info?.latest || "");
+      const response = await fetch(`${UPDATE_API}/apply?confirm=1&version=${confirmed}`, {
+        method: "POST",
+        cache: "no-store",
+      });
       const body = await response.json();
       if (body?.ok) {
         state.hasUpdate = false;

@@ -274,10 +274,32 @@ def _update_plan(archive_path: Path) -> dict[str, Any]:
             continue
         rel = path.relative_to(root)
         if rel.parts[0] in UPDATE_SKIP_NAMES or rel.name in UPDATE_SKIP_NAMES:
-            skip.append(str(rel))
+            skip.append(rel.as_posix())
         else:
-            replace.append(str(rel))
+            replace.append(rel.as_posix())
     return {"work": work, "root": root, "replace": replace, "skip": skip}
+
+
+UPDATE_BACKUP_KEEP = 2
+# 只有这些后缀才允许被"删除旧文件"逻辑清理，避免误删
+UPDATE_SAFE_SUFFIXES = {".py", ".js", ".css", ".html", ".toml", ".md", ".json", ".txt", ".svg", ".yml", ".yaml"}
+
+
+def _prune_backups() -> int:
+    """备份只保留最近 UPDATE_BACKUP_KEEP 份，其余删掉。"""
+    root = PLUGIN_ROOT / ".runtime"
+    if not root.is_dir():
+        return 0
+    backups = sorted(
+        (path for path in root.glob("backup-*") if path.is_dir()),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    removed = 0
+    for stale in backups[UPDATE_BACKUP_KEEP:]:
+        shutil.rmtree(stale, ignore_errors=True)
+        removed += 1
+    return removed
 
 
 def _apply_update_files(source_root: Path, target_root: Path, backup_root: Path) -> dict[str, Any]:
@@ -287,6 +309,7 @@ def _apply_update_files(source_root: Path, target_root: Path, backup_root: Path)
     个人数据不在归档里，也不会被碰。
     """
     copied: list[str] = []
+    removed: list[str] = []
     backup_root.mkdir(parents=True, exist_ok=True)
     restored = False
     try:
@@ -299,16 +322,33 @@ def _apply_update_files(source_root: Path, target_root: Path, backup_root: Path)
             destination = backup_root / rel
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, destination)
+        source_files: set[str] = set()
         for path in sorted(source_root.rglob("*")):
             if not path.is_file():
                 continue
             rel = path.relative_to(source_root)
             if rel.parts[0] in UPDATE_SKIP_NAMES or rel.name in UPDATE_SKIP_NAMES:
                 continue
+            source_files.add(rel.as_posix())
             destination = target_root / rel
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, destination)
-            copied.append(str(rel))
+            copied.append(rel.as_posix())
+        # 新版里删掉的文件，本地也要删掉：只处理归档里有的顶层目录 + 安全后缀
+        source_dirs = {name.split("/", 1)[0] for name in source_files}
+        for path in sorted(target_root.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(target_root)
+            if rel.parts[0] in UPDATE_SKIP_NAMES or rel.name in UPDATE_SKIP_NAMES:
+                continue
+            if rel.parts[0] not in source_dirs:
+                continue
+            if path.suffix.lower() not in UPDATE_SAFE_SUFFIXES:
+                continue
+            if rel.as_posix() not in source_files:
+                path.unlink()
+                removed.append(rel.as_posix())
     except Exception:
         LOG.exception("[Mobile Remote] update failed, rolling back")
         try:
@@ -322,8 +362,8 @@ def _apply_update_files(source_root: Path, target_root: Path, backup_root: Path)
             restored = True
         except Exception:
             LOG.exception("[Mobile Remote] rollback failed")
-        return {"ok": False, "copied": copied, "restored": restored, "error": "更新失败，已尝试回滚"}
-    return {"ok": True, "copied": copied, "restored": False, "error": ""}
+        return {"ok": False, "copied": copied, "removed": removed, "restored": restored, "error": "更新失败，已尝试回滚"}
+    return {"ok": True, "copied": copied, "removed": removed, "restored": False, "error": ""}
 
 
 def _fetch_remote_version() -> str:
@@ -2110,7 +2150,7 @@ def register_routes() -> None:
                 "gpu": gpu,
                 "tailscale_ips": tailscale_ips,
                 "mobile_urls": [f"http://{address}:{port}/mobile" for address in tailscale_ips],
-                "version": "0.2.0",
+                "version": "0.2.1",
                 "time": int(time.time() * 1000),
             },
             headers=NO_CACHE,
@@ -2158,6 +2198,11 @@ def register_routes() -> None:
             return web.json_response({"ok": False, "error": f"读取远端版本失败：{exc}"})
         if not force and not _version_newer(latest, current):
             return web.json_response({"ok": False, "error": f"已经是最新版本 {current}"})
+        expect = str(request.query.get("version") or "").lstrip("vV")
+        if expect and expect != latest:
+            return web.json_response(
+                {"ok": False, "error": f"远端版本已变成 {latest}，请重新点一次「检查更新」"}
+            )
         zip_url = f"https://github.com/{UPDATE_REPO}/archive/refs/tags/v{latest}.zip"
         try:
             archive_path = await asyncio.to_thread(_download_update_zip, zip_url)
