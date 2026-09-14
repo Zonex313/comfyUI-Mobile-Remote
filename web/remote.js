@@ -374,7 +374,7 @@ function mountPanel(container) {
     element("p", "mobile-remote-note", "适合经常用、要看大图或长时间开着。第一次配好之后，之后几乎不用管。"),
   );
   compare.append(cloudCol, tailCol);
-  const tips = element("p", "mobile-remote-note", "两者均为免费服务，都是加密通道，请只把链接留给自己。Cloudflare 谁拿到链接都能打开；Tailscale 只有你账号下的设备能进。");
+  const tips = element("p", "mobile-remote-note", "两者均为免费加密通道，Cloudflare 谁拿到链接都能打开；Tailscale 只有你账号下的设备能进。");
   function platformGuide(title, items) {
     const block = element("div", "mobile-remote-guide-block");
     block.append(element("strong", "", title), list(items, true));
