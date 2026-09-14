@@ -171,6 +171,73 @@ def _load_record(workflow_id: str) -> dict[str, Any]:
     return _read_json(path)
 
 
+# ---- 版本检测 ----------------------------------------------------------
+UPDATE_REPO = "Zonex313/comfyUI-Mobile-Remote"
+UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_TTL_MS = 6 * 60 * 60 * 1000
+UPDATE_CACHE: dict[str, Any] = {"at": 0, "data": None}
+
+
+def _plugin_version() -> str:
+    try:
+        text = (PLUGIN_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        match = re.search(r'version\s*=\s*"([^"]+)"', text)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return "0.0.0"
+
+
+def _version_key(value: Any) -> tuple[int, ...]:
+    parts = [int(item) for item in re.findall(r"\d+", str(value or ""))]
+    return tuple(parts[:3]) if parts else (0,)
+
+
+def _version_newer(latest: Any, current: Any) -> bool:
+    return _version_key(latest) > _version_key(current)
+
+
+def _system_proxy() -> str:
+    """ComfyUI 自带的 python 不读系统代理，这里从注册表取一次。"""
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ) as key:
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            if not enabled:
+                return ""
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+    except Exception:
+        return ""
+    server = str(server or "").strip()
+    if not server:
+        return ""
+    if "=" in server:  # 形如 http=host:port;https=host:port
+        parts = dict(item.split("=", 1) for item in server.split(";") if "=" in item)
+        server = parts.get("https") or parts.get("http") or ""
+    if not server:
+        return ""
+    return server if "://" in server else f"http://{server}"
+
+
+def _fetch_latest_release() -> dict[str, Any]:
+    import urllib.request
+
+    request = urllib.request.Request(
+        UPDATE_API,
+        headers={"User-Agent": "ComfyUI-Mobile-Remote", "Accept": "application/vnd.github+json"},
+    )
+    proxy = _system_proxy()
+    handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy})] if proxy else []
+    opener = urllib.request.build_opener(*handlers)
+    with opener.open(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 # 电脑端"当前打开着哪个工作流"的标记；超时未收到心跳就当作已关闭。
 ACTIVE_WORKFLOW_PATH = PLUGIN_ROOT / ".runtime" / "active_workflow.json"
 ACTIVE_WORKFLOW_TTL_MS = 60000
@@ -1974,6 +2041,36 @@ def register_routes() -> None:
     @routes.get("/mobile/api/workflows")
     async def mobile_workflows(_request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "workflows": _list_records()}, headers=NO_CACHE)
+
+    @routes.get("/mobile/api/update")
+    async def mobile_check_update(request: web.Request) -> web.Response:
+        force = request.query.get("force") == "1"
+        now = int(time.time() * 1000)
+        cached = UPDATE_CACHE.get("data")
+        if not force and isinstance(cached, dict) and (now - int(UPDATE_CACHE.get("at") or 0)) < UPDATE_TTL_MS:
+            return web.json_response(cached)
+        current = _plugin_version()
+        try:
+            release = await asyncio.to_thread(_fetch_latest_release)
+        except Exception as exc:
+            LOG.info("[Mobile Remote] update check failed: %s", exc)
+            return web.json_response(
+                {"ok": False, "current": current, "error": "连接 GitHub 失败，请检查网络或代理"}
+            )
+        latest = str(release.get("tag_name") or "").lstrip("vV")
+        payload = {
+            "ok": True,
+            "current": current,
+            "latest": latest,
+            "has_update": _version_newer(latest, current),
+            "name": str(release.get("name") or release.get("tag_name") or ""),
+            "notes": str(release.get("body") or "")[:4000],
+            "published_at": str(release.get("published_at") or ""),
+            "html_url": str(release.get("html_url") or ""),
+            "zip_url": str(release.get("zipball_url") or ""),
+        }
+        UPDATE_CACHE.update({"at": now, "data": payload})
+        return web.json_response(payload)
 
     @routes.post("/mobile/api/workflows/active")
     async def mobile_set_active_workflow(request: web.Request) -> web.Response:
