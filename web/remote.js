@@ -117,6 +117,7 @@ const UPDATE_API = "/mobile/api/update";
 function makeUpdateButton(onApply) {
   const entry = button("检查更新", "refresh", "检查更新");
   entry.node.classList.add("mobile-remote-update");
+  entry.glyph?.remove(); // 只要文字，不要图标
   const state = { hasUpdate: false, info: null, busy: false };
 
   const paint = () => {

@@ -173,7 +173,9 @@ def _load_record(workflow_id: str) -> dict[str, Any]:
 
 # ---- 版本检测 ----------------------------------------------------------
 UPDATE_REPO = "Zonex313/comfyUI-Mobile-Remote"
-UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+# 不用 GitHub API：未认证的 API 每小时只给 60 次，代理 IP 还是共享的，很容易 403。
+# 直接读仓库里的版本文件，走 raw 域名，没有这个限制。
+UPDATE_VERSION_URL = f"https://raw.githubusercontent.com/{UPDATE_REPO}/master/pyproject.toml"
 UPDATE_TTL_MS = 6 * 60 * 60 * 1000
 UPDATE_CACHE: dict[str, Any] = {"at": 0, "data": None}
 
@@ -224,18 +226,22 @@ def _system_proxy() -> str:
     return server if "://" in server else f"http://{server}"
 
 
-def _fetch_latest_release() -> dict[str, Any]:
+def _fetch_remote_version() -> str:
     import urllib.request
 
     request = urllib.request.Request(
-        UPDATE_API,
-        headers={"User-Agent": "ComfyUI-Mobile-Remote", "Accept": "application/vnd.github+json"},
+        UPDATE_VERSION_URL,
+        headers={"User-Agent": "ComfyUI-Mobile-Remote", "Cache-Control": "no-cache"},
     )
     proxy = _system_proxy()
     handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy})] if proxy else []
     opener = urllib.request.build_opener(*handlers)
     with opener.open(request, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
+        text = response.read().decode("utf-8", errors="replace")
+    match = re.search(r'version\s*=\s*"([^"]+)"', text)
+    if not match:
+        raise ValueError("远端版本文件格式不对")
+    return match.group(1)
 
 
 # 电脑端"当前打开着哪个工作流"的标记；超时未收到心跳就当作已关闭。
@@ -2051,23 +2057,22 @@ def register_routes() -> None:
             return web.json_response(cached)
         current = _plugin_version()
         try:
-            release = await asyncio.to_thread(_fetch_latest_release)
+            latest = await asyncio.to_thread(_fetch_remote_version)
         except Exception as exc:
             LOG.info("[Mobile Remote] update check failed: %s", exc)
             return web.json_response(
-                {"ok": False, "current": current, "error": "连接 GitHub 失败，请检查网络或代理"}
+                {"ok": False, "current": current, "error": f"连接 GitHub 失败：{exc}"}
             )
-        latest = str(release.get("tag_name") or "").lstrip("vV")
         payload = {
             "ok": True,
             "current": current,
             "latest": latest,
             "has_update": _version_newer(latest, current),
-            "name": str(release.get("name") or release.get("tag_name") or ""),
-            "notes": str(release.get("body") or "")[:4000],
-            "published_at": str(release.get("published_at") or ""),
-            "html_url": str(release.get("html_url") or ""),
-            "zip_url": str(release.get("zipball_url") or ""),
+            "name": f"v{latest}",
+            "notes": "",
+            "published_at": "",
+            "html_url": f"https://github.com/{UPDATE_REPO}/releases/tag/v{latest}",
+            "zip_url": f"https://github.com/{UPDATE_REPO}/archive/refs/tags/v{latest}.zip",
         }
         UPDATE_CACHE.update({"at": now, "data": payload})
         return web.json_response(payload)
