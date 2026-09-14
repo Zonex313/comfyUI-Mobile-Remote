@@ -176,7 +176,9 @@ function mountPanel(container) {
     const title = element("h3", "mobile-remote-card-title", name);
     title.id = `mobile-remote-${kind}-title`;
     card.setAttribute("aria-labelledby", title.id);
-    titleGroup.append(title, element("p", "mobile-remote-subtitle", subtitle));
+    titleGroup.append(title);
+    // 副标题留空就整行不渲染（标题已经自带说明时不需要重复一行）
+    if (subtitle) titleGroup.append(element("p", "mobile-remote-subtitle", subtitle));
     const status = element("span", "mobile-remote-status", "读取中");
     status.dataset.tone = "muted";
     status.setAttribute("role", "status");
@@ -310,7 +312,7 @@ function mountPanel(container) {
   if (workflowNote?.parentElement) workflowNote.before(nodeCard);
   else connectView.append(nodeCard);
 
-  const cloud = makeCard("Cloudflare", "cloud", "临时公网");
+  const cloud = makeCard("Cloudflare丨临时公网", "cloud", "");
   const tunnelActions = element("div", "mobile-remote-tunnel-actions");
   const toggleButton = button("连接 Cloudflare", "play", "连接");
   toggleButton.node.classList.add("mobile-remote-primary");
@@ -330,7 +332,7 @@ function mountPanel(container) {
     element("p", "mobile-remote-note", "手机浏览器输入上方网址即可，重启后网址会变化"),
   );
 
-  const tail = makeCard("Tailscale", "tailscale", "私人网络");
+  const tail = makeCard("Tailscale丨私人网络", "tailscale", "");
   const tailChoice = element("select", "mobile-remote-select");
   tailChoice.setAttribute("aria-label", "选择 Tailscale 地址");
   tailChoice.hidden = true;
