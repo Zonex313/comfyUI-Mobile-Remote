@@ -173,7 +173,16 @@ function mountPanel(container) {
     const card = element("section", `mobile-remote-card mobile-remote-${kind}`);
     const cardHeader = element("div", "mobile-remote-card-header");
     const titleGroup = element("div", "mobile-remote-card-title-group");
-    const title = element("h3", "mobile-remote-card-title", name);
+    // 标题里用「丨」分隔的部分不加粗（例如 Cloudflare丨临时公网）
+    const title = element("h3", "mobile-remote-card-title");
+    const [titleHead, ...titleRest] = String(name).split("丨");
+    title.append(element("span", "", titleHead));
+    if (titleRest.length) {
+      const soft = element("span", "", "丨" + titleRest.join("丨"));
+      soft.style.fontWeight = "400";
+      soft.style.opacity = "0.75";
+      title.append(soft);
+    }
     title.id = `mobile-remote-${kind}-title`;
     card.setAttribute("aria-labelledby", title.id);
     titleGroup.append(title);
