@@ -226,6 +226,60 @@ def _system_proxy() -> str:
     return server if "://" in server else f"http://{server}"
 
 
+# 更新时永远不碰这些：个人数据与运行产物
+UPDATE_SKIP_NAMES = {
+    "mobile_settings.json",
+    "mobile_settings.json.bak",
+    "mobile_history.json",
+    "mobile_favorites.json",
+    "remote_settings.json",
+    ".runtime",
+    "favorite_files",
+    "workflows",
+    "drafts",
+    "__pycache__",
+    ".git",
+    ".github",
+}
+
+
+def _download_update_zip(url: str) -> Path:
+    import tempfile
+    import urllib.request
+
+    request = urllib.request.Request(url, headers={"User-Agent": "ComfyUI-Mobile-Remote"})
+    proxy = _system_proxy()
+    handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy})] if proxy else []
+    opener = urllib.request.build_opener(*handlers)
+    target = Path(tempfile.mkdtemp(prefix="mobile-update-")) / "release.zip"
+    with opener.open(request, timeout=120) as response, target.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
+    return target
+
+
+def _update_plan(archive_path: Path) -> dict[str, Any]:
+    """解压到临时目录并算出"会替换什么、会跳过什么"。只读，不碰插件目录。"""
+    import tempfile
+    import zipfile
+
+    work = Path(tempfile.mkdtemp(prefix="mobile-update-x-"))
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(work)
+    children = [child for child in work.iterdir() if child.is_dir()]
+    root = children[0] if len(children) == 1 else work
+    replace: list[str] = []
+    skip: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root)
+        if rel.parts[0] in UPDATE_SKIP_NAMES or rel.name in UPDATE_SKIP_NAMES:
+            skip.append(str(rel))
+        else:
+            replace.append(str(rel))
+    return {"work": work, "root": root, "replace": replace, "skip": skip}
+
+
 def _fetch_remote_version() -> str:
     import urllib.request
 
@@ -2047,6 +2101,42 @@ def register_routes() -> None:
     @routes.get("/mobile/api/workflows")
     async def mobile_workflows(_request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "workflows": _list_records()}, headers=NO_CACHE)
+
+    @routes.post("/mobile/api/update/apply")
+    async def mobile_apply_update(request: web.Request) -> web.Response:
+        force = request.query.get("force") == "1"
+        current = _plugin_version()
+        try:
+            latest = await asyncio.to_thread(_fetch_remote_version)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": f"读取远端版本失败：{exc}"})
+        if not force and not _version_newer(latest, current):
+            return web.json_response({"ok": False, "error": f"已经是最新版本 {current}"})
+        zip_url = f"https://github.com/{UPDATE_REPO}/archive/refs/tags/v{latest}.zip"
+        try:
+            archive_path = await asyncio.to_thread(_download_update_zip, zip_url)
+            plan = await asyncio.to_thread(_update_plan, archive_path)
+        except Exception as exc:
+            LOG.info("[Mobile Remote] update download failed: %s", exc)
+            return web.json_response({"ok": False, "error": f"下载或解压失败：{exc}"})
+        LOG.info(
+            "[Mobile Remote] update plan: %d replace / %d skip (dry run)",
+            len(plan["replace"]),
+            len(plan["skip"]),
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "dry_run": True,
+                "current": current,
+                "latest": latest,
+                "zip_url": zip_url,
+                "replace_count": len(plan["replace"]),
+                "skip_count": len(plan["skip"]),
+                "will_replace": plan["replace"][:400],
+                "will_skip": plan["skip"][:80],
+            }
+        )
 
     @routes.get("/mobile/api/update")
     async def mobile_check_update(request: web.Request) -> web.Response:
