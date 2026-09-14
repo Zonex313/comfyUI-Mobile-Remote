@@ -298,23 +298,17 @@ function mountPanel(container) {
   const nodeCard = element("section", "mobile-remote-card");
   const nodeButton = button("把随机标签节点加入画布", "plus", "加入随机标签节点");
   nodeButton.node.classList.add("mobile-remote-primary");
-  const nodeNote = element(
-    "p",
-    "mobile-remote-note",
-    "点一下就把「CLIP文本编码丨随机标签」放到画布中央，接上 CLIP 与提示词即可使用",
-  );
   nodeButton.node.addEventListener("click", () => {
     const error = addTagNodeToCanvas();
     const original = "加入随机标签节点";
     nodeButton.caption.textContent = error ? "加入失败" : "已加入画布";
-    nodeNote.textContent = error || "已放到画布中央，可拖动到合适位置";
-    window.setTimeout(() => {
-      nodeButton.caption.textContent = original;
-      nodeNote.textContent = "点一下就把「CLIP文本编码丨随机标签」放到画布中央，接上 CLIP 与提示词即可使用";
-    }, 2000);
+    window.setTimeout(() => { nodeButton.caption.textContent = original; }, 2000);
   });
-  nodeCard.append(nodeButton.node, nodeNote);
-  connectView.append(nodeCard);
+  nodeCard.append(nodeButton.node);
+  // 上移一行：排在公网链接警告下面、「工作流处于打开状态」那句提示上面
+  // （workflowNote 是上面那句提示的元素，直接用，别再声明同名变量）
+  if (workflowNote?.parentElement) workflowNote.before(nodeCard);
+  else connectView.append(nodeCard);
 
   const cloud = makeCard("Cloudflare", "cloud", "临时公网");
   const tunnelActions = element("div", "mobile-remote-tunnel-actions");
