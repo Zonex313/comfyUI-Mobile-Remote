@@ -5,6 +5,8 @@
   // 关闭大图后短暂屏蔽底部导航：关闭按钮正压在「设置」标签正上方，
   // 若画面尚未落帧，用户的第二下点击会穿透到导航并误切页面。
   const GALLERY_CLOSE_GUARD_MS = 450;
+  // 队列/历史首屏只拉最近这么多条，翻历史时再用 offset 分段往更早的补（省流量）。
+  const JOBS_PAGE = 60;
   const state = {
     online: false,
     status: null,
@@ -13,6 +15,12 @@
     values: {},
     jobs: [],
     totalJobs: 0,
+    jobsFirstPage: [],
+    jobsOlderPages: [],
+    jobsLoadedCount: 0,
+    jobsPageOffset: 0,
+    jobsHasMore: false,
+    jobsMoreLoading: false,
     activeJob: null,
     currentJobId: "",
     progress: new window.MobileProgressStore(),
@@ -2434,6 +2442,7 @@
         : (state.favoritesOnly ? "暂无收藏" : `${jobs.length} 条记录`),
     );
     $("historyEmpty").classList.toggle("hidden", entries.length !== 0);
+    paintHistoryMore();
 
     const grid = $("historyGrid");
     if (signature === state.historyRenderSignature && grid.childElementCount === entries.length) {
@@ -2513,27 +2522,142 @@
     setText("progressLabel", display.label);
   }
 
-  let jobsLoadSequence = 0;
-  async function loadJobsOnce() {
-    const sequence = ++jobsLoadSequence;
-    const body = await requestJson(`/mobile/api/jobs?limit=500&summary=1&_=${Date.now()}`);
-    if (sequence !== jobsLoadSequence) return;
-    const incoming = body.jobs || [];
-    const incomingIds = new Set(incoming.map((job) => String(job.id)));
+  function byCreateTimeDesc(left, right) {
+    return (Number(right?.create_time) || 0) - (Number(left?.create_time) || 0);
+  }
+
+  // state.jobs 的拼装：第一页在前、已翻出来的更早页在后，按 id 去重（第一页优先），
+  // 再补上还没落到服务器列表里的乐观任务，最后整体按 create_time 倒序。
+  function mergeJobPages() {
+    const seen = new Set();
+    const merged = [];
+    const take = (job) => {
+      const id = job == null ? "" : String(job.id ?? "");
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      merged.push(job);
+    };
+    state.jobsFirstPage.forEach(take);
+    state.jobsOlderPages.forEach(take);
+    state.jobsLoadedCount = merged.length;
     for (const [id, job] of state.optimisticJobs) {
-      if (incomingIds.has(id) || Date.now() - job.create_time > 30000) state.optimisticJobs.delete(id);
-      else incoming.unshift(job);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      merged.push(job);
     }
-    state.jobs = incoming;
-    state.totalJobs = body.total || state.jobs.length;
+    merged.sort(byCreateTimeDesc);
+    state.jobs = merged;
+  }
+
+  function applyJobPages() {
+    mergeJobPages();
     renderQueue();
     renderHistory();
     updateActiveJob();
   }
 
+  // 翻到更早的分页结果同样要保留接口给的字段形状，这里只做拼接，不加工条目内容。
+  function appendOlderJobs(incoming) {
+    const known = new Set();
+    state.jobsFirstPage.forEach((job) => known.add(String(job.id)));
+    state.jobsOlderPages.forEach((job) => known.add(String(job.id)));
+    const added = [];
+    incoming.forEach((job) => {
+      const id = job == null ? "" : String(job.id ?? "");
+      if (!id || known.has(id)) return;
+      known.add(id);
+      added.push(job);
+    });
+    state.jobsOlderPages = state.jobsOlderPages.concat(added);
+    return added.length;
+  }
+
+  // 「加载更早的」按钮就挂在 #historyGrid 后面，只在还能往回翻时出现。
+  function historyMoreButton() {
+    const existing = $("historyMoreButton");
+    if (existing) return existing;
+    const grid = $("historyGrid");
+    if (!grid) return null;
+    const button = document.createElement("button");
+    button.id = "historyMoreButton";
+    button.type = "button";
+    button.className = "secondary-button full hidden";
+    button.textContent = "加载更早的";
+    button.addEventListener("click", () => {
+      loadMoreJobs().catch(() => {});
+    });
+    grid.insertAdjacentElement("afterend", button);
+    return button;
+  }
+
+  function paintHistoryMore() {
+    const button = historyMoreButton();
+    if (!button) return;
+    const busy = state.jobsMoreLoading;
+    // has_more 说的是「offset=0 时后面还有」，全部翻完之后轮询仍会带 true，
+    // 所以再要求「已加载条数还没追上 total」，否则按钮会在翻完后又冒出来。
+    // 用「窗口游标」判断，而不是已加载条数：首屏会额外带回全部收藏任务
+    // （favorite_extra），已加载条数会虚高，拿它判断会让按钮提前消失、剩下的更早记录翻不到。
+    const visible = busy || (state.jobsHasMore && state.jobsPageOffset < state.totalJobs);
+    button.classList.toggle("hidden", !visible);
+    if (button.disabled !== busy) button.disabled = busy;
+    button.setAttribute("aria-busy", String(busy));
+    const label = busy ? "加载中…" : "加载更早的";
+    if (button.textContent !== label) button.textContent = label;
+  }
+
+  let jobsLoadSequence = 0;
+  async function loadJobsOnce() {
+    const sequence = ++jobsLoadSequence;
+    const body = await requestJson(`/mobile/api/jobs?limit=${JOBS_PAGE}&summary=1&_=${Date.now()}`);
+    if (sequence !== jobsLoadSequence) return;
+    const incoming = Array.isArray(body.jobs) ? body.jobs : [];
+    const incomingIds = new Set(incoming.map((job) => String(job.id)));
+    for (const [id, job] of state.optimisticJobs) {
+      if (incomingIds.has(id) || Date.now() - job.create_time > 30000) state.optimisticJobs.delete(id);
+    }
+    // 轮询只覆盖第一页，已经翻出来的更早页（state.jobsOlderPages）原样留着。
+    state.jobsFirstPage = incoming;
+    state.totalJobs = Math.max(Number(body.total) || 0, incoming.length);
+    state.jobsHasMore = Boolean(body.has_more);
+    // 翻页游标只往前：刷新第一页不能把它退回去，否则会把翻过的旧页再拉一遍。
+    state.jobsPageOffset = Math.max(state.jobsPageOffset, JOBS_PAGE);
+    applyJobPages();
+  }
+
   const jobsRefresh = new window.MobileSingleFlight(loadJobsOnce);
   function loadJobs(urgent = false) {
     return jobsRefresh.run(urgent);
+  }
+
+  async function loadMoreJobsOnce() {
+    // offset 用「已消费的服务器列表窗口位置」，而不是 state.jobs.length：
+    // 运行中/排队中的任务和收藏置顶每一页都会被塞回来，去重后的条数可能大于窗口位置，
+    // 拿它当 offset 会把夹在窗口中间的那几条永久跳过。
+    const offset = state.jobsPageOffset;
+    const body = await requestJson(`/mobile/api/jobs?limit=${JOBS_PAGE}&offset=${offset}&summary=1&_=${Date.now()}`);
+    const incoming = Array.isArray(body.jobs) ? body.jobs : [];
+    appendOlderJobs(incoming);
+    state.jobsPageOffset = offset + JOBS_PAGE;
+    state.jobsHasMore = Boolean(body.has_more);
+    const total = Number(body.total);
+    if (Number.isFinite(total) && total > 0) state.totalJobs = total;
+    applyJobPages();
+  }
+
+  const jobsMoreRefresh = new window.MobileSingleFlight(loadMoreJobsOnce);
+  async function loadMoreJobs() {
+    if (state.jobsMoreLoading) return;
+    state.jobsMoreLoading = true;
+    paintHistoryMore();
+    try {
+      await jobsMoreRefresh.run(true);
+    } catch (error) {
+      toast(error.message || "更早的记录读取失败", "error");
+    } finally {
+      state.jobsMoreLoading = false;
+      paintHistoryMore();
+    }
   }
 
   async function loadProgressOnce() {

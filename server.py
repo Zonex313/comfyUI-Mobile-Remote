@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gzip
 import hashlib
 import ipaddress
 import json
@@ -31,6 +32,7 @@ FAVORITE_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 HISTORY_MAX_ITEMS = 500
 HISTORY_SYNC_INTERVAL = 15.0
 NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+GZIP_MIN_BYTES = 1024   # 小于这个体积就不值得压：gzip 头 + 手机端解压开销比省下的还多
 MEDIA_CACHE = {"Cache-Control": "private, max-age=86400"}
 LOG = logging.getLogger("comfyui.mobile_remote")
 ROUTES_REGISTERED = False
@@ -1768,6 +1770,43 @@ def _mark_favorite_extra(jobs: list[dict[str, Any]], limit: int) -> list[dict[st
     return jobs
 
 
+FAVORITE_EXTRA_MAX = 400   # 首屏最多额外带这么多收藏任务，防收藏量极大时把首屏撑回去
+
+
+def _favorite_extra_jobs(
+    entries: list[dict[str, Any]],
+    present_ids: set[str],
+    history: dict[str, Any],
+    favorite_ids: set[str],
+) -> list[dict[str, Any]]:
+    """首屏额外带上收藏任务，全部标成 favorite_extra。
+
+    动机：手机端首屏只拉最近 N 条，而收藏往往散落在很旧的位置
+    （实测本机 158 个收藏任务没有一个落在最新 60 条里），
+    不额外带上的话「只看收藏」视图会直接变成空白。
+    手机端的按时间列表会把 favorite_extra 过滤掉，只有收藏视图会显示它们，
+    所以正常历史列表不受影响；翻页也不会再重复带（客户端按 id 去重）。
+    """
+    extras: list[dict[str, Any]] = []
+    for entry in entries:
+        if len(extras) >= FAVORITE_EXTRA_MAX:
+            break
+        job_id = entry["id"]
+        if job_id in present_ids or job_id not in favorite_ids:
+            continue
+        if entry["kind"] == "favorite":
+            job = _favorite_only_job(job_id)
+        elif entry["kind"] == "live":
+            job = _decorate_job(entry["job"], history.get(job_id))
+        else:
+            job = _decorate_job(_persisted_job(job_id, entry["entry"]), entry["entry"])
+        if job is None:
+            continue
+        job["favorite_extra"] = True
+        extras.append(job)
+    return extras
+
+
 def _history_entry_status(entry: dict[str, Any]) -> str:
     status_info = entry.get("status") or {}
     interrupted = False
@@ -2138,69 +2177,151 @@ def _favorite_only_job(job_id: str) -> dict[str, Any] | None:
     return job
 
 
+def _json_bytes(payload: Any) -> bytes:
+    """紧凑 UTF-8 JSON，字段顺序和 web.json_response 一致。"""
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _gzip_json_bytes(payload: Any, raw: bytes | None = None) -> bytes:
+    """把 payload 压成 gzip（level 1）。
+
+    level 1 是实测最划算的一档：382KB 的任务列表压到约 35KB、耗时 1 毫秒出头；
+    再高一档省不了多少字节，CPU 却要翻几倍。raw 可以传入已序列化好的字节，省一次 json.dumps。
+    """
+    return gzip.compress(raw if raw is not None else _json_bytes(payload), 1)
+
+
+def _client_accepts_gzip(request: web.Request) -> bool:
+    return "gzip" in str(request.headers.get("Accept-Encoding", "")).lower()
+
+
+def _mobile_jobs_response(payload: dict[str, Any], accepts_gzip: bool) -> web.Response:
+    """把任务列表包成响应；序列化和压缩都在这里做完（调用方丢进线程执行）。"""
+    raw = _json_bytes(payload)
+    body = raw
+    compressed = False
+    if accepts_gzip and len(raw) > GZIP_MIN_BYTES:
+        packed = _gzip_json_bytes(payload, raw)
+        # 压不动的东西（已经很小或不重复）就别压，白让手机解一遍
+        if len(packed) < len(raw):
+            body = packed
+            compressed = True
+    headers = dict(NO_CACHE)
+    headers["Content-Type"] = "application/json"
+    if compressed:
+        headers["Content-Encoding"] = "gzip"
+    return web.Response(body=body, headers=headers)
+
+
 def _get_mobile_jobs_payload(
     limit: int,
     offset: int,
     statuses: list[str],
     summary: bool = False,
 ) -> dict[str, Any]:
-    """Build the mobile jobs response away from the aiohttp event loop."""
+    """Build the mobile jobs response away from the aiohttp event loop.
+
+    分页分两步走：
+    1) 先拼出「完整列表」并按 create_time 倒序排好。这一步只用 id/status/create_time
+       这类便宜字段（实时任务由 get_all_jobs 给出，历史条目只取索引里的时间戳），
+       绝不调用 _decorate_job —— 它要查磁盘、建缩略图，几百条跑一遍就是好几秒。
+    2) 先按 offset/limit 切片，再把「运行中/排队中」无条件并进这一页，
+       最后也只装饰这一页。
+    """
     from comfy_execution.jobs import get_all_jobs
 
     running, pending, history = _queue_snapshot()
     _sync_history_from_live(maintenance=False)
-    jobs, total = get_all_jobs(
+    # limit=None：先拿全量轻量 job，切片留到最后。否则 total 只是实时任务数，
+    # offset 也永远落不到恢复出来的历史条目上。
+    live_jobs, _live_total = get_all_jobs(
         running,
         pending,
         history,
         status_filter=statuses or None,
         sort_by="created_at",
         sort_order="desc",
-        limit=limit,
-        offset=offset,
+        limit=None,
+        offset=0,
     )
-    decorated = [
-        _decorate_job(job, history.get(str(job.get("id", ""))))
-        for job in jobs
+    live_ids = set(history.keys()) | {str(job.get("id", "")) for job in live_jobs}
+    entries: list[dict[str, Any]] = [
+        {
+            "kind": "live",
+            "id": str(job.get("id", "")),
+            "status": str(job.get("status") or ""),
+            "create_time": job.get("create_time") or 0,
+            "job": job,
+        }
+        for job in live_jobs
     ]
-    live_ids = set(history.keys()) | {str(job.get("id", "")) for job in jobs}
-    restored = [
-        _decorate_job(_persisted_job(prompt_id, entry), entry)
-        for prompt_id, entry in _history_cache_items()
-        if prompt_id not in live_ids
-    ]
-    combined = decorated + restored
-    present_ids = {str(job.get("id", "")) for job in combined}
+    # 恢复出来的历史条目（索引里 570 多条）：排序阶段只读时间戳和状态，不建缩略图。
+    for prompt_id, entry in _history_cache_items():
+        if prompt_id in live_ids:
+            continue
+        entries.append({
+            "kind": "restored",
+            "id": str(prompt_id),
+            "status": _history_entry_status(entry),
+            "create_time": _history_entry_time(entry),
+            "entry": entry,
+        })
+    present_ids = {entry["id"] for entry in entries}
     for job_id in _favorite_job_ids():
+        # 只有收藏夹还留着图、实时历史和索引都没有的任务
         if job_id in present_ids:
             continue
-        extra = _favorite_only_job(job_id)
-        if extra is None:
-            continue
-        combined.append(extra)
         present_ids.add(job_id)
-    combined = sorted(
-        combined,
-        key=lambda job: job.get("create_time") or 0,
-        reverse=True,
-    )
-    pinned_ids = _favorite_job_ids()
-    jobs_out = [
-        job
-        for _job_id, job in _keep_newest_plus_pins(
-            [(str(job.get("id", "")), job) for job in combined],
-            pinned_ids,
-            limit,
-            lambda job: job.get("create_time") or 0,
-        )
-    ]
+        # 实时历史和索引里都没有、只有收藏夹还留着图的任务。这里仍属排序阶段：
+        # 最多读一份 job.json 拿 create_time，缩略图等它真被翻到再建。
+        entries.append({
+            "kind": "favorite",
+            "id": job_id,
+            "status": "completed",
+            "create_time": _history_entry_time(_history_item_from_favorite_meta(job_id)),
+        })
+    entries.sort(key=lambda entry: entry["create_time"] or 0, reverse=True)
+    total = len(entries)
+
+    page = entries[offset: offset + limit]
+    page_ids = {entry["id"] for entry in page}
+    # 「运行中/排队中」不受 limit 限制：它们的 create_time 可能很老、落在窗口外，
+    # 但手机端的队列页必须永远看得到它们。
+    for entry in entries:
+        if entry["status"] not in {"pending", "in_progress"} or entry["id"] in page_ids:
+            continue
+        page_ids.add(entry["id"])
+        page.append(entry)
+    page.sort(key=lambda entry: entry["create_time"] or 0, reverse=True)
+
+    jobs_out: list[dict[str, Any]] = []
+    for entry in page:
+        if entry["kind"] == "live":
+            jobs_out.append(_decorate_job(entry["job"], history.get(entry["id"])))
+        elif entry["kind"] == "restored":
+            jobs_out.append(_decorate_job(_persisted_job(entry["id"], entry["entry"]), entry["entry"]))
+        else:
+            # 收藏兜底卡片：自带一次 _decorate_job；拿不到任何图就不进列表。
+            extra = _favorite_only_job(entry["id"])
+            if extra is not None:
+                jobs_out.append(extra)
     jobs_out = _mark_favorite_extra(jobs_out, limit)
+    # 首屏额外带上全部收藏任务，否则「只看收藏」视图在分页后会空白。
+    favorite_ids = _favorite_job_ids()
+    if offset == 0 and favorite_ids:
+        jobs_out.extend(_favorite_extra_jobs(
+            entries,
+            {str(job.get("id", "")) for job in jobs_out},
+            history,
+            favorite_ids,
+        ))
     if summary:
         jobs_out = [_mobile_job_summary(job) for job in jobs_out]
     return {
         "ok": True,
         "jobs": jobs_out,
-        "total": total + len(restored),
+        "total": total,
+        "has_more": offset + limit < total,
     }
 
 
@@ -2694,7 +2815,12 @@ def register_routes() -> None:
             statuses,
             summary,
         )
-        return web.json_response(payload, headers=NO_CACHE)
+        # 几百 KB 的响应手机端每 8 秒拉一次：序列化和 gzip 都放线程里，别占事件循环。
+        return await asyncio.to_thread(
+            _mobile_jobs_response,
+            payload,
+            _client_accepts_gzip(request),
+        )
 
     @routes.post("/mobile/api/favorites/toggle")
     async def mobile_toggle_favorite(request: web.Request) -> web.Response:
