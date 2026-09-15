@@ -8,6 +8,8 @@
 /mobile_settings.json
 /mobile_settings.json.bak
 /remote_settings.json
+# 原子写入中断时留下的临时文件（例如 mobile_history.json.<hex>.tmp，体积跟原文件一样大）
+/*.json.*.tmp
 
 # ---- Python 缓存 ----
 __pycache__/
