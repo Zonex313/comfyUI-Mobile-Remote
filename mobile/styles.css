@@ -658,16 +658,8 @@ svg {
    原因有两条：① 这条 animation 属性已经被图标的入场动画占着，改它会顺带把入场动画重启；
    ② 单条贝塞尔只能过一次冲，做不出"压扁又弹回来"的振荡，必须走关键帧。 */
 
-/* 切模式时整颗按钮轻轻压一下再弹回来 */
-@keyframes fab-mode-pop {
-  0% { transform: scale(1); }
-  34% { transform: scale(0.952); }
-  100% { transform: scale(1); }
-}
-
-.generate-fab.is-mode-pop {
-  animation: fab-mode-pop 560ms cubic-bezier(0.22, 1.32, 0.42, 1);
-}
+/* 切模式时整颗按钮的"轻压一下"已由松手果冻（app.js 里的 JELLY_BODY）承担：
+   两者时机完全相同，留着也会被 WAAPI 盖掉，所以不重复实现。 */
 
 /* 按下：按钮里的内容缩一下（150ms 内到位，快速点一下也能看见） */
 .generate-fab.is-pressing svg,
@@ -696,9 +688,12 @@ svg {
   100% { opacity: 1; transform: scale(1); }
 }
 
-.generate-fab:not(.is-submitting):not(.is-ruler) > svg,
-.generate-fab:not(.is-submitting):not(.is-ruler) > .repeat-center-num {
-  /* 注意别用 both/forwards 填充：动画结束后它会一直占着 transform，
+.generate-fab.is-icon-in > svg,
+.generate-fab.is-icon-in > .repeat-center-num {
+  /* 只在"提交结束、图标回来"时由 JS 挂 is-icon-in 触发。以前挂在
+     :not(.is-submitting):not(.is-ruler) 上是被动的：选择器重新命中就重放一遍，
+     于是左右滑改完连发数量、ruler 一收起，数字会自己再弹一下，比松手动画还晚，
+     看着就拖沓。下面注意别用 both/forwards 填充：动画结束后它会一直占着 transform，
      把上面的按压缩放整个盖掉（踩过一次）。结束态本来就等于自然态，不需要填充。 */
   animation: fab-icon-in 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -733,10 +728,9 @@ svg {
   }
 
   .generate-fab.is-submitting,
-  .generate-fab.is-mode-pop,
   .generate-fab.is-submitting .fab-submit-state,
-  .generate-fab:not(.is-submitting):not(.is-ruler) > svg,
-  .generate-fab:not(.is-submitting):not(.is-ruler) > .repeat-center-num {
+  .generate-fab.is-icon-in > svg,
+  .generate-fab.is-icon-in > .repeat-center-num {
     animation: none;
   }
 

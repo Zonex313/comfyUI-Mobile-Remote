@@ -2869,16 +2869,14 @@
     }
     modeSwitching = true;
     button.classList.toggle("random-mode", next);
-    button.classList.add("is-mode-pop");
     button.classList.add("is-mode-switching");
     showModeTip(next);
     window.setTimeout(() => {
       paintGenerateButton();                 // 换图标与文案（配色类已是目标值，不会跳）
       button.classList.remove("is-mode-switching");
       window.setTimeout(() => {
-        button.classList.remove("is-mode-pop");
         modeSwitching = false;
-      }, 560);
+      }, 420);
     }, 150);
   }
 
@@ -3007,6 +3005,7 @@
     // 用 WAAPI 而不是 CSS 关键帧：svg 上的 animation 属性已经被入场动画占着，
     // 改写它会把入场动画顺带重启一遍；WAAPI 既能避开特指度之争，也能从
     // "当前实际大小"起步（早点松手时不会跳变）。
+    // 里面的图标/数字：幅度大，负责"看得见的果冻"
     const JELLY = [
       { transform: "scale(0.95, 1.13)", offset: 0.18 },   // 先弹起来并拉长
       { transform: "scale(1.13, 0.87)", offset: 0.4 },    // 落地被压扁
@@ -3014,6 +3013,27 @@
       { transform: "scale(1.03, 0.98)", offset: 0.82 },
       { transform: "scale(1)", offset: 1 },
     ];
+    // 底座整颗按钮：同相位、幅度小一半，跟着一起颤，读起来才像一整块果冻
+    const JELLY_BODY = [
+      { transform: "scale(0.975, 1.055)", offset: 0.18 },
+      { transform: "scale(1.06, 0.945)", offset: 0.4 },
+      { transform: "scale(0.985, 1.025)", offset: 0.62 },
+      { transform: "scale(1.012, 0.992)", offset: 0.82 },
+      { transform: "scale(1)", offset: 1 },
+    ];
+    // 左右滑动改连发数量时用的"干脆"版：一下就弹到位、不拖尾，不带压扁的回弹。
+    const SNAP = [
+      { transform: "scale(1.055)", offset: 0.34 },
+      { transform: "scale(1)", offset: 1 },
+    ];
+    const SNAP_BODY = [
+      { transform: "scale(1.03)", offset: 0.34 },
+      { transform: "scale(1)", offset: 1 },
+    ];
+    const RELEASE_MOTIONS = {
+      jelly: { body: JELLY_BODY, content: JELLY, duration: 860, easing: "cubic-bezier(0.4, 0, 0.6, 1)" },
+      snap: { body: SNAP_BODY, content: SNAP, duration: 230, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
+    };
     let jellyAnimations = [];
     const stopJelly = () => {
       for (const animation of jellyAnimations) {
@@ -3021,18 +3041,24 @@
       }
       jellyAnimations = [];
     };
-    const playJelly = () => {
+    const playRelease = (kind = "jelly") => {
       if (typeof button.animate !== "function") return;
       if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
       stopJelly();
-      for (const el of [button.querySelector("svg"), $("repeatCenterNum")]) {
+      const motion = RELEASE_MOTIONS[kind] || RELEASE_MOTIONS.jelly;
+      const targets = [
+        [button, motion.body],
+        [button.querySelector("svg"), motion.content],
+        [$("repeatCenterNum"), motion.content],
+      ];
+      for (const [el, frames] of targets) {
         if (!el) continue;
         const computed = window.getComputedStyle(el).transform;
         const matrix = new DOMMatrixReadOnly(computed === "none" ? "" : computed);
         const start = `scale(${Math.hypot(matrix.a, matrix.b).toFixed(4)}, ${Math.hypot(matrix.c, matrix.d).toFixed(4)})`;
         jellyAnimations.push(el.animate(
-          [{ transform: start }, ...JELLY],
-          { duration: 860, easing: "cubic-bezier(0.4, 0, 0.6, 1)" },
+          [{ transform: start }, ...frames],
+          { duration: motion.duration, easing: motion.easing },
         ));
       }
     };
@@ -3040,10 +3066,11 @@
       stopJelly();                        // 上一次还在晃就先掐掉，别盖住这次的按下反馈
       button.classList.add("is-pressing");
     };
-    const pressUp = () => {
+    // 松手动画按手势分开：左右滑是"改数量"，要干脆；上下滑/直接点才是果冻。
+    const pressUp = (kind = "jelly") => {
       if (!button.classList.contains("is-pressing")) return;
       button.classList.remove("is-pressing");
-      playJelly();
+      playRelease(kind);
     };
 
     button.addEventListener("pointerdown", (event) => {
@@ -3066,7 +3093,8 @@
       handleMove(touch.clientX, touch.clientY, event);
     }, { passive: false });
     const endHold = (event) => {
-      pressUp();
+      // axis 此刻还留着本次手势的判定结果：左右滑（改连发数量）用干脆版
+      pressUp(axis === "h" ? "snap" : "jelly");
       if (!armed) return;
       armed = false;
       dock.classList.remove("is-swiping");
@@ -3095,8 +3123,8 @@
     };
     button.addEventListener("pointerup", endHold);
     button.addEventListener("pointercancel", endHold);
-    button.addEventListener("pointerleave", pressUp);
-    button.addEventListener("lostpointercapture", pressUp);
+    button.addEventListener("pointerleave", () => pressUp());
+    button.addEventListener("lostpointercapture", () => pressUp());
     button.addEventListener("click", (event) => {
       if (!skipClick) return;
       event.preventDefault();
@@ -3217,6 +3245,11 @@
       button.disabled = false;
       button.classList.remove("is-submitting");
       button.classList.remove("is-pressing");
+      // 图标回来时轻轻弹一下：显式加类，不再依赖选择器变化被动重启
+      button.classList.remove("is-icon-in");
+      void button.offsetWidth;
+      button.classList.add("is-icon-in");
+      window.setTimeout(() => button.classList.remove("is-icon-in"), 460);
       button.setAttribute("aria-busy", "false");
       $("workflowSelect").disabled = false;
       if (hidden) hidden.textContent = "加入队列";
