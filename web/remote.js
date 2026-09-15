@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { createPresetManager } from "./preset-manager.js?v=202609202";
-import { createWorkflowImporter } from "./workflow-import.js?v=202609267";
+import { createWorkflowImporter } from "./workflow-import.js?v=202609268";
 
 const TAB_ID = "mobile-remote";
 const POLL_MS = 3000;
@@ -418,7 +418,6 @@ function mountPanel(container) {
   const actionCard = element("section", "mobile-remote-card mobile-remote-action-card");
   const actionRow = element("div", "mobile-remote-action-row");
   const nodeButton = button("加入随机标签节点", "plus", "加入随机标签节点");
-  nodeButton.node.classList.add("mobile-remote-primary");
   nodeButton.node.addEventListener("click", () => {
     const error = addTagNodeToCanvas();
     const original = "加入随机标签节点";
@@ -426,7 +425,6 @@ function mountPanel(container) {
     window.setTimeout(() => { nodeButton.caption.textContent = original; }, 2000);
   });
   const importButton = button("导入工作流", "download", "导入工作流");
-  importButton.node.classList.add("mobile-remote-primary");
   importButton.node.addEventListener("click", () => showView("import"));
   actionRow.append(nodeButton.node, importButton.node);
   actionCard.append(actionRow);
@@ -839,7 +837,7 @@ app.registerExtension({
       const stylesheet = document.createElement("link");
       stylesheet.id = "mobile-remote-styles";
       stylesheet.rel = "stylesheet";
-      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609266`;
+      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609268`;
       document.head.append(stylesheet);
     }
     app.extensionManager.registerSidebarTab({
