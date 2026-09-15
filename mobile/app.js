@@ -3708,7 +3708,9 @@
         if (document.visibilityState === "visible") refreshSharedSettings().catch(() => {});
       });
       window.setInterval(() => loadStatus().catch(() => {}), 5000);
-      window.setInterval(() => loadJobs().catch(() => {}), 4000);
+      // 队列/历史列表：websocket 事件会即时触发刷新，这里只做兜底轮询，
+      // 所以放慢到 8 秒——这个接口在任务多时要几百毫秒到几秒，太勤会把服务器占满。
+      window.setInterval(() => loadJobs().catch(() => {}), 8000);
       window.setInterval(() => loadProgress().catch(() => {}), 1000);
     } catch (error) {
       toast(error.message || "页面启动失败", "error");

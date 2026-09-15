@@ -44,6 +44,18 @@ _FAVORITES: set[tuple[str, str, str, str]] = set()
 _FAVORITES_LOCK = threading.Lock()
 _FAVORITES_LOADED = False
 
+# 缩略图列表缓存：同一份历史条目 + 同一版收藏状态只算一次。
+# /mobile/api/jobs 每次要给几百条历史建缩略图，逐个查磁盘是最大的开销之一。
+_GALLERY_CACHE: dict[str, tuple[Any, int, list[dict[str, str]]]] = {}
+_GALLERY_CACHE_LIMIT = 1500
+_GALLERY_REVISION = 0
+
+
+def _bump_gallery_revision() -> None:
+    """收藏状态、图片删除、过期清理改变缩略图归属时，让缓存失效。"""
+    global _GALLERY_REVISION
+    _GALLERY_REVISION += 1
+
 SENSITIVE_INPUT_NAMES = {
     "api_key",
     "apikey",
@@ -1221,6 +1233,11 @@ def _write_favorite_meta(job_id: str) -> None:
         payload["create_time"] = latest
     if not payload["workflow_name"]:
         payload["workflow_name"] = "收藏"
+    # 内容没变就别写盘：这个函数会被后台维护反复调用，每次都写等于白刷磁盘。
+    if {k: v for k, v in existing.items() if k != "saved_at"} == {
+        k: v for k, v in payload.items() if k != "saved_at"
+    }:
+        return
     try:
         _write_json_atomic(path, payload)
     except OSError:
@@ -1315,6 +1332,7 @@ def _toggle_favorite(job_id: str, filename: str, subfolder: str, type_name: str)
             _FAVORITES.add(key)
             added = True
     _persist_favorites()
+    _bump_gallery_revision()
     if added:
         _ensure_favorite_copy(job_id, filename, subfolder, type_name)
         _persist_history_index()
@@ -1343,6 +1361,7 @@ def _delete_output_result(job_id: str, filename: str, subfolder: str, type_name:
     _load_history_index()
     _strip_output_from_history(filename, subfolder, type_name, job_id)
     _forget_favorites_for_file(filename, subfolder, type_name, job_id)
+    _bump_gallery_revision()
     return {"ok": True}
 
 
@@ -1380,6 +1399,7 @@ def _forget_favorites_for_file(filename: str, subfolder: str, type_name: str, jo
                 dropped_keys.append(key)
     if dropped_keys:
         _persist_favorites()
+        _bump_gallery_revision()
         for favorite_job_id, name, _folder, _kind in dropped_keys:
             _delete_favorite_copy(favorite_job_id, name)
 
@@ -1441,6 +1461,21 @@ def _strip_output_from_history(filename: str, subfolder: str, type_name: str, jo
 def _history_gallery(history_item: dict[str, Any] | None, job_id: str = "") -> list[dict[str, str]]:
     if not isinstance(history_item, dict):
         return []
+    marker = str(job_id or "")
+    if marker:
+        cached = _GALLERY_CACHE.get(marker)
+        if cached is not None and cached[0] is history_item and cached[1] == _GALLERY_REVISION:
+            # 返回副本：调用方会往条目里塞字段，别把缓存本身改脏
+            return [dict(item) for item in cached[2]]
+    gallery = _history_gallery_uncached(history_item, marker)
+    if marker:
+        if len(_GALLERY_CACHE) >= _GALLERY_CACHE_LIMIT:
+            _GALLERY_CACHE.clear()
+        _GALLERY_CACHE[marker] = (history_item, _GALLERY_REVISION, gallery)
+    return gallery
+
+
+def _history_gallery_uncached(history_item: dict[str, Any], job_id: str = "") -> list[dict[str, str]]:
     outputs = history_item.get("outputs", {})
     if not isinstance(outputs, dict):
         return []
@@ -1802,6 +1837,7 @@ def _scrub_stale_history_images(live_ids: set[str]) -> bool:
                         filename = str(image.get("filename", ""))
                         subfolder = str(image.get("subfolder", "") or "")
                         type_name = str(image.get("type", "output") or "output")
+                        # 收藏的图永远保留；其余按「文件还在不在」判断
                         if _favorite_key(str(prompt_id), filename, subfolder, type_name) in fav_keys:
                             kept.append(image)
                             content_left = True
@@ -1817,10 +1853,12 @@ def _scrub_stale_history_images(live_ids: set[str]) -> bool:
             if not content_left and str(prompt_id) not in live_ids and str(prompt_id) not in pinned:
                 _HISTORY_CACHE.pop(prompt_id, None)
                 changed = True
+    if changed:
+        _bump_gallery_revision()
     return changed
 
 
-def _sync_history_from_live_unlocked() -> None:
+def _sync_history_from_live_unlocked(maintenance: bool = True) -> None:
     try:
         from server import PromptServer
 
@@ -1845,15 +1883,19 @@ def _sync_history_from_live_unlocked() -> None:
                 changed = True
     if _scrub_stale_history_images({str(pid) for pid in history.keys()}):
         changed = True
+    if not maintenance:
+        # 读取接口只更新内存缓存：重写 10.6MB 索引、重写上百个收藏元数据文件
+        # 都是后台定时器（每 15 秒）该干的活，放在请求路径里会把接口拖到好几秒。
+        return
     if changed:
         _persist_history_index()
     _backfill_favorite_meta()
 
 
-def _sync_history_from_live() -> None:
+def _sync_history_from_live(maintenance: bool = True) -> None:
     """Serialize live-history refreshes from the timer and request workers."""
     with _HISTORY_SYNC_LOCK:
-        _sync_history_from_live_unlocked()
+        _sync_history_from_live_unlocked(maintenance)
 
 
 def _persisted_job(job_id: str, entry: dict[str, Any]) -> dict[str, Any]:
@@ -2073,7 +2115,7 @@ def _get_mobile_jobs_payload(
     from comfy_execution.jobs import get_all_jobs
 
     running, pending, history = _queue_snapshot()
-    _sync_history_from_live()
+    _sync_history_from_live(maintenance=False)
     jobs, total = get_all_jobs(
         running,
         pending,
