@@ -329,8 +329,13 @@ function closePopup() {
   tagRuntime.popup.remove();
   tagRuntime.popup = null;
   tagRuntime.popupOwner = null;
-  document.removeEventListener("pointerdown", onPopupOutside, true);
-  document.removeEventListener("keydown", onPopupKey, true);
+  const outside = tagRuntime.outsideHandler || onPopupOutside;
+  const key = tagRuntime.keyHandler || onPopupKey;
+  document.removeEventListener("pointerdown", outside, true);
+  document.removeEventListener("keydown", key, true);
+  tagRuntime.outsideHandler = null;
+  tagRuntime.keyHandler = null;
+  tagRuntime.listenersInstalled = false;
 }
 
 function onPopupOutside(event) {
@@ -422,8 +427,10 @@ function openEditor(panel, category, slot, anchor) {
   tagRuntime.popupOwner = panel.node;
   paint();
   if (!tagRuntime.listenersInstalled) {
-    document.addEventListener("pointerdown", onPopupOutside, true);
-    document.addEventListener("keydown", onPopupKey, true);
+    tagRuntime.outsideHandler = onPopupOutside;
+    tagRuntime.keyHandler = onPopupKey;
+    document.addEventListener("pointerdown", tagRuntime.outsideHandler, true);
+    document.addEventListener("keydown", tagRuntime.keyHandler, true);
     tagRuntime.listenersInstalled = true;
   }
 }

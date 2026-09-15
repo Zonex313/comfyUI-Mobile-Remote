@@ -2132,17 +2132,18 @@
   }
 
   function updateFavoriteState(jobId, filename, subfolder, type, favorite) {
-    const matches = (item) => String(item?.jobId || item?.job_id || jobId) === String(jobId)
+    const matches = (item, ownerJobId = jobId) => String(item?.jobId || item?.job_id || ownerJobId) === String(ownerJobId)
       && item?.filename === filename
       && (item?.subfolder || "") === (subfolder || "")
       && (item?.type || "output") === (type || "output");
-    [state.galleryItems, state.flatGallery, state.jobs].forEach((list) => {
-      if (!Array.isArray(list)) return;
-      list.forEach((entry) => {
-        if (matches(entry)) entry.favorite = favorite;
-        if (Array.isArray(entry?.gallery)) entry.gallery.forEach((item) => { if (matches(item)) item.favorite = favorite; });
-        if (matches(entry?.preview_output)) entry.preview_output.favorite = favorite;
-      });
+    for (const list of [state.galleryItems, state.flatGallery]) {
+      if (Array.isArray(list)) list.forEach((item) => { if (matches(item)) item.favorite = favorite; });
+    }
+    if (Array.isArray(state.jobs)) state.jobs.forEach((job) => {
+      const ownerJobId = String(job?.id || job?.jobId || job?.job_id || "");
+      if (matches(job, ownerJobId)) job.favorite = favorite;
+      if (Array.isArray(job?.gallery)) job.gallery.forEach((item) => { if (matches(item, ownerJobId)) item.favorite = favorite; });
+      if (matches(job?.preview_output, ownerJobId)) job.preview_output.favorite = favorite;
     });
   }
 

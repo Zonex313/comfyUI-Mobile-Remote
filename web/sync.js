@@ -1,7 +1,10 @@
 import { app } from "../../scripts/app.js";
 
 const LOG_PREFIX = "[Mobile Remote]";
+const syncRuntime = globalThis.__MTR_SYNC_RUNTIME || (globalThis.__MTR_SYNC_RUNTIME = { started: false });
 let lastFingerprint = "";
+let lastWorkflowSource = "";
+let lastWorkflowSaved = null;
 let syncing = false;
 let timer = 0;
 
@@ -36,7 +39,8 @@ function activeWorkflowInfo(workflow) {
   source = String(source || workflow?.path || workflow?.filename || workflow?.id || "current-workflow");
   name = String(name || source.split(/[\\/]/).pop() || "当前工作流");
   name = name.replace(/\.json$/i, "").replace(/\s*[-|]\s*ComfyUI.*$/i, "").trim();
-  return { source, name: name || "当前工作流", saved };
+  const hasFileSource = Boolean(candidate?.path || candidate?.filename || workflow?.path || workflow?.filename);
+  return { source, name: name || "当前工作流", saved, hasFileSource };
 }
 
 // A real path is authoritative. Names such as Untitled.json are valid saved
@@ -44,7 +48,8 @@ function activeWorkflowInfo(workflow) {
 function isSavedWorkflow(info) {
   const source = String(info?.source || "").trim();
   if (!source || source === "current-workflow") return false;
-  return info?.saved !== false;
+  if (info?.saved === false) return false;
+  return info?.saved === true || info?.hasFileSource === true;
 }
 
 let lastSources = [];
@@ -53,11 +58,11 @@ let lastSources = [];
 function openWorkflowSources() {
   const store = app.extensionManager?.workflow || app.workflowManager;
   // 注意：store.workflows 是整个工作流库（几百个），openWorkflows 才是打开着的标签页
-  const list = store?.openWorkflows || store?.openedWorkflows || store?.workflows || [];
+  const list = store?.openWorkflows || store?.openedWorkflows || [];
   const sources = [];
   for (const item of Array.isArray(list) ? list : []) {
     const source = item?.path || item?.filename || item?.id || "";
-    if (source) sources.push(String(source));
+    if (source && item && item.isTemporary !== true && item.isSaved !== false) sources.push(String(source));
   }
   return sources;
 }
@@ -87,13 +92,16 @@ async function syncCurrentWorkflow(force = false) {
   } catch {
     graphFingerprint = `${Date.now()}`;
   }
-  if (!force && graphFingerprint === lastFingerprint) {
+  // 身份也必须参与短路：另存或切换到同图工作流时不能沿用旧 source。
+  const quickInfo = activeWorkflowInfo(serializedWorkflow);
+  const quickKey = quickInfo.source + "|" + String(quickInfo.saved);
+  const lastKey = lastWorkflowSource + "|" + String(lastWorkflowSaved);
+  if (!force && graphFingerprint === lastFingerprint && quickKey === lastKey) {
     await markOpen(lastSources); // 图没变也要发心跳，否则"打开集合"会超时失效
     return;
   }
 
   // 已明确标记为未保存的工作流，不必先做昂贵的 graphToPrompt。
-  const quickInfo = activeWorkflowInfo(serializedWorkflow);
   if (!isSavedWorkflow(quickInfo)) {
     await markOpen();
     return;
@@ -127,6 +135,8 @@ async function syncCurrentWorkflow(force = false) {
       throw new Error(body.error || `HTTP ${response.status}`);
     }
     lastFingerprint = graphFingerprint;
+    lastWorkflowSource = info.source;
+    lastWorkflowSaved = info.saved;
     await markOpen();
     console.info(`${LOG_PREFIX} synced “${body.workflow.name}” for /mobile`);
   } catch (error) {
@@ -145,6 +155,8 @@ app.registerExtension({
   name: "ComfyUI.MobileRemote.AutoSync",
 
   async setup() {
+    if (syncRuntime.started) return;
+    syncRuntime.started = true;
     scheduleSync(2500, true);
     window.setInterval(() => {
       if (document.visibilityState === "visible") syncCurrentWorkflow(false);
