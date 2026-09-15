@@ -3184,15 +3184,6 @@
       await refreshSharedSettings().catch(() => {});
       await refreshAll(true);
     });
-    $("reloadWorkflowsButton").addEventListener("click", async () => {
-      if (submittingBatch || applyingRemoteSettings) return;
-      try {
-        await loadWorkflows(true);
-        toast("工作流已更新", "success");
-      } catch (error) {
-        toast(error.message, "error");
-      }
-    });
     $("closeDialogButton").addEventListener("click", () => $("jobDialog").close());
     $("retryJobButton").addEventListener("click", retryDialogJob);
     $("jobDialog").addEventListener("click", (event) => {

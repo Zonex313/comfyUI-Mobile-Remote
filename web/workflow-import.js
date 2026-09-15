@@ -1,4 +1,4 @@
-import "./workflow-library.js?v=202609266";
+import "./workflow-library.js?v=202609267";
 import { app } from "../../scripts/app.js";
 
 /*
@@ -20,6 +20,7 @@ const LIBRARY_URL = "/userdata?dir=workflows&recurse=true&split=false&full_info=
 const RECORDS_URL = "/mobile/api/workflows?all=1";
 const IMPORT_URL = "/mobile/api/workflows/import";
 const MAX_ROWS = 400;
+const NOTICE_MS = 3000;   // 操作提示只停留 3 秒，之后回到默认状态文字
 
 const recordUrl = (id) => `/mobile/api/workflows/${encodeURIComponent(id)}`;
 
@@ -90,8 +91,22 @@ export function createWorkflowImporter({ element, button, setText }) {
   let painting = false;
   let lastFocus = "";
   let dirsSeeded = false;
+  let noticeTimer = 0;
   const openDirs = new Set();
   const closedWhileSearching = new Set();
+
+  /** 临时提示：显示 3 秒后自动回到「磁盘上共 N 个…」，期间再出提示会重新计时。 */
+  function setNotice(text, tone) {
+    window.clearTimeout(noticeTimer);
+    noticeTimer = 0;
+    notice = text ? { text, tone } : null;
+    if (!notice) return;
+    noticeTimer = window.setTimeout(() => {
+      noticeTimer = 0;
+      notice = null;
+      if (!disposed) applyStatus();
+    }, NOTICE_MS);
+  }
 
   function applyStatus() {
     if (busyName) {
@@ -362,7 +377,7 @@ export function createWorkflowImporter({ element, button, setText }) {
     if (!entry || busyKey) return;
     busyKey = model.key;
     busyName = model.name;
-    notice = null;
+    setNotice(null);
     paint();
     try {
       const payload = await convert(entry);
@@ -380,9 +395,9 @@ export function createWorkflowImporter({ element, button, setText }) {
       });
       const body = await readJson(response);
       const name = body?.workflow?.name || entry.name;
-      notice = { text: `已导入「${name}」，手机端电脑不开也能用了`, tone: "success" };
+      setNotice(`已导入「${name}」，手机端电脑不开也能用了`, "success");
     } catch (error) {
-      notice = { text: `导入失败：${error?.message || error}`, tone: "error" };
+      setNotice(`导入失败：${error?.message || error}`, "error");
     } finally {
       busyKey = "";
       busyName = "";
@@ -392,7 +407,7 @@ export function createWorkflowImporter({ element, button, setText }) {
 
   async function setPinned(id, pinned) {
     if (busyKey) return;
-    notice = null;
+    setNotice(null);
     try {
       await readJson(await fetch(`${recordUrl(id)}/pin`, {
         method: "POST",
@@ -400,21 +415,21 @@ export function createWorkflowImporter({ element, button, setText }) {
         cache: "no-store",
         body: JSON.stringify({ pinned }),
       }));
-      notice = { text: pinned ? "已设为常驻" : "已取消常驻（电脑端打开它时手机端还能看到）", tone: "success" };
+      setNotice(pinned ? "已设为常驻" : "已取消常驻（电脑端打开它时手机端还能看到）", "success");
     } catch (error) {
-      notice = { text: `操作失败：${error?.message || error}`, tone: "error" };
+      setNotice(`操作失败：${error?.message || error}`, "error");
     }
     await refreshRecords();
   }
 
   async function deleteRecord(id, name) {
     if (busyKey) return;
-    notice = null;
+    setNotice(null);
     try {
       await readJson(await fetch(recordUrl(id), { method: "DELETE", cache: "no-store" }));
-      notice = { text: `已从手机端删除「${name}」（磁盘上的工作流文件没动）`, tone: "success" };
+      setNotice(`已从手机端删除「${name}」（磁盘上的工作流文件没动）`, "success");
     } catch (error) {
-      notice = { text: `删除失败：${error?.message || error}`, tone: "error" };
+      setNotice(`删除失败：${error?.message || error}`, "error");
     }
     await refreshRecords();
   }
@@ -424,7 +439,7 @@ export function createWorkflowImporter({ element, button, setText }) {
       const body = await readJson(await fetch(RECORDS_URL, { cache: "no-store" }));
       records = Array.isArray(body?.workflows) ? body.workflows : [];
     } catch (error) {
-      notice = notice || { text: `读取已导入列表失败：${error?.message || error}`, tone: "error" };
+      if (!notice) setNotice(`读取已导入列表失败：${error?.message || error}`, "error");
     }
     sync();
   }
@@ -432,7 +447,7 @@ export function createWorkflowImporter({ element, button, setText }) {
   async function load() {
     if (loading) return loading;
     loading = (async () => {
-      notice = null;
+      setNotice(null);
       applyStatus();
       const [libraryBody, recordsBody] = await Promise.all([
         readJson(await fetch(LIBRARY_URL, { cache: "no-store" })),
@@ -448,7 +463,7 @@ export function createWorkflowImporter({ element, button, setText }) {
       await loading;
     } catch (error) {
       if (!disposed) {
-        notice = { text: `读取工作流列表失败：${error?.message || error}`, tone: "error" };
+        setNotice(`读取工作流列表失败：${error?.message || error}`, "error");
         paint();
       }
     } finally {
@@ -458,7 +473,7 @@ export function createWorkflowImporter({ element, button, setText }) {
 
   search.addEventListener("input", () => {
     query = search.value;
-    notice = null;
+    setNotice(null);
     paint();
   });
   expandToggle.node.addEventListener("click", () => {
@@ -494,6 +509,7 @@ export function createWorkflowImporter({ element, button, setText }) {
     },
     destroy() {
       disposed = true;
+      window.clearTimeout(noticeTimer);
     },
   };
 }

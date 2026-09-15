@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { createPresetManager } from "./preset-manager.js?v=202609202";
-import { createWorkflowImporter } from "./workflow-import.js?v=202609266";
+import { createWorkflowImporter } from "./workflow-import.js?v=202609267";
 
 const TAB_ID = "mobile-remote";
 const POLL_MS = 3000;
