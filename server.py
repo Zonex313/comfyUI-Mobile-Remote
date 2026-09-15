@@ -1076,8 +1076,6 @@ def _is_favorite(job_id: str, filename: str, subfolder: str, type_name: str) -> 
     with _FAVORITES_LOCK:
         if key in _FAVORITES:
             return True
-        if any(item[0] == str(job_id or "") and item[1] == str(filename or "") for item in _FAVORITES):
-            return True
     path = _favorite_file_path(job_id, filename)
     return path is not None and path.is_file()
 
@@ -1364,6 +1362,11 @@ def _toggle_favorite(job_id: str, filename: str, subfolder: str, type_name: str)
     _load_favorites()
     key = _favorite_key(job_id, filename, subfolder, type_name)
     with _FAVORITES_LOCK:
+        # Reconcile an old/orphaned on-disk favorite before flipping the exact key.
+        if key not in _FAVORITES:
+            path = _favorite_file_path(job_id, filename)
+            if path is not None and path.is_file():
+                _FAVORITES.add(key)
         if key in _FAVORITES:
             _FAVORITES.discard(key)
             added = False
@@ -1890,64 +1893,66 @@ def _persist_history_index() -> None:
 
 
 def _scrub_stale_history_images(live_ids: set[str]) -> bool:
-    """Drop stale history images without holding the history lock during stat()."""
+    """Drop stale history images without holding the history lock during file checks."""
     _load_favorites()
-    with _FAVORITES_LOCK:
-        fav_keys = set(_FAVORITES)
-    pinned = {job_id for job_id, _n, _s, _t in fav_keys if job_id}
-    with _HISTORY_LOCK:
-        snapshots = {
-            str(prompt_id): copy.deepcopy(entry)
-            for prompt_id, entry in _HISTORY_CACHE.items()
-        }
-    decisions: dict[str, dict[str, Any] | None] = {}
-    for prompt_id, entry in snapshots.items():
-        if not isinstance(entry, dict):
-            decisions[prompt_id] = None
-            continue
-        outputs = entry.get("outputs")
-        if not isinstance(outputs, dict):
-            continue
-        done_ms = _history_completion_time(entry)
-        content_left = False
-        for node_output in outputs.values():
-            if not isinstance(node_output, dict):
+    # A toggle must not race this maintenance pass: otherwise an old favorite snapshot
+    # could delete a newly pinned image (or retain an image that was just unpinned).
+    with _FAVORITE_TOGGLE_LOCK:
+        with _FAVORITES_LOCK:
+            fav_keys = set(_FAVORITES)
+        pinned = {job_id for job_id, _n, _s, _t in fav_keys if job_id}
+        # Keep only references under the history lock. Entries are replaced on writes;
+        # deep-copy each entry outside the lock before doing filesystem checks.
+        with _HISTORY_LOCK:
+            references = {str(prompt_id): entry for prompt_id, entry in _HISTORY_CACHE.items()}
+        decisions: dict[str, dict[str, Any] | None] = {}
+        originals: dict[str, Any] = {}
+        for prompt_id, reference in references.items():
+            entry = copy.deepcopy(reference)
+            originals[prompt_id] = reference
+            if not isinstance(entry, dict):
+                decisions[prompt_id] = None
                 continue
-            images = node_output.get("images")
-            if isinstance(images, list):
-                kept = []
-                for image in images:
-                    if not isinstance(image, dict) or not image.get("filename"):
-                        continue
-                    filename = str(image.get("filename", ""))
-                    subfolder = str(image.get("subfolder", "") or "")
-                    type_name = str(image.get("type", "output") or "output")
-                    if _favorite_key(prompt_id, filename, subfolder, type_name) in fav_keys or _media_item_fresh(image, done_ms):
-                        kept.append(image)
-                        content_left = True
-                if len(kept) != len(images):
-                    node_output["images"] = kept
-            elif any(value for key, value in node_output.items() if key != "images"):
-                content_left = True
-        if not content_left and prompt_id not in live_ids and prompt_id not in pinned:
-            decisions[prompt_id] = None
-        elif entry != snapshots[prompt_id]:
-            decisions[prompt_id] = entry
-        else:
-            decisions[prompt_id] = entry
-    changed = False
-    with _HISTORY_LOCK:
-        for prompt_id, candidate in decisions.items():
-            current = _HISTORY_CACHE.get(prompt_id)
-            original = snapshots.get(prompt_id)
-            if current != original:
+            outputs = entry.get("outputs")
+            if not isinstance(outputs, dict):
                 continue
-            if candidate is None:
-                _HISTORY_CACHE.pop(prompt_id, None)
-                changed = True
-            elif candidate != current:
-                _HISTORY_CACHE[prompt_id] = candidate
-                changed = True
+            done_ms = _history_completion_time(entry)
+            content_left = False
+            for node_output in outputs.values():
+                if not isinstance(node_output, dict):
+                    continue
+                images = node_output.get("images")
+                if isinstance(images, list):
+                    kept = []
+                    for image in images:
+                        if not isinstance(image, dict) or not image.get("filename"):
+                            continue
+                        filename = str(image.get("filename", ""))
+                        subfolder = str(image.get("subfolder", "") or "")
+                        type_name = str(image.get("type", "output") or "output")
+                        if _favorite_key(prompt_id, filename, subfolder, type_name) in fav_keys or _media_item_fresh(image, done_ms):
+                            kept.append(image)
+                            content_left = True
+                    if len(kept) != len(images):
+                        node_output["images"] = kept
+                elif any(value for key, value in node_output.items() if key != "images"):
+                    content_left = True
+            if not content_left and prompt_id not in live_ids and prompt_id not in pinned:
+                decisions[prompt_id] = None
+            else:
+                decisions[prompt_id] = entry
+        changed = False
+        with _HISTORY_LOCK:
+            for prompt_id, candidate in decisions.items():
+                current = _HISTORY_CACHE.get(prompt_id)
+                if current is not originals.get(prompt_id):
+                    continue
+                if candidate is None:
+                    _HISTORY_CACHE.pop(prompt_id, None)
+                    changed = True
+                elif candidate != current:
+                    _HISTORY_CACHE[prompt_id] = candidate
+                    changed = True
     if changed:
         _bump_gallery_revision()
     return changed

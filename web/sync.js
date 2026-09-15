@@ -15,35 +15,36 @@ function fastHash(text) {
 }
 
 function activeWorkflowInfo(workflow) {
-  const candidates = [
+  // ComfyUI's workflow store exposes isTemporary for the never-saved draft.
+  // isModified/isDirty only describes edits after a real file was opened and
+  // must not prevent syncing a saved workflow after it changes.
+  const candidate = [
     app.extensionManager?.workflow?.activeWorkflow,
     app.workflowManager?.activeWorkflow,
     app.extensionManager?.workflow?.currentWorkflow,
-  ].filter(Boolean);
+  ].find(Boolean) || null;
 
-  const candidate = candidates[0] || {};
-  let source = candidate.path || candidate.filename || candidate.id || "";
-  let name = candidate.name || candidate.displayName || candidate.filename || "";
+  let source = candidate?.path || candidate?.filename || candidate?.id || "";
+  let name = candidate?.name || candidate?.displayName || candidate?.filename || "";
   let saved = null;
-  if (typeof candidate.isDirty === "boolean") saved = !candidate.isDirty;
-  if (typeof candidate.isSaved === "boolean") saved = candidate.isSaved;
-  if (candidate.unsaved === true) saved = false;
+  if (candidate) {
+    if (typeof candidate.isTemporary === "boolean") saved = !candidate.isTemporary;
+    else if (typeof candidate.isSaved === "boolean") saved = candidate.isSaved;
+    else saved = true;
+  }
 
-  source = String(source || workflow?.id || "current-workflow");
+  source = String(source || workflow?.path || workflow?.filename || workflow?.id || "current-workflow");
   name = String(name || source.split(/[\\/]/).pop() || "当前工作流");
   name = name.replace(/\.json$/i, "").replace(/\s*[-|]\s*ComfyUI.*$/i, "").trim();
   return { source, name: name || "当前工作流", saved };
 }
 
-// 只有「已保存到磁盘」的工作流才同步给手机：
-// 未保存的（新版前端叫 Unsaved Workflow）不进手机列表，避免刷出一堆同名条目。
+// A real path is authoritative. Names such as Untitled.json are valid saved
+// filenames; only the frontend's explicit temporary marker rejects a draft.
 function isSavedWorkflow(info) {
-  const name = String(info?.name || "").trim();
   const source = String(info?.source || "").trim();
-  if (!name || /unsaved|untitled|未保存|未命名/i.test(name)) return false;
-  if (!source || source === "current-workflow" || /unsaved|untitled/i.test(source)) return false;
-  if (info?.saved === false) return false;
-  return true;
+  if (!source || source === "current-workflow") return false;
+  return info?.saved !== false;
 }
 
 let lastSources = [];
@@ -93,7 +94,7 @@ async function syncCurrentWorkflow(force = false) {
 
   // 已明确标记为未保存的工作流，不必先做昂贵的 graphToPrompt。
   const quickInfo = activeWorkflowInfo(serializedWorkflow);
-  if (quickInfo.source !== "current-workflow" && !isSavedWorkflow(quickInfo)) {
+  if (!isSavedWorkflow(quickInfo)) {
     await markOpen();
     return;
   }

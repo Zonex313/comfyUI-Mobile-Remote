@@ -2688,11 +2688,14 @@
     // 所以再要求「已加载条数还没追上 total」，否则按钮会在翻完后又冒出来。
     // 用「窗口游标」判断，而不是已加载条数：首屏会额外带回全部收藏任务
     // （favorite_extra），已加载条数会虚高，拿它判断会让按钮提前消失、剩下的更早记录翻不到。
-    const visible = busy || historyHasMore();
+    const hasHistory = state.flatGallery.length > 0;
+    const hasMore = historyHasMore();
+    const visible = busy || hasHistory;
     button.classList.toggle("hidden", !visible);
-    if (button.disabled !== busy) button.disabled = busy;
+    const disabled = busy || !hasMore;
+    if (button.disabled !== disabled) button.disabled = disabled;
     button.setAttribute("aria-busy", String(busy));
-    const label = busy ? "加载中…" : "加载更早的";
+    const label = busy ? "加载中…" : hasMore ? "加载更早的" : "已经到底了";
     if (button.textContent !== label) button.textContent = label;
   }
 
