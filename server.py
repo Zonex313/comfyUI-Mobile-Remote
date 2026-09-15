@@ -1404,7 +1404,8 @@ def _delete_output_result(job_id: str, filename: str, subfolder: str, type_name:
         return {"ok": False, "error": "删除失败", "status": 500}
     _load_history_index()
     _strip_output_from_history(filename, subfolder, type_name, job_id)
-    _forget_favorites_for_file(filename, subfolder, type_name, job_id)
+    with _FAVORITE_TOGGLE_LOCK:
+        _forget_favorites_for_file(filename, subfolder, type_name, job_id)
     _bump_gallery_revision()
     return {"ok": True}
 
@@ -1496,8 +1497,11 @@ def _strip_output_from_history(filename: str, subfolder: str, type_name: str, jo
     changed = False
     with _HISTORY_LOCK:
         entry = _HISTORY_CACHE.get(job_id)
-        if isinstance(entry, dict) and _strip_images_from_outputs(entry.get("outputs"), filename, subfolder, type_name):
-            changed = True
+        if isinstance(entry, dict):
+            replacement = copy.deepcopy(entry)
+            if _strip_images_from_outputs(replacement.get("outputs"), filename, subfolder, type_name):
+                _HISTORY_CACHE[job_id] = replacement
+                changed = True
     if changed:
         _persist_history_index()
 
@@ -2001,6 +2005,9 @@ def _sync_history_from_live_unlocked(maintenance: bool = True) -> None:
         return
     if _scrub_stale_history_images({str(pid) for pid in history.keys()}):
         changed = True
+        # Scrubbing is a durable deletion; do not let the periodic throttle
+        # leave the in-memory cleanup to resurrect after a restart.
+        _persist_history_index()
     if changed:
         _persist_history_index_if_due()
     _backfill_favorite_meta()
