@@ -577,7 +577,7 @@ svg {
   opacity: 0.48;
 }
 
-/* 提交中：不整块变灰，改成转圈 +「提交中」，明确告诉用户在提交。
+/* 提交中：不整块变灰，改成转圈，明确告诉用户在提交。
    放在 :disabled 之后，靠源码顺序覆盖那条 opacity: 0.48 */
 .fab-submit-state {
   position: relative;
@@ -589,20 +589,12 @@ svg {
 }
 
 .fab-spinner {
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border: 2.5px solid rgba(255, 255, 255, 0.34);
   border-top-color: #ffffff;
   border-radius: 50%;
   animation: spin-clockwise 700ms linear infinite;
-}
-
-.fab-submit-text {
-  color: #ffffff;
-  font-size: 10px;
-  font-weight: 620;
-  line-height: 1;
-  text-shadow: 0 1px 2px rgba(20, 40, 60, 0.5);
 }
 
 .generate-fab.is-submitting {
