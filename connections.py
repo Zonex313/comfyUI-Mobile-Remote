@@ -30,7 +30,7 @@ from yarl import URL
 
 LOG = logging.getLogger("comfyui.mobile_remote.connections")
 ROOT = Path(__file__).resolve().parent
-TAILSCALE_SUPPRESSED = "检测到 Tailscale 在线，已自动关闭 Cloudflare。"
+TAILSCALE_SUPPRESSED = "Tailscale生效中，自动关闭 Cloudflare"
 NO_CACHE = {"Cache-Control": "no-store"}
 MAX_UPLOAD = 100 * 1024 * 1024
 PUBLIC_URL = re.compile(r"https://[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\.com\b")
