@@ -1471,7 +1471,7 @@
       !isNegativeField(field)
       && !isSizeField(field)
       && field !== batch
-      && field !== seed            // batch/seed 由固定的「批量数量+种子」行渲染，不能再进普通列表
+      && !["batch_size", "seed", "noise_seed"].includes(field.input) // 固定行只显示每类一个控件，不能重复进普通列表
       && !isModelField(field)
       && field.group !== "basic"   // 服务端标为 basic 的（提示词/模型/尺寸）必须留在外面
     ));
@@ -1481,7 +1481,7 @@
       !isNegativeField(field)
       && !isSizeField(field)
       && field !== batch
-      && field !== seed
+      && !["batch_size", "seed", "noise_seed"].includes(field.input)
       && !isModelField(field)
       && !advancedBase.includes(field)
     ));
@@ -1495,7 +1495,7 @@
     const advancedContent = document.querySelector("#advancedSection .advanced-content");
     if (batch || seed) {
       const pairRow = document.createElement("div");
-      pairRow.className = "pair-row";
+      pairRow.className = `pair-row${batch && seed ? "" : " single"}`;
       [{ field: batch, build: makeNumber }, { field: seed, build: makeSeedRow }].filter(({ field }) => field).forEach(({ field, build }) => {
         const cell = document.createElement("div");
         cell.className = "field pair-cell";
@@ -2124,7 +2124,27 @@
     });
   }
 
-  let favoriteToggleInFlight = false;
+  const favoriteToggleInFlight = new Set();
+
+  function favoriteItemKey(item, jobId = "") {
+    const id = String(item?.jobId || item?.job_id || jobId || "");
+    return `${id}|${item?.filename || ""}|${item?.subfolder || ""}|${item?.type || "output"}`;
+  }
+
+  function updateFavoriteState(jobId, filename, subfolder, type, favorite) {
+    const matches = (item) => String(item?.jobId || item?.job_id || jobId) === String(jobId)
+      && item?.filename === filename
+      && (item?.subfolder || "") === (subfolder || "")
+      && (item?.type || "output") === (type || "output");
+    [state.galleryItems, state.flatGallery, state.jobs].forEach((list) => {
+      if (!Array.isArray(list)) return;
+      list.forEach((entry) => {
+        if (matches(entry)) entry.favorite = favorite;
+        if (Array.isArray(entry?.gallery)) entry.gallery.forEach((item) => { if (matches(item)) item.favorite = favorite; });
+        if (matches(entry?.preview_output)) entry.preview_output.favorite = favorite;
+      });
+    });
+  }
 
   function currentGalleryJobId() {
     const item = state.galleryItems[state.galleryIndex];
@@ -2140,6 +2160,9 @@
     const button = $("favoriteGalleryButton");
     if (!button) return;
     const active = isCurrentFavorite();
+    const item = state.galleryItems[state.galleryIndex];
+    const key = favoriteItemKey(item, currentGalleryJobId());
+    button.disabled = favoriteToggleInFlight.has(key);
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", active ? "true" : "false");
     button.setAttribute("aria-label", active ? "取消收藏" : "收藏这张图");
@@ -2147,7 +2170,6 @@
   }
 
   async function toggleCurrentGalleryFavorite() {
-    if (favoriteToggleInFlight) return;
     const item = state.galleryItems[state.galleryIndex];
     const jobId = currentGalleryJobId();
     if (!item?.filename || !jobId) {
@@ -2155,8 +2177,12 @@
       return;
     }
     const previous = Boolean(item.favorite);
-    favoriteToggleInFlight = true;
-    item.favorite = !previous;
+    const subfolder = item.subfolder || "";
+    const type = item.type || "output";
+    const key = favoriteItemKey(item, jobId);
+    if (favoriteToggleInFlight.has(key)) return;
+    favoriteToggleInFlight.add(key);
+    updateFavoriteState(jobId, item.filename, subfolder, type, !previous);
     syncFavoriteButton();
     if (state.favoritesOnly && !item.favorite) renderHistory();
     try {
@@ -2166,21 +2192,22 @@
         body: JSON.stringify({
           job_id: jobId,
           filename: item.filename,
-          subfolder: item.subfolder || "",
-          type: item.type || "output",
+          subfolder,
+          type,
         }),
       });
-      item.favorite = Boolean(body.favorite);
+      updateFavoriteState(jobId, item.filename, subfolder, type, Boolean(body.favorite));
       syncFavoriteButton();
       if (state.favoritesOnly) renderHistory();
       toast(body.favorite ? "已收藏" : "已取消收藏");
     } catch (error) {
-      item.favorite = previous;
+      updateFavoriteState(jobId, item.filename, subfolder, type, previous);
       syncFavoriteButton();
       if (state.favoritesOnly) renderHistory();
       toast(error.message || "收藏失败", "error");
     } finally {
-      favoriteToggleInFlight = false;
+      favoriteToggleInFlight.delete(key);
+      syncFavoriteButton();
     }
   }
 

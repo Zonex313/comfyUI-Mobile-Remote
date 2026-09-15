@@ -21,16 +21,13 @@ function activeWorkflowInfo(workflow) {
     app.extensionManager?.workflow?.currentWorkflow,
   ].filter(Boolean);
 
-  let source = "";
-  let name = "";
+  const candidate = candidates[0] || {};
+  let source = candidate.path || candidate.filename || candidate.id || "";
+  let name = candidate.name || candidate.displayName || candidate.filename || "";
   let saved = null;
-  for (const candidate of candidates) {
-    source = source || candidate.path || candidate.filename || candidate.id || "";
-    name = name || candidate.name || candidate.displayName || candidate.filename || "";
-    if (typeof candidate.isDirty === "boolean") saved = !candidate.isDirty;
-    if (typeof candidate.isSaved === "boolean") saved = candidate.isSaved;
-    if (candidate.unsaved === true) saved = false;
-  }
+  if (typeof candidate.isDirty === "boolean") saved = !candidate.isDirty;
+  if (typeof candidate.isSaved === "boolean") saved = candidate.isSaved;
+  if (candidate.unsaved === true) saved = false;
 
   source = String(source || workflow?.id || "current-workflow");
   name = String(name || source.split(/[\\/]/).pop() || "当前工作流");
@@ -43,9 +40,10 @@ function activeWorkflowInfo(workflow) {
 function isSavedWorkflow(info) {
   const name = String(info?.name || "").trim();
   const source = String(info?.source || "").trim();
+  if (!name || /unsaved|untitled|未保存|未命名/i.test(name)) return false;
+  if (!source || source === "current-workflow" || /unsaved|untitled/i.test(source)) return false;
   if (info?.saved === false) return false;
-  if (info?.saved === true) return true;
-  return Boolean(source && source !== "current-workflow");
+  return true;
 }
 
 let lastSources = [];

@@ -322,20 +322,19 @@ class TagPanel {
 }
 
 // ---- 标签编辑弹层（对齐手机端的「点标签修改」）----
-let popup = null;
-let popupOwner = null;
+const tagRuntime = globalThis.__MTR_TAG_RUNTIME || (globalThis.__MTR_TAG_RUNTIME = { popup: null, popupOwner: null });
 
 function closePopup() {
-  if (!popup) return;
-  popup.remove();
-  popup = null;
-  popupOwner = null;
+  if (!tagRuntime.popup) return;
+  tagRuntime.popup.remove();
+  tagRuntime.popup = null;
+  tagRuntime.popupOwner = null;
   document.removeEventListener("pointerdown", onPopupOutside, true);
   document.removeEventListener("keydown", onPopupKey, true);
 }
 
 function onPopupOutside(event) {
-  if (popup && !popup.contains(event.target)) closePopup();
+  if (tagRuntime.popup && !tagRuntime.popup.contains(event.target)) closePopup();
 }
 
 function onPopupKey(event) {
@@ -419,15 +418,18 @@ function openEditor(panel, category, slot, anchor) {
   const height = box.offsetHeight;
   box.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + "px";
   box.style.top = Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - height - 8)) + "px";
-  popup = box;
-  popupOwner = panel.node;
+  tagRuntime.popup = box;
+  tagRuntime.popupOwner = panel.node;
   paint();
-  document.addEventListener("pointerdown", onPopupOutside, true);
-  document.addEventListener("keydown", onPopupKey, true);
+  if (!tagRuntime.listenersInstalled) {
+    document.addEventListener("pointerdown", onPopupOutside, true);
+    document.addEventListener("keydown", onPopupKey, true);
+    tagRuntime.listenersInstalled = true;
+  }
 }
 
 // ---- 入队钩子：点「运行」时按标签模式随机组合并注入提示词 ----
-let hookInstalled = false;
+const hookRuntime = globalThis.__MTR_TAG_HOOK || (globalThis.__MTR_TAG_HOOK = { installed: false });
 
 function listNodes() {
   return app.graph?._nodes || app.graph?.nodes || [];
@@ -456,7 +458,7 @@ function patchPrompt(prompt) {
 }
 
 function installHook() {
-  if (hookInstalled) return;
+  if (hookRuntime.installed) return;
   const api = app.api || globalThis.comfyAPI?.api?.api;
   if (api && typeof api.queuePrompt === "function") {
     const original = api.queuePrompt;
@@ -465,7 +467,7 @@ function installHook() {
       catch (error) { console.error("[Mobile Remote] 标签随机失败", error); }
       return original.call(this, index, prompt, ...rest);
     };
-    hookInstalled = true;
+    hookRuntime.installed = true;
     return;
   }
   if (typeof app.queuePrompt === "function") {
@@ -493,7 +495,7 @@ function installHook() {
       }
       return result;
     };
-    hookInstalled = true;
+    hookRuntime.installed = true;
   }
 }
 
@@ -533,7 +535,7 @@ app.registerExtension({
     proto.__mtrHooksInstalled = true;
     const removed = proto.onRemoved;
     proto.onRemoved = function (...rest) {
-      if (popupOwner === this) closePopup();
+      if (tagRuntime.popupOwner === this) closePopup();
       if (this.__mtrPanel) this.__mtrPanel = null;
       return removed?.apply(this, rest);
     };

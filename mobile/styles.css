@@ -345,6 +345,10 @@ svg {
   padding: 2px 0 3px;
 }
 
+.pair-row.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .pair-cell {
   min-width: 0;
   padding: 0 !important;
