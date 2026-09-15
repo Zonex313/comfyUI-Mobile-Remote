@@ -7,7 +7,10 @@
   const GALLERY_CLOSE_GUARD_MS = 450;
   // 队列/历史首屏只拉最近这么多条，翻历史时再用 offset 分段往更早的补（省流量）。
   // 「加载更多」每次也是这么多：loadMoreJobsOnce 拿它当 limit 并把游标推进这么多。
-  const JOBS_PAGE = 50;
+  // 取 60 是为了它是 12 的倍数：每页拉的是「批次」，而网格卡片是「图片」，
+  // 出图张数固定时每页卡片数 = 批数 × 每批张数，能被 2/3/4 整除才不会在翻页
+  // 边界上留半截行（50 就不是，3 列/4 列下会剩 2 张）。
+  const JOBS_PAGE = 60;
   // 上滑松手后底部 dock 落回原位要 160ms（见 styles.css 的 .nav-dock）。
   // 果冻的「压扁」和上滑换色的起点都得对齐这一刻：落地那下才算数。
   const DOCK_LANDING_MS = 160;
