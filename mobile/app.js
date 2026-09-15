@@ -3005,20 +3005,36 @@
     // 用 WAAPI 而不是 CSS 关键帧：svg 上的 animation 属性已经被入场动画占着，
     // 改写它会把入场动画顺带重启一遍；WAAPI 既能避开特指度之争，也能从
     // "当前实际大小"起步（早点松手时不会跳变）。
+    // WAAPI 的 options.easing 是"整条动画"的时间函数，它会把所有关键帧偏移一起拉伸：
+    // 实测 offset 0.26 的压扁峰 53ms 就撞到了，而动画名义上还要跑 820ms，后半段全在空转。
+    // 想按真实毫秒摆关键帧，就得把 easing 写在每一帧上 —— 这时的语义和 CSS 的
+    // animation-timing-function 一样，管的是"它到下一帧"那一段。
+    // 两种曲线按真实受力来分，而不是一律 ease-out：
+    // EASE_POP  快起慢收 —— 弹簧释放/被弹回来的那一段，到达极值那一刻速度正好归零；
+    // EASE_FALL 慢起快收 —— 越过极值之后就是自由落体，越落越快，砸到地面时速度最大。
+    // 一律 ease-out 的话，砸下去那一下反而是"快到头了在减速"，看着就不像掉下来的。
+    const EASE_POP = "cubic-bezier(0.16, 0.84, 0.44, 1)";
+    const EASE_FALL = "cubic-bezier(0.5, 0, 0.9, 0.6)";
+    // 松手后底部 dock 是 transition: transform 160ms 落回原位（见 styles.css 的 .nav-dock）。
+    // 压扁必须正好落在它砸到最下方的那一刻：820 * 0.195 ≈ 160ms。
+    // 早了像悬在半空就被压扁，晚了像落地之后才塌下去 —— 两头都不像掉下来。
+    const LAND = 0.195;
     // 里面的图标/数字：幅度大，负责"看得见的果冻"
     const JELLY = [
-      { transform: "scale(0.95, 1.13)", offset: 0.18 },   // 先弹起来并拉长
-      { transform: "scale(1.13, 0.87)", offset: 0.4 },    // 落地被压扁
-      { transform: "scale(0.96, 1.05)", offset: 0.62 },   // 回弹
-      { transform: "scale(1.03, 0.98)", offset: 0.82 },
+      { transform: "scale(1.01, 1.15)", offset: 0.07, easing: EASE_FALL },  // 57ms：弹到最高点，同时被拉长
+      { transform: "scale(1.15, 0.85)", offset: LAND, easing: EASE_POP },   // 160ms：砸到最下方，正好压得最扁
+      { transform: "scale(0.95, 1.06)", offset: 0.42, easing: EASE_FALL },  // 344ms：被弹回去
+      { transform: "scale(1.04, 0.975)", offset: 0.64, easing: EASE_POP },
+      { transform: "scale(0.995, 1.005)", offset: 0.85, easing: EASE_POP },
       { transform: "scale(1)", offset: 1 },
     ];
     // 底座整颗按钮：同相位、幅度小一半，跟着一起颤，读起来才像一整块果冻
     const JELLY_BODY = [
-      { transform: "scale(0.975, 1.055)", offset: 0.18 },
-      { transform: "scale(1.06, 0.945)", offset: 0.4 },
-      { transform: "scale(0.985, 1.025)", offset: 0.62 },
-      { transform: "scale(1.012, 0.992)", offset: 0.82 },
+      { transform: "scale(1.005, 1.06)", offset: 0.07, easing: EASE_FALL },
+      { transform: "scale(1.065, 0.94)", offset: LAND, easing: EASE_POP },
+      { transform: "scale(0.98, 1.025)", offset: 0.42, easing: EASE_FALL },
+      { transform: "scale(1.018, 0.99)", offset: 0.64, easing: EASE_POP },
+      { transform: "scale(0.998, 1.002)", offset: 0.85, easing: EASE_POP },
       { transform: "scale(1)", offset: 1 },
     ];
     // 左右滑动改连发数量时用的"干脆"版：一下就弹到位、不拖尾，不带压扁的回弹。
@@ -3031,7 +3047,9 @@
       { transform: "scale(1)", offset: 1 },
     ];
     const RELEASE_MOTIONS = {
-      jelly: { body: JELLY_BODY, content: JELLY, duration: 860, easing: "cubic-bezier(0.4, 0, 0.6, 1)" },
+      // 果冻的 easing 已经写在每一帧上，这里必须是 linear —— 否则整条时间轴会被再拉一次。
+      // startEasing 单独给第一段（当前大小 → 0.07 的极值）：它是动态起点，不在帧数组里。
+      jelly: { body: JELLY_BODY, content: JELLY, duration: 820, easing: "linear", startEasing: EASE_POP },
       snap: { body: SNAP_BODY, content: SNAP, duration: 230, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
     };
     let jellyAnimations = [];
@@ -3056,8 +3074,11 @@
         const computed = window.getComputedStyle(el).transform;
         const matrix = new DOMMatrixReadOnly(computed === "none" ? "" : computed);
         const start = `scale(${Math.hypot(matrix.a, matrix.b).toFixed(4)}, ${Math.hypot(matrix.c, matrix.d).toFixed(4)})`;
+        const opening = motion.startEasing
+          ? { transform: start, easing: motion.startEasing }
+          : { transform: start };
         jellyAnimations.push(el.animate(
-          [{ transform: start }, ...frames],
+          [opening, ...frames],
           { duration: motion.duration, easing: motion.easing },
         ));
       }
