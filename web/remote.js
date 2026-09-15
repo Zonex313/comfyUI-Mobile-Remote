@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { createPresetManager } from "./preset-manager.js?v=202609202";
-import { createWorkflowImporter } from "./workflow-import.js?v=202609263";
+import { createWorkflowImporter } from "./workflow-import.js?v=202609264";
 
 const TAB_ID = "mobile-remote";
 const POLL_MS = 3000;
@@ -877,7 +877,7 @@ app.registerExtension({
       const stylesheet = document.createElement("link");
       stylesheet.id = "mobile-remote-styles";
       stylesheet.rel = "stylesheet";
-      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609263`;
+      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609264`;
       document.head.append(stylesheet);
     }
     app.extensionManager.registerSidebarTab({

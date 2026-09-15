@@ -937,6 +937,29 @@
   gap: 4px;
 }
 
+/* 「已导入的工作流」卡片：置顶，自己滚动，不影响下面的目录树 */
+.mobile-remote-import-owned {
+  gap: 6px;
+}
+
+.mobile-remote-import-owned-list {
+  display: grid;
+  gap: 4px;
+  max-height: 34vh;
+  overflow: auto;
+}
+
+.mobile-remote-import-group-label {
+  margin: 3px 0 0;
+  color: var(--mr-muted);
+  font-size: 10.5px;
+  letter-spacing: 0.2px;
+}
+
+.mobile-remote-import-group-label:first-child {
+  margin-top: 0;
+}
+
 /* 目录节点：一层套一层，跟磁盘上的 workflows 结构一一对应 */
 .mobile-remote-import-dir {
   min-width: 0;

@@ -1,4 +1,4 @@
-import "./workflow-library.js?v=202609263";
+import "./workflow-library.js?v=202609264";
 import { app } from "../../scripts/app.js";
 
 /*
@@ -7,7 +7,9 @@ import { app } from "../../scripts/app.js";
  * 手机端默认只能读到电脑端当前打开着的工作流；这个页面把磁盘上已保存的工作流
  * 转成可执行格式交给插件存下来，并标成「常驻」，于是电脑端全关手机端也照样能用。
  *
- * 列表按 workflows 目录的真实层级铺开（和电脑端工作流浏览器里看到的一样），
+ * 页面分两块：
+ *   1. 「已导入的工作流」卡片 —— 插件里已经有记录的那些，直接在这里管理；
+ *   2. 目录树 —— 按 workflows 目录的真实层级铺开，跟电脑端工作流浏览器一样。
  * 名称和地址一律全文显示、不省略号，按钮单独占一行，不挤文字。
  * 转换在电脑端浏览器里完成：新建一张独立的 LiteGraph 图去 configure + graphToPrompt，
  * 全程不碰用户当前打开的画布（已实测与"打开该工作流再转换"结果完全一致）。
@@ -52,17 +54,30 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
 
   const status = element("p", "mobile-remote-tags-status");
   status.setAttribute("role", "status");
+
+  // 「已导入」卡片：插件里已经有记录的工作流，在这里直接管理
+  const owned = element("section", "mobile-remote-card mobile-remote-import-owned");
+  const ownedHeader = element("div", "mobile-remote-card-header");
+  const ownedTitleGroup = element("div", "mobile-remote-card-title-group");
+  ownedTitleGroup.append(element("h3", "mobile-remote-card-title", "已导入的工作流"));
+  const ownedState = element("span", "mobile-remote-status", "读取中");
+  ownedHeader.append(ownedTitleGroup, ownedState);
+  const ownedList = element("div", "mobile-remote-import-owned-list");
+  owned.append(ownedHeader, ownedList);
+
   const list = element("div", "mobile-remote-tags-list mobile-remote-import-list");
-  root.append(toolbar, status, list);
+  root.append(toolbar, status, owned, list);
 
   let library = [];            // 磁盘上的工作流清单
-  let records = [];            // 插件里已有的记录（含没常驻的）
+  let records = [];            // 插件里已有的记录
   let entries = [];            // 两者对上号之后的清单
+  let entryByRecordId = new Map();
   let allFolders = [];         // 全部文件夹路径，供"展开全部/收起全部"用
   let summary = { total: 0, imported: 0, pinned: 0 };
   let query = "";
   let notice = null;           // { text, tone }
-  let busyLabel = "";
+  let busyKey = "";
+  let busyName = "";
   let ready = false;
   let disposed = false;
   let loading = null;
@@ -73,8 +88,8 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
   const closedWhileSearching = new Set();
 
   function applyStatus() {
-    if (busyLabel) {
-      setText(status, `正在导入「${busyLabel}」…`);
+    if (busyName) {
+      setText(status, `正在导入「${busyName}」…`);
       status.dataset.tone = "pending";
       return;
     }
@@ -83,7 +98,7 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
       status.dataset.tone = notice.tone;
       return;
     }
-    setText(status, `磁盘上有 ${summary.total} 个已保存工作流 · 已导入 ${summary.imported} 个（常驻 ${summary.pinned} 个）`);
+    setText(status, `磁盘上共 ${summary.total} 个已保存工作流`);
     status.dataset.tone = "success";
   }
 
@@ -112,47 +127,110 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
     return control.node;
   }
 
-  function makeRow(entry, rendered) {
-    if (rendered.rows >= MAX_ROWS) {
+  /** 目录树里的一行：来源是磁盘清单项。 */
+  function entryModel(entry) {
+    return {
+      key: `lib:${entry.path}`,
+      name: entry.name,
+      address: entry.path,
+      size: entry.size,
+      pinned: entry.pinned,
+      imported: entry.imported,
+      recordId: entry.recordId,
+      entry,
+    };
+  }
+
+  /** 已导入卡片里的一行：来源是插件记录，能对回磁盘清单就带上路径和大小。 */
+  function recordModel(record) {
+    const id = String(record?.id || "");
+    const entry = entryByRecordId.get(id) || null;
+    return {
+      key: `rec:${id}`,
+      name: String(record?.name || "未命名工作流"),
+      address: entry ? entry.path : String(record?.library_path || record?.source || "（磁盘上已找不到这个文件）"),
+      size: entry ? entry.size : 0,
+      pinned: Boolean(record?.pinned),
+      imported: true,
+      recordId: id,
+      entry,
+      showChip: false,
+    };
+  }
+
+  function makeRow(model, rendered) {
+    if (rendered && rendered.rows >= MAX_ROWS) {
       rendered.trimmed += 1;
       return null;
     }
-    rendered.rows += 1;
+    if (rendered) rendered.rows += 1;
 
     const row = element("article", "mobile-remote-import-row");
-    row.dataset.state = entry.pinned ? "pinned" : entry.imported ? "imported" : "idle";
+    row.dataset.state = model.pinned ? "pinned" : model.imported ? "imported" : "idle";
 
     const main = element("div", "mobile-remote-import-main");
-    main.append(element("span", "mobile-remote-import-name", entry.name));
-    if (entry.pinned) main.append(element("span", "mobile-remote-import-state", "常驻"));
-    else if (entry.imported) main.append(element("span", "mobile-remote-import-state", "已导入"));
+    main.append(element("span", "mobile-remote-import-name", model.name));
+    if (model.showChip !== false) {
+      if (model.pinned) main.append(element("span", "mobile-remote-import-state", "常驻"));
+      else if (model.imported) main.append(element("span", "mobile-remote-import-state", "已导入"));
+    }
     row.append(main);
 
     // 地址永久全文显示：不截断、不加省略号
-    const size = sizeLabel(entry.size);
-    row.append(element("span", "mobile-remote-import-path", size ? `${entry.path} · ${size}` : entry.path));
+    const size = sizeLabel(model.size);
+    row.append(element("span", "mobile-remote-import-path", size ? `${model.address} · ${size}` : model.address));
 
     const actions = element("div", "mobile-remote-import-actions");
-    const busy = busyLabel === entry.name;
-    const importButton = chip(
-      busy ? "处理中" : entry.imported ? "刷新" : "导入",
-      "download",
-      `import:${entry.path}`,
-      () => void importEntry(entry),
-    );
-    importButton.disabled = Boolean(busyLabel);
-    actions.append(importButton);
-    if (entry.recordId) {
+    const busy = busyKey === model.key;
+    if (model.entry) {
+      const importButton = chip(
+        busy ? "处理中" : model.imported ? "刷新" : "导入",
+        "download",
+        `import:${model.key}`,
+        () => void importEntry(model),
+      );
+      importButton.disabled = Boolean(busyKey);
+      actions.append(importButton);
+    }
+    if (model.recordId) {
       actions.append(chip(
-        entry.pinned ? "取消常驻" : "设为常驻",
-        entry.pinned ? "times" : "check",
-        `pin:${entry.path}`,
-        () => void setPinned(entry.recordId, !entry.pinned),
+        model.pinned ? "取消常驻" : "设为常驻",
+        model.pinned ? "times" : "check",
+        `pin:${model.key}`,
+        () => void setPinned(model.recordId, !model.pinned),
       ));
-      actions.append(chip("删除", "trash", `delete:${entry.path}`, () => void deleteRecord(entry.recordId, entry.name)));
+      actions.append(chip("删除", "trash", `delete:${model.key}`, () => void deleteRecord(model.recordId, model.name)));
     }
     row.append(actions);
     return row;
+  }
+
+  function paintOwned() {
+    const models = records
+      .filter((record) => record && record.id)
+      .map(recordModel)
+      .sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+      });
+    const pinnedCount = models.filter((model) => model.pinned).length;
+    setText(ownedState, models.length ? `已导入 ${models.length} 个 · 常驻 ${pinnedCount} 个` : "还没有");
+    ownedList.replaceChildren();
+
+    if (!models.length) {
+      ownedList.append(element("p", "mobile-remote-note", "还没有导入任何工作流。在下面的目录树里点「导入」，它就会常驻在手机端。"));
+      return;
+    }
+    const group = (label, items) => {
+      if (!items.length) return;
+      ownedList.append(element("p", "mobile-remote-import-group-label", label));
+      for (const model of items) {
+        const row = makeRow(model, null);
+        if (row) ownedList.append(row);
+      }
+    };
+    group("常驻 · 电脑端不开也能用", models.filter((model) => model.pinned));
+    group("仅电脑端打开时可见", models.filter((model) => !model.pinned));
   }
 
   /** 递归铺一层文件夹：<details> 套 <details>，跟磁盘上的目录结构一一对应。 */
@@ -170,7 +248,7 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
     );
     const body = element("div", "mobile-remote-import-children");
     for (const entry of node.files) {
-      const row = makeRow(entry, rendered);
+      const row = makeRow(entryModel(entry), rendered);
       if (row) body.append(row);
     }
     for (const child of node.folders) {
@@ -197,6 +275,8 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
   function paint() {
     if (disposed) return;
     painting = true;
+    paintOwned();
+
     const searching = Boolean(query.trim());
     const filtered = Library.filterEntries(entries, query);
     const tree = Library.buildTree(filtered);
@@ -209,7 +289,7 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
       list.append(element("p", "mobile-remote-note", "没有匹配的工作流"));
     } else {
       for (const entry of tree.files) {
-        const row = makeRow(entry, rendered);
+        const row = makeRow(entryModel(entry), rendered);
         if (row) list.append(row);
       }
       for (const node of tree.folders) {
@@ -225,13 +305,17 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
     updateExpandLabel();
     applyStatus();
     if (lastFocus) {
-      const target = list.querySelector(`[data-focus="${CSS.escape(lastFocus)}"]`);
+      const target = root.querySelector(`[data-focus="${CSS.escape(lastFocus)}"]`);
       if (target) target.focus({ preventScroll: true });
     }
   }
 
   function sync() {
     entries = Library.describe(library, records);
+    entryByRecordId = new Map();
+    for (const entry of entries) {
+      if (entry.recordId) entryByRecordId.set(entry.recordId, entry);
+    }
     summary = Library.summarize(entries);
     const fullTree = Library.buildTree(entries);
     allFolders = Library.folderPaths(fullTree);
@@ -268,9 +352,11 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
     return { prompt, workflow: graphData };
   }
 
-  async function importEntry(entry) {
-    if (busyLabel) return;
-    busyLabel = entry.name;
+  async function importEntry(model) {
+    const entry = model.entry;
+    if (!entry || busyKey) return;
+    busyKey = model.key;
+    busyName = model.name;
     notice = null;
     paint();
     try {
@@ -293,13 +379,14 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
     } catch (error) {
       notice = { text: `导入失败：${error?.message || error}`, tone: "error" };
     } finally {
-      busyLabel = "";
+      busyKey = "";
+      busyName = "";
       await refreshRecords();
     }
   }
 
   async function setPinned(id, pinned) {
-    if (busyLabel) return;
+    if (busyKey) return;
     notice = null;
     try {
       await readJson(await fetch(`${recordUrl(id)}/pin`, {
@@ -316,7 +403,7 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
   }
 
   async function deleteRecord(id, name) {
-    if (busyLabel) return;
+    if (busyKey) return;
     notice = null;
     try {
       await readJson(await fetch(recordUrl(id), { method: "DELETE", cache: "no-store" }));
@@ -383,7 +470,7 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
     closedWhileSearching.clear();
     void load();
   });
-  list.addEventListener("focusin", (event) => {
+  root.addEventListener("focusin", (event) => {
     lastFocus = event.target?.dataset?.focus || "";
   });
 
