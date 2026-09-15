@@ -3003,7 +3003,6 @@
         updateActiveJob();
       }
       toast(submitted > 1 ? `已加入 ${submitted} 个任务` : "任务已加入队列", "success");
-      await Promise.all([loadStatus(), loadJobs(true), loadProgress(true)]);
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
       if (submitted === 0) {
@@ -3022,6 +3021,10 @@
       button.setAttribute("aria-busy", "false");
       $("workflowSelect").disabled = false;
       if (hidden) hidden.textContent = "加入队列";
+      // 队列/历史/状态的刷新放到解锁之后再跑：/mobile/api/jobs 在条数多时要好几秒，
+      // 让「提交中」的锁一直挂在那儿不值当。任务已经入队，刷新只是补界面，
+      // 而且乐观条目在提交循环里已经先渲染出来了，失败也不影响任务本身。
+      void Promise.all([loadStatus(), loadJobs(true), loadProgress(true)]).catch(() => {});
     }
   }
 
