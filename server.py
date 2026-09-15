@@ -37,6 +37,9 @@ MEDIA_CACHE = {"Cache-Control": "private, max-age=86400"}
 LOG = logging.getLogger("comfyui.mobile_remote")
 ROUTES_REGISTERED = False
 TAILSCALE_CACHE: tuple[float, list[str]] = (0.0, [])
+_TAILSCALE_LOCK = threading.Lock()
+_PREVIEW_LOCK = threading.Lock()
+_UPDATE_LOCK = threading.Lock()
 _HISTORY_CACHE: dict[str, dict[str, Any]] = {}
 _HISTORY_LOCK = threading.Lock()
 _HISTORY_SYNC_LOCK = threading.Lock()
@@ -44,6 +47,7 @@ _HISTORY_LOADED = False
 _HISTORY_TIMER_STARTED = False
 _FAVORITES: set[tuple[str, str, str, str]] = set()
 _FAVORITES_LOCK = threading.Lock()
+_FAVORITE_TOGGLE_LOCK = threading.Lock()
 _FAVORITES_LOADED = False
 
 # 缩略图列表缓存：同一份历史条目 + 同一版收藏状态只算一次。
@@ -302,6 +306,17 @@ def _update_plan(archive_path: Path) -> dict[str, Any]:
 UPDATE_BACKUP_KEEP = 2
 # 只有这些后缀才允许被"删除旧文件"逻辑清理，避免误删
 UPDATE_SAFE_SUFFIXES = {".py", ".js", ".css", ".html", ".toml", ".md", ".json", ".txt", ".svg", ".yml", ".yaml"}
+
+
+def _apply_update_and_prune(source_root: Path, target_root: Path, backup_root: Path) -> dict[str, Any]:
+    with _UPDATE_LOCK:
+        result = _apply_update_files(source_root, target_root, backup_root)
+        if result.get("ok"):
+            try:
+                _prune_backups()
+            except OSError:
+                LOG.exception("[Mobile Remote] failed to prune update backups")
+        return result
 
 
 def _prune_backups() -> int:
@@ -564,39 +579,40 @@ def _record_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None
 
 def _tailscale_ips() -> list[str]:
     global TAILSCALE_CACHE
-    now = time.monotonic()
-    if now - TAILSCALE_CACHE[0] < 60:
-        return TAILSCALE_CACHE[1]
+    with _TAILSCALE_LOCK:
+        now = time.monotonic()
+        if now - TAILSCALE_CACHE[0] < 60:
+            return list(TAILSCALE_CACHE[1])
 
-    executables = ["tailscale", r"C:\Program Files\Tailscale\tailscale.exe"]
-    found: list[str] = []
-    for executable in executables:
-        try:
-            result = subprocess.run(
-                [executable, "ip", "-4"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            if result.returncode != 0:
-                continue
-            for line in result.stdout.splitlines():
-                candidate = line.strip()
-                try:
-                    address = ipaddress.ip_address(candidate)
-                except ValueError:
+        executables = ["tailscale", r"C:\Program Files\Tailscale\tailscale.exe"]
+        found: list[str] = []
+        for executable in executables:
+            try:
+                result = subprocess.run(
+                    [executable, "ip", "-4"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                if result.returncode != 0:
                     continue
-                if address.version == 4 and address in ipaddress.ip_network("100.64.0.0/10"):
-                    found.append(candidate)
-            if found:
-                break
-        except (OSError, subprocess.SubprocessError):
-            continue
+                for line in result.stdout.splitlines():
+                    candidate = line.strip()
+                    try:
+                        address = ipaddress.ip_address(candidate)
+                    except ValueError:
+                        continue
+                    if address.version == 4 and address in ipaddress.ip_network("100.64.0.0/10"):
+                        found.append(candidate)
+                if found:
+                    break
+            except (OSError, subprocess.SubprocessError):
+                continue
 
-    TAILSCALE_CACHE = (now, sorted(set(found)))
-    return TAILSCALE_CACHE[1]
+        TAILSCALE_CACHE = (now, sorted(set(found)))
+        return list(TAILSCALE_CACHE[1])
 
 
 def _input_specs(class_type: str) -> dict[str, dict[str, Any]]:
@@ -1139,19 +1155,20 @@ def _preview_webp_bytes(path: Path, size: int = 384) -> bytes | None:
         from PIL import Image
 
         from PIL import ImageFile
-        previous_truncated = ImageFile.LOAD_TRUNCATED_IMAGES
-        ImageFile.LOAD_TRUNCATED_IMAGES = True
-        try:
-            with Image.open(path) as img:
-                img.load()
-                img.thumbnail((size, size))
-                if img.mode not in {"RGB", "L"}:
-                    img = img.convert("RGB")
-                buffer = BytesIO()
-                img.save(buffer, format="WEBP", quality=72, method=4)
-                return buffer.getvalue()
-        finally:
-            ImageFile.LOAD_TRUNCATED_IMAGES = previous_truncated
+        with _PREVIEW_LOCK:
+            previous_truncated = ImageFile.LOAD_TRUNCATED_IMAGES
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+            try:
+                with Image.open(path) as img:
+                    img.load()
+                    img.thumbnail((size, size))
+                    if img.mode not in {"RGB", "L"}:
+                        img = img.convert("RGB")
+                    buffer = BytesIO()
+                    img.save(buffer, format="WEBP", quality=72, method=4)
+                    return buffer.getvalue()
+            finally:
+                ImageFile.LOAD_TRUNCATED_IMAGES = previous_truncated
     except Exception:
         LOG.debug("[Mobile Remote] could not build preview for %s", path)
         return None
@@ -1364,10 +1381,12 @@ def _toggle_favorite(job_id: str, filename: str, subfolder: str, type_name: str)
 
 
 def _toggle_favorite_result(job_id: str, filename: str, subfolder: str, type_name: str) -> dict[str, Any]:
-    already_favorite = _is_favorite(job_id, filename, subfolder, type_name)
-    if not already_favorite and not _media_belongs_to_job_without_favorites(job_id, filename, subfolder, type_name):
-        return {"ok": False, "error": "无法收藏这张图"}
-    return {"ok": True, "favorite": _toggle_favorite(job_id, filename, subfolder, type_name)}
+    # 校验和切换必须是一个事务：多个浏览器/手机请求同时点击时不能把同一次点击翻转两次。
+    with _FAVORITE_TOGGLE_LOCK:
+        already_favorite = _is_favorite(job_id, filename, subfolder, type_name)
+        if not already_favorite and not _media_belongs_to_job_without_favorites(job_id, filename, subfolder, type_name):
+            return {"ok": False, "error": "无法收藏这张图"}
+        return {"ok": True, "favorite": _toggle_favorite(job_id, filename, subfolder, type_name)}
 
 
 def _delete_output_result(job_id: str, filename: str, subfolder: str, type_name: str) -> dict[str, Any]:
@@ -1395,7 +1414,7 @@ def _job_detail_result(job_id: str) -> dict[str, Any]:
     if job is not None:
         history_item = history.get(job_id)
         return {"ok": True, "job": _sanitize_job_detail(_decorate_job(job, history_item))}
-    _sync_history_from_live()
+    _sync_history_from_live(maintenance=False)
     entry = _load_history_index().get(job_id)
     if entry is not None:
         return {"ok": True, "job": _sanitize_job_detail(_decorate_job(_persisted_job(job_id, entry), entry))}
@@ -1486,7 +1505,11 @@ def _history_gallery(history_item: dict[str, Any] | None, job_id: str = "") -> l
     marker = str(job_id or "")
     if marker:
         cached = _GALLERY_CACHE.get(marker)
-        if cached is not None and cached[1] == _GALLERY_REVISION:
+        if (
+            cached is not None
+            and cached[0] is history_item
+            and cached[1] == _GALLERY_REVISION
+        ):
             # 返回副本：调用方会往条目里塞字段，别把缓存本身改脏
             return [dict(item) for item in cached[2]]
     gallery = _history_gallery_uncached(history_item, marker)
@@ -1856,7 +1879,7 @@ def _persist_history_index() -> None:
         if pruned.keys() != _HISTORY_CACHE.keys():
             _HISTORY_CACHE.clear()
             _HISTORY_CACHE.update(pruned)
-        snapshot = dict(_HISTORY_CACHE)
+        snapshot = copy.deepcopy(_HISTORY_CACHE)
     try:
         _write_json_atomic(
             HISTORY_INDEX_PATH,
@@ -1867,51 +1890,63 @@ def _persist_history_index() -> None:
 
 
 def _scrub_stale_history_images(live_ids: set[str]) -> bool:
-    """Drop cached images whose file is gone or was replaced by name reuse."""
+    """Drop stale history images without holding the history lock during stat()."""
     _load_favorites()
     with _FAVORITES_LOCK:
         fav_keys = set(_FAVORITES)
     pinned = {job_id for job_id, _n, _s, _t in fav_keys if job_id}
+    with _HISTORY_LOCK:
+        snapshots = {
+            str(prompt_id): copy.deepcopy(entry)
+            for prompt_id, entry in _HISTORY_CACHE.items()
+        }
+    decisions: dict[str, dict[str, Any] | None] = {}
+    for prompt_id, entry in snapshots.items():
+        if not isinstance(entry, dict):
+            decisions[prompt_id] = None
+            continue
+        outputs = entry.get("outputs")
+        if not isinstance(outputs, dict):
+            continue
+        done_ms = _history_completion_time(entry)
+        content_left = False
+        for node_output in outputs.values():
+            if not isinstance(node_output, dict):
+                continue
+            images = node_output.get("images")
+            if isinstance(images, list):
+                kept = []
+                for image in images:
+                    if not isinstance(image, dict) or not image.get("filename"):
+                        continue
+                    filename = str(image.get("filename", ""))
+                    subfolder = str(image.get("subfolder", "") or "")
+                    type_name = str(image.get("type", "output") or "output")
+                    if _favorite_key(prompt_id, filename, subfolder, type_name) in fav_keys or _media_item_fresh(image, done_ms):
+                        kept.append(image)
+                        content_left = True
+                if len(kept) != len(images):
+                    node_output["images"] = kept
+            elif any(value for key, value in node_output.items() if key != "images"):
+                content_left = True
+        if not content_left and prompt_id not in live_ids and prompt_id not in pinned:
+            decisions[prompt_id] = None
+        elif entry != snapshots[prompt_id]:
+            decisions[prompt_id] = entry
+        else:
+            decisions[prompt_id] = entry
     changed = False
     with _HISTORY_LOCK:
-        for prompt_id in list(_HISTORY_CACHE.keys()):
-            entry = _HISTORY_CACHE[prompt_id]
-            if not isinstance(entry, dict):
+        for prompt_id, candidate in decisions.items():
+            current = _HISTORY_CACHE.get(prompt_id)
+            original = snapshots.get(prompt_id)
+            if current != original:
+                continue
+            if candidate is None:
                 _HISTORY_CACHE.pop(prompt_id, None)
                 changed = True
-                continue
-            outputs = entry.get("outputs")
-            if not isinstance(outputs, dict):
-                continue
-            done_ms = _history_completion_time(entry)
-            content_left = False
-            for node_output in outputs.values():
-                if not isinstance(node_output, dict):
-                    continue
-                images = node_output.get("images")
-                if isinstance(images, list):
-                    kept = []
-                    for image in images:
-                        if not isinstance(image, dict) or not image.get("filename"):
-                            continue
-                        filename = str(image.get("filename", ""))
-                        subfolder = str(image.get("subfolder", "") or "")
-                        type_name = str(image.get("type", "output") or "output")
-                        # 收藏的图永远保留；其余按「文件还在不在」判断
-                        if _favorite_key(str(prompt_id), filename, subfolder, type_name) in fav_keys:
-                            kept.append(image)
-                            content_left = True
-                            continue
-                        if _media_item_fresh(image, done_ms):
-                            kept.append(image)
-                            content_left = True
-                    if len(kept) != len(images):
-                        node_output["images"] = kept
-                        changed = True
-                elif any(value for key, value in node_output.items() if key != "images"):
-                    content_left = True
-            if not content_left and str(prompt_id) not in live_ids and str(prompt_id) not in pinned:
-                _HISTORY_CACHE.pop(prompt_id, None)
+            elif candidate != current:
+                _HISTORY_CACHE[prompt_id] = candidate
                 changed = True
     if changed:
         _bump_gallery_revision()
@@ -2510,8 +2545,8 @@ def register_routes() -> None:
                 }
             )
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        backup_root = PLUGIN_ROOT / ".runtime" / f"backup-{stamp}"
-        result = await asyncio.to_thread(_apply_update_files, plan["root"], PLUGIN_ROOT, backup_root)
+        backup_root = PLUGIN_ROOT / ".runtime" / f"backup-{stamp}-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
+        result = await asyncio.to_thread(_apply_update_and_prune, plan["root"], PLUGIN_ROOT, backup_root)
         if not result["ok"]:
             return web.json_response({"ok": False, "error": result["error"], "copied": len(result["copied"])})
         LOG.info(
@@ -2520,7 +2555,6 @@ def register_routes() -> None:
             len(result["copied"]),
             backup_root,
         )
-        await asyncio.to_thread(_prune_backups)
         return web.json_response(
             {
                 "ok": True,

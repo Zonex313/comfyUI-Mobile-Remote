@@ -151,12 +151,12 @@ class GalleryCacheTests(unittest.TestCase):
             server._history_gallery(entry, "job-1")
         self.assertEqual(inner.call_count, 2)
 
-    def test_new_entry_object_reuses_revision_cache(self):
+    def test_new_entry_object_invalidates_identity_cache(self):
         with mock.patch.object(server, "_media_item_fresh", return_value=True), \
                 mock.patch.object(server, "_history_gallery_uncached", wraps=server._history_gallery_uncached) as inner:
             server._history_gallery(self._entry(), "job-1")
             server._history_gallery(self._entry(), "job-1")
-        self.assertEqual(inner.call_count, 1)
+        self.assertEqual(inner.call_count, 2)
 
     def test_empty_job_id_is_not_cached(self):
         entry = self._entry()

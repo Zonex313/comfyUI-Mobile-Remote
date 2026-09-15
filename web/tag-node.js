@@ -323,11 +323,13 @@ class TagPanel {
 
 // ---- 标签编辑弹层（对齐手机端的「点标签修改」）----
 let popup = null;
+let popupOwner = null;
 
 function closePopup() {
   if (!popup) return;
   popup.remove();
   popup = null;
+  popupOwner = null;
   document.removeEventListener("pointerdown", onPopupOutside, true);
   document.removeEventListener("keydown", onPopupKey, true);
 }
@@ -418,6 +420,7 @@ function openEditor(panel, category, slot, anchor) {
   box.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)) + "px";
   box.style.top = Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - height - 8)) + "px";
   popup = box;
+  popupOwner = panel.node;
   paint();
   document.addEventListener("pointerdown", onPopupOutside, true);
   document.addEventListener("keydown", onPopupKey, true);
@@ -525,13 +528,17 @@ app.registerExtension({
     if (nodeData?.name !== NODE_TYPE) return;
     ensureStyles();
     installHook();
-    const removed = nodeType.prototype.onRemoved;
-    nodeType.prototype.onRemoved = function (...rest) {
+    const proto = nodeType.prototype;
+    if (proto.__mtrHooksInstalled) return;
+    proto.__mtrHooksInstalled = true;
+    const removed = proto.onRemoved;
+    proto.onRemoved = function (...rest) {
+      if (popupOwner === this) closePopup();
       if (this.__mtrPanel) this.__mtrPanel = null;
       return removed?.apply(this, rest);
     };
-    const created = nodeType.prototype.onNodeCreated;
-    nodeType.prototype.onNodeCreated = function (...args) {
+    const created = proto.onNodeCreated;
+    proto.onNodeCreated = function (...args) {
       const result = created?.apply(this, args);
       const node = this;
       const panel = new TagPanel(node);
@@ -556,8 +563,8 @@ app.registerExtension({
       return result;
     };
     // 从工作流加载时前端会重建控件顺序，这里再兜一次（只包一层，不能放进 onNodeCreated）
-    const configured = nodeType.prototype.onConfigure;
-    nodeType.prototype.onConfigure = function (...rest) {
+    const configured = proto.onConfigure;
+    proto.onConfigure = function (...rest) {
       const out = configured?.apply(this, rest);
       moveTextToBottom(this);
       applyTextPlaceholder(this);

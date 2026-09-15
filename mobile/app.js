@@ -1493,10 +1493,10 @@
 
     const advancedNodes = [];
     const advancedContent = document.querySelector("#advancedSection .advanced-content");
-    if (batch && seed) {
+    if (batch || seed) {
       const pairRow = document.createElement("div");
       pairRow.className = "pair-row";
-      [{ field: batch, build: makeNumber }, { field: seed, build: makeSeedRow }].forEach(({ field, build }) => {
+      [{ field: batch, build: makeNumber }, { field: seed, build: makeSeedRow }].filter(({ field }) => field).forEach(({ field, build }) => {
         const cell = document.createElement("div");
         cell.className = "field pair-cell";
         const control = build(field, fieldIndex(field));
@@ -1511,10 +1511,6 @@
       } else {
         advancedNodes.push(pairRow);
       }
-    } else {
-      [batch, seed].filter(Boolean).forEach((field) => {
-        advancedNodes.push(renderField(field, fieldIndex(field)));
-      });
     }
     if (trio.length) {
       const trioRow = document.createElement("div");
@@ -1656,7 +1652,8 @@
   function mediaKind(item) {
     const filename = String(item?.filename || "").toLowerCase();
     const type = String(item?.mediaType || item?.format || "").toLowerCase();
-    if (type.includes("video") || /\.(mp4|webm|mov|mkv|gif)$/.test(filename)) return "video";
+    if (/\.gif$/.test(filename)) return "image";
+    if (type.includes("video") || /\.(mp4|webm|mov|mkv)$/.test(filename)) return "video";
     if (type.includes("audio") || /\.(mp3|wav|flac|m4a|ogg)$/.test(filename)) return "audio";
     if (item?.content !== undefined || type.includes("text")) return "text";
     if (item?.filename) return "image";
@@ -2127,6 +2124,8 @@
     });
   }
 
+  let favoriteToggleInFlight = false;
+
   function currentGalleryJobId() {
     const item = state.galleryItems[state.galleryIndex];
     return String(item?.jobId || item?.job_id || state.galleryJobId || "");
@@ -2148,6 +2147,7 @@
   }
 
   async function toggleCurrentGalleryFavorite() {
+    if (favoriteToggleInFlight) return;
     const item = state.galleryItems[state.galleryIndex];
     const jobId = currentGalleryJobId();
     if (!item?.filename || !jobId) {
@@ -2155,6 +2155,7 @@
       return;
     }
     const previous = Boolean(item.favorite);
+    favoriteToggleInFlight = true;
     item.favorite = !previous;
     syncFavoriteButton();
     if (state.favoritesOnly && !item.favorite) renderHistory();
@@ -2178,6 +2179,8 @@
       syncFavoriteButton();
       if (state.favoritesOnly) renderHistory();
       toast(error.message || "收藏失败", "error");
+    } finally {
+      favoriteToggleInFlight = false;
     }
   }
 
