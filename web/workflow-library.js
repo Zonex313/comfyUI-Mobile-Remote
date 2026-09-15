@@ -134,6 +134,70 @@
     });
   }
 
+  var MAX_DEPTH = 24;
+
+  function makeNode(name, path) {
+    return { name: name, path: path, count: 0, files: [], folders: [], children: Object.create(null) };
+  }
+
+  function byName(a, b) {
+    if (a.name === b.name) return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+    return a.name < b.name ? -1 : 1;
+  }
+
+  function finalize(node) {
+    node.files.sort(byName);
+    node.folders.sort(byName);
+    var total = node.files.length;
+    for (var i = 0; i < node.folders.length; i += 1) {
+      total += finalize(node.folders[i]);
+      delete node.folders[i].children;
+    }
+    node.count = total;
+    return total;
+  }
+
+  /** 按 workflows 目录的真实层级建树：文件夹嵌套，根目录下的散装文件放在 files 里。 */
+  function buildTree(entries) {
+    if (!Array.isArray(entries)) return { files: [], folders: [] };
+    var root = makeNode("", "");
+    for (var i = 0; i < entries.length; i += 1) {
+      var entry = entries[i];
+      if (!isObject(entry) || typeof entry.path !== "string") continue;
+      var node = root;
+      var folder = typeof entry.folder === "string" ? entry.folder : "";
+      if (folder) {
+        var parts = folder.split("/");
+        if (parts.length > MAX_DEPTH) parts = parts.slice(0, MAX_DEPTH);
+        for (var p = 0; p < parts.length; p += 1) {
+          if (!parts[p]) continue;
+          var walked = node.path ? node.path + "/" + parts[p] : parts[p];
+          if (!node.children[parts[p]]) {
+            node.children[parts[p]] = makeNode(parts[p], walked);
+            node.folders.push(node.children[parts[p]]);
+          }
+          node = node.children[parts[p]];
+        }
+      }
+      node.files.push(entry);
+    }
+    finalize(root);
+    delete root.children;
+    return { files: root.files, folders: root.folders };
+  }
+
+  /** 树里所有文件夹的路径，供「展开全部」用。 */
+  function folderPaths(tree) {
+    var out = [];
+    (function walk(nodes) {
+      for (var i = 0; i < nodes.length; i += 1) {
+        out.push(nodes[i].path);
+        walk(nodes[i].folders);
+      }
+    })(tree && Array.isArray(tree.folders) ? tree.folders : []);
+    return out;
+  }
+
   /** 卡片副标题用：一共多少个、已经导入多少个、其中常驻多少个。 */
   function summarize(described) {
     var list = Array.isArray(described) ? described : [];
@@ -153,5 +217,7 @@
     filterEntries: filterEntries,
     describe: describe,
     summarize: summarize,
+    buildTree: buildTree,
+    folderPaths: folderPaths,
   };
 }));

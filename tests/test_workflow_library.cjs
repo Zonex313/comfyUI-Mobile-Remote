@@ -82,6 +82,117 @@ test('记录匹配：靠 source 对上号，标出已导入和常驻', () => {
   assert.deepEqual(Library.summarize(described), { total: 4, imported: 2, pinned: 1 });
 });
 
+const treeListing = [
+  { path: 'About Mie.json', size: 626 },
+  { path: 'moodyKrea24KHD_v20.json', size: 110234 },
+  { path: '全部/图像/图像生成/Krea-2/moodyKrea24KHD_v20.json', size: 1 },
+  { path: '全部/图像/图像生成/Anima/Anima_Base.json', size: 2 },
+  { path: '全部/图像/图像生成/Anima/Anima_Turbo.json', size: 3 },
+  { path: '全部/图像/图像编辑/Krea-2/edit.json', size: 4 },
+  { path: '全部/视频/Wan2.1/Wan2.1_T2V.json', size: 5 },
+  { path: '开箱即用/图像/图像生成/Krea-2/moodyKrea24KHD_v20.json', size: 6 },
+];
+
+const shape = (node) => ({
+  name: node.name,
+  path: node.path,
+  count: node.count,
+  files: node.files.map((entry) => entry.name),
+  folders: node.folders.map(shape),
+});
+
+test('目录树：层级和磁盘结构一致，每层按名字排序，count 是递归总数', () => {
+  const tree = Library.buildTree(Library.normalizeEntries(treeListing));
+  assert.deepEqual(tree.files.map((entry) => entry.name), ['About Mie', 'moodyKrea24KHD_v20']);
+  assert.deepEqual(tree.folders.map(shape), [
+    {
+      name: '全部', path: '全部', count: 5, files: [], folders: [
+        {
+          name: '图像', path: '全部/图像', count: 4, files: [], folders: [
+            {
+              name: '图像生成', path: '全部/图像/图像生成', count: 3, files: [], folders: [
+                { name: 'Anima', path: '全部/图像/图像生成/Anima', count: 2, files: ['Anima_Base', 'Anima_Turbo'], folders: [] },
+                { name: 'Krea-2', path: '全部/图像/图像生成/Krea-2', count: 1, files: ['moodyKrea24KHD_v20'], folders: [] },
+              ],
+            },
+            {
+              name: '图像编辑', path: '全部/图像/图像编辑', count: 1, files: [], folders: [
+                { name: 'Krea-2', path: '全部/图像/图像编辑/Krea-2', count: 1, files: ['edit'], folders: [] },
+              ],
+            },
+          ],
+        },
+        {
+          name: '视频', path: '全部/视频', count: 1, files: [], folders: [
+            { name: 'Wan2.1', path: '全部/视频/Wan2.1', count: 1, files: ['Wan2.1_T2V'], folders: [] },
+          ],
+        },
+      ],
+    },
+    {
+      name: '开箱即用', path: '开箱即用', count: 1, files: [], folders: [
+        {
+          name: '图像', path: '开箱即用/图像', count: 1, files: [], folders: [
+            {
+              name: '图像生成', path: '开箱即用/图像/图像生成', count: 1, files: [], folders: [
+                { name: 'Krea-2', path: '开箱即用/图像/图像生成/Krea-2', count: 1, files: ['moodyKrea24KHD_v20'], folders: [] },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ]);
+  // 内部索引不该泄漏出去
+  assert.equal('children' in tree.folders[0], false);
+});
+
+test('目录树：空输入、脏输入都返回空树', () => {
+  for (const value of [null, undefined, 'nope', [], [null, 7, {}]]) {
+    assert.deepEqual(Library.buildTree(value), { files: [], folders: [] });
+  }
+});
+
+test('目录树：folderPaths 给出去重的全部目录路径（展开全部用）', () => {
+  const tree = Library.buildTree(Library.normalizeEntries(treeListing));
+  assert.deepEqual(Library.folderPaths(tree), [
+    '全部',
+    '全部/图像',
+    '全部/图像/图像生成',
+    '全部/图像/图像生成/Anima',
+    '全部/图像/图像生成/Krea-2',
+    '全部/图像/图像编辑',
+    '全部/图像/图像编辑/Krea-2',
+    '全部/视频',
+    '全部/视频/Wan2.1',
+    '开箱即用',
+    '开箱即用/图像',
+    '开箱即用/图像/图像生成',
+    '开箱即用/图像/图像生成/Krea-2',
+  ]);
+  assert.deepEqual(Library.folderPaths(null), []);
+});
+
+test('目录树：搜索之后只剩命中的分支，但仍然保留层级', () => {
+  const entries = Library.normalizeEntries(treeListing);
+  const tree = Library.buildTree(Library.filterEntries(entries, 'anima'));
+  assert.deepEqual(tree.folders.map(shape), [
+    {
+      name: '全部', path: '全部', count: 2, files: [], folders: [
+        {
+          name: '图像', path: '全部/图像', count: 2, files: [], folders: [
+            {
+              name: '图像生成', path: '全部/图像/图像生成', count: 2, files: [], folders: [
+                { name: 'Anima', path: '全部/图像/图像生成/Anima', count: 2, files: ['Anima_Base', 'Anima_Turbo'], folders: [] },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ]);
+});
+
 test('记录匹配：磁盘上的路径变了，还能靠 library_path 认出来', () => {
   const entries = Library.normalizeEntries([{ path: '全部/新目录/小马.json' }]);
   const described = Library.describe(entries, [
