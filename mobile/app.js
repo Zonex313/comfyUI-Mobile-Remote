@@ -3003,8 +3003,48 @@
 
     // 按下反馈走 JS 类名，不靠 :active —— 按下时 dock 会被加上 is-swiping，
     // 而 .nav-dock.is-swiping .generate-fab:active{transform:none} 会把它整条否掉。
-    const pressDown = () => button.classList.add("is-pressing");
-    const pressUp = () => button.classList.remove("is-pressing");
+    // 松手后的「果冻落地」：过冲拉长 → 被压扁 → 幅度递减地晃两下收住。
+    // 用 WAAPI 而不是 CSS 关键帧：svg 上的 animation 属性已经被入场动画占着，
+    // 改写它会把入场动画顺带重启一遍；WAAPI 既能避开特指度之争，也能从
+    // "当前实际大小"起步（早点松手时不会跳变）。
+    const JELLY = [
+      { transform: "scale(0.95, 1.13)", offset: 0.18 },   // 先弹起来并拉长
+      { transform: "scale(1.13, 0.87)", offset: 0.4 },    // 落地被压扁
+      { transform: "scale(0.96, 1.05)", offset: 0.62 },   // 回弹
+      { transform: "scale(1.03, 0.98)", offset: 0.82 },
+      { transform: "scale(1)", offset: 1 },
+    ];
+    let jellyAnimations = [];
+    const stopJelly = () => {
+      for (const animation of jellyAnimations) {
+        try { animation.cancel(); } catch { /* 已经结束 */ }
+      }
+      jellyAnimations = [];
+    };
+    const playJelly = () => {
+      if (typeof button.animate !== "function") return;
+      if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+      stopJelly();
+      for (const el of [button.querySelector("svg"), $("repeatCenterNum")]) {
+        if (!el) continue;
+        const computed = window.getComputedStyle(el).transform;
+        const matrix = new DOMMatrixReadOnly(computed === "none" ? "" : computed);
+        const start = `scale(${Math.hypot(matrix.a, matrix.b).toFixed(4)}, ${Math.hypot(matrix.c, matrix.d).toFixed(4)})`;
+        jellyAnimations.push(el.animate(
+          [{ transform: start }, ...JELLY],
+          { duration: 860, easing: "cubic-bezier(0.4, 0, 0.6, 1)" },
+        ));
+      }
+    };
+    const pressDown = () => {
+      stopJelly();                        // 上一次还在晃就先掐掉，别盖住这次的按下反馈
+      button.classList.add("is-pressing");
+    };
+    const pressUp = () => {
+      if (!button.classList.contains("is-pressing")) return;
+      button.classList.remove("is-pressing");
+      playJelly();
+    };
 
     button.addEventListener("pointerdown", (event) => {
       if (event.pointerType === "mouse" && event.button !== 0) return;

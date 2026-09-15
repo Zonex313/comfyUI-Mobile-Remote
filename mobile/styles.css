@@ -645,14 +645,18 @@ svg {
     margin-left 520ms cubic-bezier(0.2, 1.32, 0.42, 1);
 }
 
-/* 上滑切模式：图标先淡出、缩小并转一点，换完图标再靠上面的过渡弹回来。
+/* 上滑切模式：图标只做淡出 + 轻微转角，尺寸不变。
    配色由 .fab-random-layer 同时开始淡入淡出，两条动作叠在一起。 */
 .generate-fab.is-mode-switching svg {
   opacity: 0;
-  transform: scale(0.55) rotate(-32deg);
+  transform: rotate(-20deg);
   transition-duration: 150ms, 130ms, 150ms;
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1), ease-in, cubic-bezier(0.4, 0, 0.2, 1);
 }
+
+/* 松手后的「果冻落地」不在这里：它由 app.js 用 WAAPI 从"当前实际大小"起步播放。
+   原因有两条：① 这条 animation 属性已经被图标的入场动画占着，改它会顺带把入场动画重启；
+   ② 单条贝塞尔只能过一次冲，做不出"压扁又弹回来"的振荡，必须走关键帧。 */
 
 /* 切模式时整颗按钮轻轻压一下再弹回来 */
 @keyframes fab-mode-pop {
