@@ -2849,13 +2849,37 @@
     if (!submittingBatch) button.disabled = false;
   }
 
+  let modeSwitching = false;
+
+  // 上滑切模式：配色立刻开始淡入淡出（交给 .fab-random-layer 那条过渡），
+  // 图标同时淡出缩小，换完图标再弹回来，整颗按钮跟着轻压一下。
+  // 配色和图标是叠在一起跑的两条动作，不是"换完再变色"。
   function toggleRandomGenerate() {
-    state.randomGenerate = !state.randomGenerate;
+    if (modeSwitching) return;
+    const button = $("generateButton");
+    const next = !state.randomGenerate;
+    state.randomGenerate = next;
     try {
-      phoneSettings.setItem("comfy-mobile-remote.randomGenerate", state.randomGenerate ? "1" : "0");
+      phoneSettings.setItem("comfy-mobile-remote.randomGenerate", next ? "1" : "0");
     } catch { /* storage optional */ }
-    paintGenerateButton();
-    showModeTip(state.randomGenerate);
+    if (!button) {
+      paintGenerateButton();
+      showModeTip(next);
+      return;
+    }
+    modeSwitching = true;
+    button.classList.toggle("random-mode", next);
+    button.classList.add("is-mode-pop");
+    button.classList.add("is-mode-switching");
+    showModeTip(next);
+    window.setTimeout(() => {
+      paintGenerateButton();                 // 换图标与文案（配色类已是目标值，不会跳）
+      button.classList.remove("is-mode-switching");
+      window.setTimeout(() => {
+        button.classList.remove("is-mode-pop");
+        modeSwitching = false;
+      }, 560);
+    }, 150);
   }
 
   function bindGenerateSwipe() {
