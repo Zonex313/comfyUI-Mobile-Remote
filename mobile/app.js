@@ -6,7 +6,11 @@
   // 若画面尚未落帧，用户的第二下点击会穿透到导航并误切页面。
   const GALLERY_CLOSE_GUARD_MS = 450;
   // 队列/历史首屏只拉最近这么多条，翻历史时再用 offset 分段往更早的补（省流量）。
-  const JOBS_PAGE = 60;
+  // 「加载更多」每次也是这么多：loadMoreJobsOnce 拿它当 limit 并把游标推进这么多。
+  const JOBS_PAGE = 50;
+  // 上滑松手后底部 dock 落回原位要 160ms（见 styles.css 的 .nav-dock）。
+  // 果冻的「压扁」和上滑换色的起点都得对齐这一刻：落地那下才算数。
+  const DOCK_LANDING_MS = 160;
   const state = {
     online: false,
     status: null,
@@ -2221,6 +2225,7 @@
     image.style.transform = direction < 0 ? offLeft : offRight;
     state.galleryIndex = next;
     renderGalleryItem({ keepPainted: galleryUrlCached(mediaUrl(state.galleryItems[next])) });
+    maybeLoadMoreForGallery();
     const finish = () => {
       ghost.remove();
       image.style.transform = "";
@@ -2307,6 +2312,31 @@
     }));
   }
 
+  // 大图查看器的序列跟着网格走：轮询进来的新图（插在最前）和翻出来的更早页
+  // （接在最后）都会进序列，当前这张按 key 重新定位 —— 画面不跳，
+  // 计数和「还能不能往后翻」立刻跟着更新，不用退出去重进。
+  function syncGallerySequence() {
+    const dialog = $("galleryDialog");
+    // 拖动中换序列会让手指底下的分页错位；松手后自然会再同步一次。
+    if (!dialog?.open || state.galleryDragActive) return;
+    const items = state.flatGallery;
+    if (!Array.isArray(items) || items.length === 0 || items === state.galleryItems) return;
+    const key = state.galleryItems[state.galleryIndex]?.key;
+    const found = key ? items.findIndex((item) => item.key === key) : -1;
+    state.galleryItems = items;
+    state.galleryIndex = found >= 0 ? found : Math.min(state.galleryIndex, items.length - 1);
+    renderGalleryItem({ keepPainted: true });
+  }
+
+  // 翻到倒数第二张就该预备下一段了：拉回来的更早页会直接进序列（见上），
+  // 所以能一路翻到底，不用退出去重进。判断条件和「加载更早的」按钮同源。
+  function maybeLoadMoreForGallery() {
+    if (!state.galleryItems.length) return;
+    if (state.galleryItems.length - state.galleryIndex > 2) return;
+    if (!historyHasMore()) return;
+    loadMoreJobs().catch(() => {});
+  }
+
   function openGallery(items, index, jobId = "") {
     if (!Array.isArray(items) || items.length === 0) return;
     const gallery = $("galleryDialog");
@@ -2316,6 +2346,7 @@
     state.galleryJobId = jobId || "";
     renderGalleryItem();
     gallery.showModal();
+    maybeLoadMoreForGallery();
   }
 
   function collectHistoryEntries() {
@@ -2453,6 +2484,9 @@
       grid.querySelectorAll(".history-media.is-loading").forEach(settleHistoryMedia);
       return;
     }
+    // 走到这里说明条目真的变了（新图进来了／更早的页翻出来了），
+    // 大图序列顺手跟上；上面那条快速返回不用管，序列本来就是最新的。
+    syncGallerySequence();
 
     const wanted = new Set(entries.map((entry) => entry.key));
     const hadCards = state.historyCards.size > 0;
@@ -2590,6 +2624,12 @@
     return button;
   }
 
+  // 还能往更早翻吗？按钮的显隐、滑到底自动加载、大图翻页补档，
+  // 三处共用同一条判断，免得一边以为还能翻、另一边空拉。
+  function historyHasMore() {
+    return state.jobsHasMore && state.jobsPageOffset < state.totalJobs;
+  }
+
   function paintHistoryMore() {
     const button = historyMoreButton();
     if (!button) return;
@@ -2598,7 +2638,7 @@
     // 所以再要求「已加载条数还没追上 total」，否则按钮会在翻完后又冒出来。
     // 用「窗口游标」判断，而不是已加载条数：首屏会额外带回全部收藏任务
     // （favorite_extra），已加载条数会虚高，拿它判断会让按钮提前消失、剩下的更早记录翻不到。
-    const visible = busy || (state.jobsHasMore && state.jobsPageOffset < state.totalJobs);
+    const visible = busy || historyHasMore();
     button.classList.toggle("hidden", !visible);
     if (button.disabled !== busy) button.disabled = busy;
     button.setAttribute("aria-busy", String(busy));
@@ -3015,10 +3055,10 @@
     // 一律 ease-out 的话，砸下去那一下反而是"快到头了在减速"，看着就不像掉下来的。
     const EASE_POP = "cubic-bezier(0.16, 0.84, 0.44, 1)";
     const EASE_FALL = "cubic-bezier(0.5, 0, 0.9, 0.6)";
-    // 松手后底部 dock 是 transition: transform 160ms 落回原位（见 styles.css 的 .nav-dock）。
-    // 压扁必须正好落在它砸到最下方的那一刻：820 * 0.195 ≈ 160ms。
+    // 压扁必须正好落在 dock 砸到最下方的那一刻（DOCK_LANDING_MS）。
     // 早了像悬在半空就被压扁，晚了像落地之后才塌下去 —— 两头都不像掉下来。
-    const LAND = 0.195;
+    const JELLY_MS = 820;
+    const LAND = DOCK_LANDING_MS / JELLY_MS;
     // 里面的图标/数字：幅度大，负责"看得见的果冻"
     const JELLY = [
       { transform: "scale(1.01, 1.15)", offset: 0.07, easing: EASE_FALL },  // 57ms：弹到最高点，同时被拉长
@@ -3049,7 +3089,7 @@
     const RELEASE_MOTIONS = {
       // 果冻的 easing 已经写在每一帧上，这里必须是 linear —— 否则整条时间轴会被再拉一次。
       // startEasing 单独给第一段（当前大小 → 0.07 的极值）：它是动态起点，不在帧数组里。
-      jelly: { body: JELLY_BODY, content: JELLY, duration: 820, easing: "linear", startEasing: EASE_POP },
+      jelly: { body: JELLY_BODY, content: JELLY, duration: JELLY_MS, easing: "linear", startEasing: EASE_POP },
       snap: { body: SNAP_BODY, content: SNAP, duration: 230, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
     };
     let jellyAnimations = [];
@@ -3138,7 +3178,9 @@
       }
       if (skipClick) {
         event.preventDefault();
-        toggleRandomGenerate();
+        // 配色和图标等按钮砸到底再开始换：dock 落地那一刻正是压得最扁的时候，
+        // 两件事叠在一起才读得出「砸变了」。立刻换的话，视觉上跟落地没有任何关系。
+        window.setTimeout(toggleRandomGenerate, DOCK_LANDING_MS);
       }
       axis = "";
     };
@@ -3723,6 +3765,7 @@
           if (layer.el !== galleryImage) layer.el.remove();
         });
         state.galleryDragActive = false;
+        if (changed) maybeLoadMoreForGallery();
       });
     };
 
@@ -3838,6 +3881,17 @@
     });
 
     const grid = $("historyGrid");
+    // 滑到底自动加载更早的记录：直接盯着「加载更早的」那颗按钮 ——
+    // 不管滚动的是 .main-content 还是 window，它露出来就说明到底了。
+    // 按钮留在原地当兜底：自动加载失败或者被节流时还能手动点。
+    const moreButton = historyMoreButton();
+    if (moreButton && typeof IntersectionObserver === "function") {
+      new IntersectionObserver((entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        if (state.jobsMoreLoading || !historyHasMore()) return;
+        loadMoreJobs().catch(() => {});
+      }, { rootMargin: "200px 0px" }).observe(moreButton);
+    }
     const layoutButton = $("historyLayoutButton");
     const favoritesButton = $("historyFavoritesButton");
     try {
