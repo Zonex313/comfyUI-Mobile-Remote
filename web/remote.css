@@ -930,3 +930,99 @@
     animation: none;
   }
 }
+
+/* ---------- 导入工作流 ---------- */
+.mobile-remote-import-list {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+
+.mobile-remote-import-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--mr-border);
+  border-radius: 10px;
+  background: var(--mr-card);
+}
+
+.mobile-remote-import-row[data-state="imported"] {
+  border-color: rgba(126, 180, 212, 0.35);
+}
+
+.mobile-remote-import-row[data-state="pinned"] {
+  border-color: rgba(240, 180, 196, 0.5);
+}
+
+.mobile-remote-import-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mobile-remote-import-name {
+  overflow: hidden;
+  color: var(--mr-fg);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-remote-import-folder {
+  overflow: hidden;
+  color: var(--mr-muted);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-remote-import-state {
+  align-self: flex-start;
+  margin-top: 1px;
+  padding: 0 6px;
+  border: 1px solid rgba(126, 180, 212, 0.5);
+  border-radius: 999px;
+  color: var(--mr-blue);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.mobile-remote-import-row[data-state="pinned"] .mobile-remote-import-state {
+  border-color: rgba(240, 180, 196, 0.55);
+  color: var(--mr-pink);
+}
+
+.mobile-remote-import-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.mobile-remote-panel .mobile-remote-import-btn {
+  width: auto;
+  min-width: 0;
+  height: 24px;
+  min-height: 24px;
+  flex: 0 0 auto;
+  padding: 0 8px;
+  border: 1px solid var(--mr-border);
+  border-radius: 6px;
+  color: var(--mr-fg);
+  font-size: 11px;
+}
+
+.mobile-remote-panel .mobile-remote-import-btn:hover:not(:disabled),
+.mobile-remote-panel .mobile-remote-import-btn:focus-visible {
+  border-color: rgba(126, 180, 212, 0.5);
+  background: var(--mr-hover);
+}
+
+.mobile-remote-panel .mobile-remote-import-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

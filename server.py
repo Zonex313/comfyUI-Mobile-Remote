@@ -447,7 +447,7 @@ def _purge_blocked_records() -> int:
     return removed
 
 
-def _list_records() -> list[dict[str, Any]]:
+def _list_records(include_hidden: bool = False) -> list[dict[str, Any]]:
     WORKFLOW_ROOT.mkdir(parents=True, exist_ok=True)
     _purge_blocked_records()
     records: list[dict[str, Any]] = []
@@ -466,15 +466,81 @@ def _list_records() -> list[dict[str, Any]]:
                     "field_count": len(fields),
                     "has_prompt": any(field["kind"] == "textarea" for field in fields),
                     "has_image": any(field["kind"] == "image" for field in fields),
+                    "pinned": bool(record.get("pinned")),
+                    "library_path": str(record.get("library_path") or ""),
                 }
             )
         except Exception as exc:
             LOG.warning("[Mobile Remote] ignoring unreadable workflow %s: %s", path, exc)
-    # 手机只读"电脑端当前打开着"的工作流：打开几个就显示几个，全部关掉就是空列表
-    open_sources = _open_workflow_sources()
-    records = [item for item in records if item.get("source") in open_sources] if open_sources else []
-    records.sort(key=lambda item: (item.get("synced_at", 0), item.get("name", "")), reverse=True)
+    if include_hidden:
+        # 电脑端导入卡片要看全部记录（含没常驻的），才知道哪些工作流已经导入过
+        records.sort(key=lambda item: (item.get("name", ""), item.get("id", "")))
+        return records
+    # 手机读两类工作流：电脑端当前打开着的，和电脑端手动导入的"常驻"工作流。
+    # 常驻的电脑端全关也一直显示；其余打开几个显示几个，全部关掉就只剩常驻的。
+    open_sources = _open_workflow_sources() or set()
+    records = [
+        item
+        for item in records
+        if item.get("pinned") or item.get("source") in open_sources
+    ]
+    # 常驻排前面，同组内新的在前
+    records.sort(
+        key=lambda item: (item.get("pinned", False), item.get("synced_at", 0), item.get("name", "")),
+        reverse=True,
+    )
     return records
+
+
+def _existing_record(workflow_id: str) -> dict[str, Any]:
+    """读旧记录，用于覆盖时保留人工标记；读不到就当空记录。"""
+    try:
+        return _load_record(workflow_id)
+    except (FileNotFoundError, ValueError, OSError):
+        return {}
+
+
+def _carry_over_flags(record: dict[str, Any]) -> None:
+    """覆盖同名记录时，保住「常驻」这类人工标记。"""
+    existing = _existing_record(str(record.get("id") or ""))
+    for key in ("pinned", "pinned_at", "imported_at", "library_path"):
+        if not record.get(key) and existing.get(key):
+            record[key] = existing[key]
+
+
+def _record_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """把电脑端提交的工作流载荷校验成一条记录；错误时返回 (None, 错误文案)。
+
+    工作流编号由「工作流自带的 id → 来源路径 → 名字」依次决定，和电脑端自动同步
+    用的是同一套规则，所以「先导入、之后又在电脑端打开」会更新同一条记录，不会重复。
+    """
+    prompt = payload.get("prompt")
+    workflow = payload.get("workflow")
+    if not isinstance(prompt, dict) or not prompt:
+        return None, "当前工作流没有可执行节点"
+    if not all(isinstance(node, dict) and "class_type" in node for node in prompt.values()):
+        return None, "需要 ComfyUI API 格式的工作流"
+    if not isinstance(workflow, dict):
+        workflow = {}
+
+    raw_name = str(payload.get("name") or workflow.get("name") or "当前工作流").strip()
+    name = re.sub(r"[\x00-\x1f]", "", raw_name)[:120] or "当前工作流"
+    source = re.sub(r"[\x00-\x1f]", "", str(payload.get("source") or workflow.get("id") or name))[:500]
+    identity = str(workflow.get("id") or source or name)
+    workflow_id = hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()[:20]
+    record: dict[str, Any] = {
+        "schema": 1,
+        "id": workflow_id,
+        "name": name,
+        "source": source,
+        "synced_at": int(time.time() * 1000),
+        "prompt": prompt,
+        "workflow": workflow,
+    }
+    library_path = re.sub(r"[\x00-\x1f]", "", str(payload.get("library_path") or ""))[:500]
+    if library_path:
+        record["library_path"] = library_path
+    return record, ""
 
 
 def _tailscale_ips() -> list[str]:
@@ -2150,7 +2216,7 @@ def register_routes() -> None:
                 "gpu": gpu,
                 "tailscale_ips": tailscale_ips,
                 "mobile_urls": [f"http://{address}:{port}/mobile" for address in tailscale_ips],
-                "version": "0.2.1",
+                "version": _plugin_version(),
                 "time": int(time.time() * 1000),
             },
             headers=NO_CACHE,
@@ -2185,8 +2251,12 @@ def register_routes() -> None:
         return web.json_response(snapshot, headers=NO_CACHE)
 
     @routes.get("/mobile/api/workflows")
-    async def mobile_workflows(_request: web.Request) -> web.Response:
-        return web.json_response({"ok": True, "workflows": _list_records()}, headers=NO_CACHE)
+    async def mobile_workflows(request: web.Request) -> web.Response:
+        # all=1 给电脑端导入卡片用：连"没常驻"的记录一起返回，才知道哪些已经导入过
+        include_hidden = request.query.get("all") == "1"
+        return web.json_response(
+            {"ok": True, "workflows": _list_records(include_hidden)}, headers=NO_CACHE
+        )
 
     @routes.post("/mobile/api/update/apply")
     async def mobile_apply_update(request: web.Request) -> web.Response:
@@ -2306,53 +2376,112 @@ def register_routes() -> None:
         if not isinstance(payload, dict):
             return _json_error("工作流数据格式错误")
 
-        prompt = payload.get("prompt")
-        workflow = payload.get("workflow")
-        if not isinstance(prompt, dict) or not prompt:
-            return _json_error("当前工作流没有可执行节点")
-        if not all(isinstance(node, dict) and "class_type" in node for node in prompt.values()):
-            return _json_error("需要 ComfyUI API 格式的工作流")
-        if not isinstance(workflow, dict):
-            workflow = {}
-
-        raw_name = str(payload.get("name") or workflow.get("name") or "当前工作流").strip()
-        name = re.sub(r"[\x00-\x1f]", "", raw_name)[:120] or "当前工作流"
-        if _blocked_workflow_name(name):
+        record, error = _record_from_payload(payload)
+        if record is None:
+            return _json_error(error)
+        if _blocked_workflow_name(record["name"]):
             # 未保存的工作流不进手机列表；顺手把历史遗留的清掉
             _purge_blocked_records()
-            LOG.info("[Mobile Remote] skipped unsaved workflow %r", name)
-            return web.json_response({"ok": True, "skipped": True, "workflow": {"id": "", "name": name, "field_count": 0}})
-        source = str(payload.get("source") or workflow.get("id") or name)[:500]
-        identity = str(workflow.get("id") or source or name)
-        workflow_id = hashlib.sha256(identity.encode("utf-8", errors="replace")).hexdigest()[:20]
-        record = {
-            "schema": 1,
-            "id": workflow_id,
-            "name": name,
-            "source": source,
-            "synced_at": int(time.time() * 1000),
-            "prompt": prompt,
-            "workflow": workflow,
-        }
+            LOG.info("[Mobile Remote] skipped unsaved workflow %r", record["name"])
+            return web.json_response(
+                {"ok": True, "skipped": True, "workflow": {"id": "", "name": record["name"], "field_count": 0}}
+            )
+        # 电脑端打开工作流时，别把导入过的「常驻」标记弄丢
+        _carry_over_flags(record)
         try:
-            _write_json_atomic(_record_path(workflow_id), record)
+            _write_json_atomic(_record_path(record["id"]), record)
         except OSError as exc:
             LOG.exception("[Mobile Remote] failed to store workflow")
             return _json_error("保存工作流失败", 500, str(exc))
-        _remember_open_source(source)
-        fields = _infer_fields(prompt)
+        _remember_open_source(record["source"])
+        fields = _infer_fields(record["prompt"])
         return web.json_response(
             {
                 "ok": True,
                 "workflow": {
-                    "id": workflow_id,
-                    "name": name,
+                    "id": record["id"],
+                    "name": record["name"],
+                    "pinned": bool(record.get("pinned")),
                     "field_count": len(fields),
-                    "node_count": len(prompt),
+                    "node_count": len(record["prompt"]),
                 },
             },
             headers=NO_CACHE,
         )
+
+    @routes.post("/mobile/api/workflows/import")
+    async def mobile_import_workflow(request: web.Request) -> web.Response:
+        """电脑端选中一个"已保存到磁盘"的工作流导入进来，标成常驻：电脑端不开手机也能用。"""
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, web.HTTPBadRequest):
+            return _json_error("工作流数据不是有效 JSON")
+        if not isinstance(payload, dict):
+            return _json_error("工作流数据格式错误")
+
+        record, error = _record_from_payload(payload)
+        if record is None:
+            return _json_error(error)
+        if _blocked_workflow_name(record["name"]):
+            return _json_error("这个工作流没有保存到磁盘，不能导入")
+
+        _carry_over_flags(record)
+        now = int(time.time() * 1000)
+        record["pinned"] = True
+        record["pinned_at"] = int(record.get("pinned_at") or now)
+        record["imported_at"] = now
+        try:
+            _write_json_atomic(_record_path(record["id"]), record)
+        except OSError as exc:
+            LOG.exception("[Mobile Remote] failed to import workflow")
+            return _json_error("导入工作流失败", 500, str(exc))
+        fields = _infer_fields(record["prompt"])
+        LOG.info(
+            "[Mobile Remote] imported %r (%s)",
+            record["name"],
+            record.get("library_path") or record["source"],
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "workflow": {
+                    "id": record["id"],
+                    "name": record["name"],
+                    "source": record["source"],
+                    "pinned": True,
+                    "field_count": len(fields),
+                    "node_count": len(record["prompt"]),
+                },
+            },
+            headers=NO_CACHE,
+        )
+
+    @routes.post("/mobile/api/workflows/{workflow_id}/pin")
+    async def mobile_pin_workflow(request: web.Request) -> web.Response:
+        """开关「常驻」。取消常驻不删记录，只是它又变回"电脑端打开才显示"。"""
+        workflow_id = request.match_info["workflow_id"]
+        try:
+            _record_path(workflow_id)
+        except ValueError:
+            return _json_error("工作流编号无效")
+        record = _existing_record(workflow_id)
+        if not record:
+            return _json_error("工作流不存在", 404)
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, web.HTTPBadRequest):
+            payload = {}
+        pinned = bool(payload.get("pinned")) if isinstance(payload, dict) else False
+        record["pinned"] = pinned
+        if pinned:
+            record["pinned_at"] = int(time.time() * 1000)
+        else:
+            record.pop("pinned_at", None)
+        try:
+            _write_json_atomic(_record_path(workflow_id), record)
+        except OSError as exc:
+            return _json_error("保存常驻状态失败", 500, str(exc))
+        return web.json_response({"ok": True, "pinned": pinned}, headers=NO_CACHE)
 
     @routes.get("/mobile/api/workflows/{workflow_id}")
     async def mobile_workflow_detail(request: web.Request) -> web.Response:

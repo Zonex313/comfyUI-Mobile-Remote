@@ -1,5 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { createPresetManager } from "./preset-manager.js?v=202609202";
+import { createWorkflowImporter } from "./workflow-import.js?v=202609261";
 
 const TAB_ID = "mobile-remote";
 const POLL_MS = 3000;
@@ -414,9 +415,40 @@ function mountPanel(container) {
   ));
   connectView.append(warning);
 
-  const workflowNote = element("section", "mobile-remote-card");
-  workflowNote.append(element("p", "mobile-remote-note", "工作流处于打开状态才可以被手机读取"));
-  connectView.append(workflowNote);
+  // 「导入工作流」卡片：把磁盘上已保存的工作流挑几个导入，导入后常驻手机端。
+  // 没导入的仍然是老规矩——电脑端打开着，手机端才读得到。
+  const importCard = element("section", "mobile-remote-card mobile-remote-import-card");
+  const importHeader = element("div", "mobile-remote-card-header");
+  const importTitleGroup = element("div", "mobile-remote-card-title-group");
+  importTitleGroup.append(element("h3", "mobile-remote-card-title", "导入工作流"));
+  const importState = element("span", "mobile-remote-status", "读取中");
+  importHeader.append(importTitleGroup, importState);
+  const importButton = button("导入工作流", "download", "导入工作流");
+  importButton.node.classList.add("mobile-remote-primary");
+  importButton.node.addEventListener("click", () => showView("import"));
+  importCard.append(
+    importHeader,
+    element(
+      "p",
+      "mobile-remote-note",
+      "没导入的工作流，电脑端开着手机端才看得到；导入并常驻后，电脑端全关手机端也一直能用。",
+    ),
+    importButton.node,
+  );
+  connectView.append(importCard);
+
+  const importer = createWorkflowImporter({
+    element,
+    button,
+    setText,
+    onSummary: (summary) => {
+      if (summary.pinned) setText(importState, `已常驻 ${summary.pinned} 个`);
+      else if (summary.imported) setText(importState, `已导入 ${summary.imported} 个，都还没常驻`);
+      else setText(importState, "还没有常驻工作流");
+    },
+  });
+  root.append(importer.node);
+  void importer.loadSummary();
 
   const nodeCard = element("section", "mobile-remote-card");
   const nodeButton = button("把随机标签节点加入画布", "plus", "加入随机标签节点");
@@ -428,9 +460,8 @@ function mountPanel(container) {
     window.setTimeout(() => { nodeButton.caption.textContent = original; }, 2000);
   });
   nodeCard.append(nodeButton.node);
-  // 上移一行：排在公网链接警告下面、「工作流处于打开状态」那句提示上面
-  // （workflowNote 是上面那句提示的元素，直接用，别再声明同名变量）
-  if (workflowNote?.parentElement) workflowNote.before(nodeCard);
+  // 上移一行：排在公网链接警告下面、「导入工作流」卡片上面
+  if (importCard?.parentElement) importCard.before(nodeCard);
   else connectView.append(nodeCard);
 
   const cloud = makeCard("Cloudflare丨临时公网", "cloud", "");
@@ -786,23 +817,28 @@ function mountPanel(container) {
   restartButton.node.addEventListener("click", () => void tunnelAction("restart"));
   autoCheckbox.addEventListener("change", () => void tunnelAction("settings", autoCheckbox.checked));
   tailChoice.addEventListener("change", paint);
-  function showTags(open) {
-    connectView.hidden = open;
-    tagsButton.node.hidden = open;
-    refreshButton.node.hidden = open;
-    backButton.node.hidden = !open;
-    heading.textContent = open ? "标签管理" : "手机远程";
-    if (open) {
-      if (!backButton.node.parentNode) headerActions.prepend(backButton.node);
-      void tagsManager.open();
-    } else {
-      tagsManager.close();
+  // 三个视图共用标题栏：连接页 / 标签管理 / 导入工作流
+  let currentView = "connect";
+  function showView(next) {
+    const back = next !== "connect";
+    if (back) currentView = next;
+    connectView.hidden = back;
+    tagsButton.node.hidden = back;
+    refreshButton.node.hidden = back;
+    backButton.node.hidden = !back;
+    // 只改标题文字：heading 里还挂着版本号小字，直接写 textContent 会把它抹掉
+    setText(headingText, next === "tags" ? "标签管理" : next === "import" ? "导入工作流" : "手机远程");
+    if (back && !backButton.node.parentNode) headerActions.prepend(backButton.node);
+    if (next === "tags") void tagsManager.open(); else tagsManager.close();
+    if (next === "import") void importer.open(); else importer.close();
+    if (!back) {
       paint();
-      tagsButton.node.focus({ preventScroll: true });
+      void importer.loadSummary();
+      (currentView === "tags" ? tagsButton.node : importButton.node).focus({ preventScroll: true });
     }
   }
-  tagsButton.node.addEventListener("click", () => showTags(true));
-  backButton.node.addEventListener("click", () => showTags(false));
+  tagsButton.node.addEventListener("click", () => showView("tags"));
+  backButton.node.addEventListener("click", () => showView("connect"));
   document.addEventListener("visibilitychange", syncVisibility);
   window.addEventListener("pagehide", pause);
   window.addEventListener("pageshow", syncVisibility);
@@ -827,6 +863,7 @@ function mountPanel(container) {
       window.removeEventListener("pagehide", pause);
       window.removeEventListener("pageshow", syncVisibility);
       tagsManager.destroy();
+      importer.destroy();
       root.remove();
     },
   };
@@ -840,7 +877,7 @@ app.registerExtension({
       const stylesheet = document.createElement("link");
       stylesheet.id = "mobile-remote-styles";
       stylesheet.rel = "stylesheet";
-      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609220`;
+      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609261`;
       document.head.append(stylesheet);
     }
     app.extensionManager.registerSidebarTab({

@@ -1591,12 +1591,21 @@
       return;
     }
 
-    state.workflows.forEach((workflow) => {
-      const option = document.createElement("option");
-      option.value = workflow.id;
-      option.textContent = workflow.name;
-      select.append(option);
-    });
+    // 常驻的（电脑端导入过）电脑端全关也能用，单独归一组，别和"打开中"混在一起
+    const appendGroup = (label, items) => {
+      if (!items.length) return;
+      const group = document.createElement("optgroup");
+      group.label = label;
+      items.forEach((workflow) => {
+        const option = document.createElement("option");
+        option.value = workflow.id;
+        option.textContent = workflow.name;
+        group.append(option);
+      });
+      select.append(group);
+    };
+    appendGroup("常驻 · 电脑端不开也能用", state.workflows.filter((workflow) => workflow.pinned));
+    appendGroup("电脑端打开中", state.workflows.filter((workflow) => !workflow.pinned));
     const selected = state.workflows.some((workflow) => workflow.id === previous)
       ? previous
       : state.workflows[0].id;
