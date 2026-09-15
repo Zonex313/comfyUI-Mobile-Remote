@@ -614,6 +614,63 @@ svg {
   display: flex;
 }
 
+/* ---------- 发送按钮的动效：按下内缩 + 转圈弹出 ----------
+   曲线参考 iOS：进场快、回弹稍慢并带一点点过冲，不求最快，求顺。
+   全部只动 transform / opacity，交给合成器，不掉帧。 */
+.generate-fab svg,
+.generate-fab .repeat-center-num,
+.generate-fab .fab-submit-state {
+  transform: scale(1);
+  transform-origin: 50% 52%;
+  /* 松手回弹：和转圈弹出同一个节奏（520ms），带一点点过冲 */
+  transition: transform 520ms cubic-bezier(0.2, 1.32, 0.42, 1);
+}
+
+/* 按下：按钮里的内容缩一下（150ms 内到位，快速点一下也能看见） */
+.generate-fab.is-pressing svg,
+.generate-fab.is-pressing .repeat-center-num,
+.generate-fab.is-pressing .fab-submit-state {
+  transform: scale(0.82);
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* 转圈出现：从 0.5 弹到 1.07 再落回 1，非线性弹出 */
+@keyframes fab-submit-pop {
+  0% { opacity: 0; transform: scale(0.5); }
+  58% { opacity: 1; transform: scale(1.07); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.generate-fab.is-submitting .fab-submit-state {
+  animation: fab-submit-pop 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* 提交结束图标回来时也轻轻弹一下（display 重新生效会重放这段动画） */
+@keyframes fab-icon-in {
+  0% { opacity: 0; transform: scale(0.62); }
+  60% { opacity: 1; transform: scale(1.05); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+.generate-fab:not(.is-submitting):not(.is-ruler) > svg,
+.generate-fab:not(.is-submitting):not(.is-ruler) > .repeat-center-num {
+  /* 注意别用 both/forwards 填充：动画结束后它会一直占着 transform，
+     把上面的按压缩放整个盖掉（踩过一次）。结束态本来就等于自然态，不需要填充。 */
+  animation: fab-icon-in 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* 进入提交态的瞬间整颗按钮轻微压缩再回弹，把「图标换成转圈」那一下盖住 */
+@keyframes fab-body-press {
+  0% { transform: scale(1); }
+  38% { transform: scale(0.945); }
+  100% { transform: scale(1); }
+}
+
+.generate-fab.is-submitting {
+  animation: fab-body-press 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 .generate-fab.is-submitting svg,
 .generate-fab.is-submitting .repeat-center-num,
 .generate-fab.is-submitting .repeat-lens,
@@ -623,6 +680,21 @@ svg {
 
 .generate-fab.is-ruler {
   overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .generate-fab svg,
+  .generate-fab .repeat-center-num,
+  .generate-fab .fab-submit-state {
+    transition: none;
+  }
+
+  .generate-fab.is-submitting,
+  .generate-fab.is-submitting .fab-submit-state,
+  .generate-fab:not(.is-submitting):not(.is-ruler) > svg,
+  .generate-fab:not(.is-submitting):not(.is-ruler) > .repeat-center-num {
+    animation: none;
+  }
 }
 
 .generate-fab.is-ruler svg,

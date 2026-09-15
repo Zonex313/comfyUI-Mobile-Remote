@@ -2977,6 +2977,11 @@
       }
     };
 
+    // 按下反馈走 JS 类名，不靠 :active —— 按下时 dock 会被加上 is-swiping，
+    // 而 .nav-dock.is-swiping .generate-fab:active{transform:none} 会把它整条否掉。
+    const pressDown = () => button.classList.add("is-pressing");
+    const pressUp = () => button.classList.remove("is-pressing");
+
     button.addEventListener("pointerdown", (event) => {
       if (event.pointerType === "mouse" && event.button !== 0) return;
       startX = event.clientX;
@@ -2985,6 +2990,7 @@
       skipClick = false;
       axis = "";
       dock.classList.add("is-swiping");
+      pressDown();
       try { button.setPointerCapture(event.pointerId); } catch { /* ignore */ }
     });
     button.addEventListener("pointermove", (event) => {
@@ -2996,6 +3002,7 @@
       handleMove(touch.clientX, touch.clientY, event);
     }, { passive: false });
     const endHold = (event) => {
+      pressUp();
       if (!armed) return;
       armed = false;
       dock.classList.remove("is-swiping");
@@ -3024,6 +3031,8 @@
     };
     button.addEventListener("pointerup", endHold);
     button.addEventListener("pointercancel", endHold);
+    button.addEventListener("pointerleave", pressUp);
+    button.addEventListener("lostpointercapture", pressUp);
     button.addEventListener("click", (event) => {
       if (!skipClick) return;
       event.preventDefault();
@@ -3065,6 +3074,7 @@
     submittingBatch = true;
     phoneSettings.beginBatch();
     button.disabled = true;
+    button.classList.remove("is-pressing");
     button.classList.add("is-submitting");
     button.setAttribute("aria-busy", "true");
     $("workflowSelect").disabled = true;
@@ -3142,6 +3152,7 @@
       submittingBatch = false;
       button.disabled = false;
       button.classList.remove("is-submitting");
+      button.classList.remove("is-pressing");
       button.setAttribute("aria-busy", "false");
       $("workflowSelect").disabled = false;
       if (hidden) hidden.textContent = "加入队列";
