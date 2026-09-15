@@ -169,9 +169,18 @@
       const job = body.active_job;
       const id = idOf(job?.id);
       if (!id) {
+        // An idle snapshot is a real transition when an active/unknown job was
+        // being displayed.  Repeated idle polls are no-ops: do not churn the
+        // revision, otherwise every in-flight snapshot becomes stale for no
+        // visible change.
+        const changed = Boolean(this.activeId || this.activeJob || this.nodes.size || this.selectedId);
+        if (!changed) return false;
         this.retire(this.activeId);
-        this.activate("");
+        this.activeId = "";
         this.activeJob = null;
+        this.nodes.clear();
+        this.selectedId = "";
+        this.known = true;
         this.revision += 1;
         return true;
       }

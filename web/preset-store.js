@@ -1,4 +1,4 @@
-import "/mobile/assets/preset-catalog.js?v=202609202";
+import "/mobile/assets/preset-catalog.js?v=202609290";
 
 const Model = globalThis.MobilePresetCatalog;
 const LEGACY_KEY = "comfy-mobile-remote.catalog-editor.v2";

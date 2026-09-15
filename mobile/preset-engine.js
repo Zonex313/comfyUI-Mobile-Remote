@@ -296,9 +296,8 @@
           if (right.id === "outfitState") return 1;
           return 0;
         });
-        const acceptedValues = (currentKey) => {
+        const acceptedValues = (currentKey, skipped) => {
           const accepted = [];
-          const skipped = skippedCategoryIds();
           for (const category of presetCategories) {
             if (skipped.has(category.id)) continue;
             for (const slot of category.slots || []) {
@@ -316,7 +315,10 @@
 
         for (const category of ordered) {
           if (targetOnly && category.id !== categoryId) continue;
-          if (skippedCategoryIds().has(category.id)) {
+          // A selection can change the skip graph, so reuse the snapshot only
+          // until the next slot is selected; never cache it across mutations.
+          let skipped = skippedCategoryIds();
+          if (skipped.has(category.id)) {
             for (const slot of category.slots || []) {
               const current = getSlotState(category.id, slot.id);
               if (!current.locked) {
@@ -327,9 +329,11 @@
             }
             continue;
           }
-          for (const slot of category.slots || []) {
-            if (skippedCategoryIds().has(category.id)) {
-              for (const rest of category.slots || []) {
+          const slots = category.slots || [];
+          for (let slotIndex = 0; slotIndex < slots.length; slotIndex += 1) {
+            const slot = slots[slotIndex];
+            if (skipped.has(category.id)) {
+              for (const rest of slots) {
                 const leftover = getSlotState(category.id, rest.id);
                 if (!leftover.locked && !processed.has(slotStorageKey(category.id, rest.id))) {
                   leftover.value = "";
@@ -343,15 +347,17 @@
             const current = getSlotState(category.id, slot.id);
             if (current.locked) {
               processed.add(key);
+              if (slotIndex + 1 < slots.length) skipped = skippedCategoryIds();
               continue;
             }
-            const accepted = acceptedValues(key);
+            const accepted = acceptedValues(key, skipped);
             const pool = randomSlotPool(category.id, slot);
             const allowed = pool.filter((item) => !tagConflicts(item, accepted));
             const next = pickRandomTag(allowed, current.value);
             if (next) current.value = next;
             else if (current.value && tagConflicts(current.value, accepted)) current.value = "";
             processed.add(key);
+            if (slotIndex + 1 < slots.length) skipped = skippedCategoryIds();
           }
         }
         markPresetConflicts();

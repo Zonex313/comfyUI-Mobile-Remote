@@ -77,13 +77,22 @@ async function syncCurrentWorkflow(force = false) {
   if (syncing || !app?.graph || typeof app.graphToPrompt !== "function") return;
 
   let graphFingerprint = "";
+  let serializedWorkflow = null;
   try {
-    graphFingerprint = fastHash(JSON.stringify(app.graph.serialize()));
+    serializedWorkflow = app.graph.serialize();
+    graphFingerprint = fastHash(JSON.stringify(serializedWorkflow));
   } catch {
     graphFingerprint = `${Date.now()}`;
   }
   if (!force && graphFingerprint === lastFingerprint) {
     await markOpen(lastSources); // 图没变也要发心跳，否则"打开集合"会超时失效
+    return;
+  }
+
+  // 已明确标记为未保存的工作流，不必先做昂贵的 graphToPrompt。
+  const quickInfo = activeWorkflowInfo(serializedWorkflow);
+  if (quickInfo.source !== "current-workflow" && !isSavedWorkflow(quickInfo)) {
+    await markOpen();
     return;
   }
 

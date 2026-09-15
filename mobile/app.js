@@ -47,6 +47,7 @@
     jobDialogToken: 0,
     gallerySeenUrls: new Set(),
     favoritesOnly: false,
+    jobsMode: null,
     flatGallery: [],
     galleryTouchStart: null,
     historyReady: false,
@@ -956,7 +957,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609221", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609290", { cache: "no-store" });
       if (!response.ok) throw new Error("标签目录读取失败");
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];
@@ -1520,9 +1521,8 @@
       trioRow.className = "trio-row";
       trio.forEach((field) => trioRow.append(renderField(field, fieldIndex(field), true)));
       // 固定顺序第 2 位：采样步数 / CFG / 重绘幅度，排在「选择工作流」之前
-      const pickerForTrio = advancedContent?.querySelector("#workflowPickerField");
-      if (advancedContent && pickerForTrio) pickerForTrio.before(trioRow);
-      else advancedNodes.push(trioRow);
+      // 统一放进 advancedNodes，最后一次性重建，避免先插入又被 replaceChildren 清掉。
+      advancedNodes.push(trioRow);
     }
     // 固定顺序第 3 位是「选择工作流」（静态元素），之后依次是采样器、调度器，再是其余
     const advancedRank = (field) => (field.input === "sampler_name" ? 0 : field.input === "scheduler" ? 1 : 2);
@@ -1534,7 +1534,7 @@
     if (state.workflowPickerEl) {
       // 高级参数固定顺序：
       // ① 批量数量+种子  ② 采样步数/CFG/重绘幅度  ③ 选择工作流  ④ 采样器  ⑤ 调度器  ⑥ 其余
-      // 前两组可能已经直接插进 DOM（高级区上方），所以只数还在数组里的，保证排在它们后面
+      // 前两组已经放入 advancedNodes，所以只数数组里的 lead，保证工作流选择器排在它们后面
       const lead = advancedNodes.filter((node) => {
         const cls = node?.classList;
         return Boolean(cls && (cls.contains("pair-row") || cls.contains("trio-row")));
@@ -2090,11 +2090,22 @@
     image.alt = `生成结果，第 ${state.galleryIndex + 1} 张，共 ${total} 张`;
     if (image.complete && image.naturalWidth > 0) finish(true);
     const zoom = state.galleryZoom;
-    if (zoom && !keepPainted) {
-      zoom.scale = 1;
-      zoom.x = 0;
-      zoom.y = 0;
-      image.style.transform = "";
+    if (zoom) {
+      if (!keepPainted) {
+        zoom.scale = 1;
+        zoom.x = 0;
+        zoom.y = 0;
+        image.style.transform = "";
+      } else if (zoom.scale > 1.001) {
+        // Cached page turns can repaint the image without repainting the
+        // transform. Re-apply the persisted zoom so state and pixels agree.
+        image.style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`;
+      } else {
+        zoom.scale = 1;
+        zoom.x = 0;
+        zoom.y = 0;
+        image.style.transform = "";
+      }
     }
     setText("galleryCounter", `${state.galleryIndex + 1}/${total}`);
     const modelName = String(item?.job?.model_name || item?.model_name || "").trim().split(/[/\\]/).pop() || "";
@@ -2233,6 +2244,12 @@
       ghost.remove();
       image.style.transform = "";
       image.style.transition = "";
+      const zoom = state.galleryZoom;
+      if (zoom) {
+        zoom.scale = 1;
+        zoom.x = 0;
+        zoom.y = 0;
+      }
       galleryAnimating = false;
     };
     const preload = new Promise((resolve) => {
@@ -2652,8 +2669,19 @@
   let jobsLoadSequence = 0;
   async function loadJobsOnce() {
     const sequence = ++jobsLoadSequence;
-    const body = await requestJson(`/mobile/api/jobs?limit=${JOBS_PAGE}&summary=1&_=${Date.now()}`);
-    if (sequence !== jobsLoadSequence) return;
+    const favoritesOnly = Boolean(state.favoritesOnly);
+    // A mode switch starts a fresh server window; old pages belong to the
+    // previous filter and must not affect the new offset.
+    if (state.jobsMode !== favoritesOnly) {
+      state.jobsMode = favoritesOnly;
+      state.jobsFirstPage = [];
+      state.jobsOlderPages = [];
+      state.jobsPageOffset = 0;
+      state.jobsHasMore = false;
+    }
+    const body = await requestJson(`/mobile/api/jobs?limit=${JOBS_PAGE}&summary=1&favorites=${favoritesOnly ? 1 : 0}&_=${Date.now()}`);
+    // Do not let a response for the previous filter repaint the new mode.
+    if (sequence !== jobsLoadSequence || favoritesOnly !== Boolean(state.favoritesOnly)) return;
     const incoming = Array.isArray(body.jobs) ? body.jobs : [];
     const incomingIds = new Set(incoming.map((job) => String(job.id)));
     for (const [id, job] of state.optimisticJobs) {
@@ -2674,11 +2702,15 @@
   }
 
   async function loadMoreJobsOnce() {
+    const favoritesOnly = Boolean(state.favoritesOnly);
     // offset 用「已消费的服务器列表窗口位置」，而不是 state.jobs.length：
     // 运行中/排队中的任务和收藏置顶每一页都会被塞回来，去重后的条数可能大于窗口位置，
     // 拿它当 offset 会把夹在窗口中间的那几条永久跳过。
     const offset = state.jobsPageOffset;
-    const body = await requestJson(`/mobile/api/jobs?limit=${JOBS_PAGE}&offset=${offset}&summary=1&_=${Date.now()}`);
+    const body = await requestJson(`/mobile/api/jobs?limit=${JOBS_PAGE}&offset=${offset}&summary=1&favorites=${favoritesOnly ? 1 : 0}&_=${Date.now()}`);
+    // A filter change invalidates this page request as well; leave its offset
+    // untouched so the next first-page request can establish a clean window.
+    if (favoritesOnly !== Boolean(state.favoritesOnly) || state.jobsMode !== favoritesOnly) return;
     const incoming = Array.isArray(body.jobs) ? body.jobs : [];
     appendOlderJobs(incoming);
     state.jobsPageOffset = offset + JOBS_PAGE;
@@ -3913,6 +3945,9 @@
         phoneSettings.setItem("comfy-mobile-remote.favoritesOnly", state.favoritesOnly ? "1" : "0");
       } catch { /* storage optional */ }
       applyFavoritesOnly();
+      // Fetch the filtered first page immediately; waiting for the 8s
+      // fallback poll makes opening 收藏 look broken.
+      loadJobs(true).catch(() => {});
     });
     applyFavoritesOnly();
     const applyHistoryCols = (cols) => {
@@ -3942,6 +3977,7 @@
     state.repeatCount = state.multiModel ? 1 : (Number.isInteger(repeat) ? Math.max(1, Math.min(10, repeat)) : 1);
     paintModelTools();
     paintGenerateButton();
+    const previousFavoritesOnly = state.favoritesOnly;
     state.favoritesOnly = phoneSettings.getItem("comfy-mobile-remote.favoritesOnly") === "1";
     const favoriteButton = $("historyFavoritesButton");
     favoriteButton.classList.toggle("active", state.favoritesOnly);
@@ -3957,6 +3993,7 @@
     layoutButton.title = `切换列数（当前 ${state.historyCols} 列）`;
     layoutButton.setAttribute("aria-label", `切换列数，当前 ${state.historyCols} 列`);
     renderHistory();
+    if (previousFavoritesOnly !== state.favoritesOnly) loadJobs(true).catch(() => {});
   }
 
   async function applySharedSettings() {

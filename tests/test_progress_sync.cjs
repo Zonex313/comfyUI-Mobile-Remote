@@ -58,3 +58,25 @@ test('single flight runs one trailing urgent refresh after a slow request', asyn
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls, 2);
 });
+
+test('idle snapshot clears active progress once and repeated idle is a no-op', () => {
+  const store = new MobileProgressStore();
+  store.begin('a');
+  store.progress({prompt_id:'a', node:'sampler', value:1, max:4});
+  const idleRevision = store.revision;
+  assert.equal(store.applySnapshot({ok:true, active_job:null, nodes:{}}, idleRevision), true);
+  assert.equal(store.activeId, '');
+  assert.equal(store.get('a'), null);
+  const repeatedRevision = store.revision;
+  assert.equal(store.applySnapshot({ok:true, active_job:null, nodes:{}}, repeatedRevision), false);
+  assert.equal(store.revision, repeatedRevision);
+});
+
+test('unknown-to-idle snapshot clears stale node UI', () => {
+  const store = new MobileProgressStore();
+  store.activeJob = {id:'unknown', status:'in_progress'};
+  store.nodes.set('loader', {nodeId:'loader', value:0, max:0, measured:false});
+  const revision = store.revision;
+  assert.equal(store.applySnapshot({ok:true, active_job:null, nodes:{}}, revision), true);
+  assert.equal(store.nodes.size, 0);
+});

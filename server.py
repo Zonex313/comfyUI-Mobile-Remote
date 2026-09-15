@@ -1139,15 +1139,19 @@ def _preview_webp_bytes(path: Path, size: int = 384) -> bytes | None:
         from PIL import Image
 
         from PIL import ImageFile
+        previous_truncated = ImageFile.LOAD_TRUNCATED_IMAGES
         ImageFile.LOAD_TRUNCATED_IMAGES = True
-        with Image.open(path) as img:
-            img.load()
-            img.thumbnail((size, size))
-            if img.mode not in {"RGB", "L"}:
-                img = img.convert("RGB")
-            buffer = BytesIO()
-            img.save(buffer, format="WEBP", quality=72, method=4)
-            return buffer.getvalue()
+        try:
+            with Image.open(path) as img:
+                img.load()
+                img.thumbnail((size, size))
+                if img.mode not in {"RGB", "L"}:
+                    img = img.convert("RGB")
+                buffer = BytesIO()
+                img.save(buffer, format="WEBP", quality=72, method=4)
+                return buffer.getvalue()
+        finally:
+            ImageFile.LOAD_TRUNCATED_IMAGES = previous_truncated
     except Exception:
         LOG.debug("[Mobile Remote] could not build preview for %s", path)
         return None
@@ -1303,6 +1307,7 @@ def _ensure_favorite_copy(job_id: str, filename: str, subfolder: str, type_name:
     dest = _favorite_file_path(job_id, filename)
     if dest is None:
         return None
+    copied = False
     if not dest.is_file():
         source = _resolve_media_path(filename, subfolder, type_name)
         if source is None or not source.is_file():
@@ -1310,11 +1315,13 @@ def _ensure_favorite_copy(job_id: str, filename: str, subfolder: str, type_name:
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, dest)
+            copied = True
         except OSError:
             LOG.exception("[Mobile Remote] failed to copy favorite file")
             return None
     if dest.is_file():
-        _write_favorite_meta(job_id)
+        if copied:
+            _write_favorite_meta(job_id)
         return dest
     return None
 
@@ -1479,7 +1486,7 @@ def _history_gallery(history_item: dict[str, Any] | None, job_id: str = "") -> l
     marker = str(job_id or "")
     if marker:
         cached = _GALLERY_CACHE.get(marker)
-        if cached is not None and cached[0] is history_item and cached[1] == _GALLERY_REVISION:
+        if cached is not None and cached[1] == _GALLERY_REVISION:
             # 返回副本：调用方会往条目里塞字段，别把缓存本身改脏
             return [dict(item) for item in cached[2]]
     gallery = _history_gallery_uncached(history_item, marker)
@@ -1849,13 +1856,14 @@ def _persist_history_index() -> None:
         if pruned.keys() != _HISTORY_CACHE.keys():
             _HISTORY_CACHE.clear()
             _HISTORY_CACHE.update(pruned)
-        try:
-            _write_json_atomic(
-                HISTORY_INDEX_PATH,
-                {"schema": 1, "saved_at": int(time.time() * 1000), "jobs": _HISTORY_CACHE},
-            )
-        except OSError:
-            LOG.exception("[Mobile Remote] failed to persist history index")
+        snapshot = dict(_HISTORY_CACHE)
+    try:
+        _write_json_atomic(
+            HISTORY_INDEX_PATH,
+            {"schema": 1, "saved_at": int(time.time() * 1000), "jobs": snapshot},
+        )
+    except OSError:
+        LOG.exception("[Mobile Remote] failed to persist history index")
 
 
 def _scrub_stale_history_images(live_ids: set[str]) -> bool:
@@ -1929,6 +1937,7 @@ def _sync_history_from_live_unlocked(maintenance: bool = True) -> None:
         return
     _load_history_index()
     changed = False
+    history_changed = False
     with _HISTORY_LOCK:
         for prompt_id, item in history.items():
             if not isinstance(item, dict):
@@ -1943,12 +1952,15 @@ def _sync_history_from_live_unlocked(maintenance: bool = True) -> None:
             if _HISTORY_CACHE.get(str(prompt_id)) != compact:
                 _HISTORY_CACHE[str(prompt_id)] = compact
                 changed = True
-    if _scrub_stale_history_images({str(pid) for pid in history.keys()}):
-        changed = True
+                history_changed = True
+    if history_changed:
+        _bump_gallery_revision()
     if not maintenance:
         # 读取接口只更新内存缓存：重写 10.6MB 索引、重写上百个收藏元数据文件
         # 都是后台定时器（每 15 秒）该干的活，放在请求路径里会把接口拖到好几秒。
         return
+    if _scrub_stale_history_images({str(pid) for pid in history.keys()}):
+        changed = True
     if changed:
         _persist_history_index_if_due()
     _backfill_favorite_meta()
@@ -2218,6 +2230,7 @@ def _get_mobile_jobs_payload(
     offset: int,
     statuses: list[str],
     summary: bool = False,
+    include_favorite_extras: bool = True,
 ) -> dict[str, Any]:
     """Build the mobile jobs response away from the aiohttp event loop.
 
@@ -2266,8 +2279,9 @@ def _get_mobile_jobs_payload(
             "create_time": _history_entry_time(entry),
             "entry": entry,
         })
+    favorite_ids = _favorite_job_ids() if include_favorite_extras else set()
     present_ids = {entry["id"] for entry in entries}
-    for job_id in _favorite_job_ids():
+    for job_id in favorite_ids:
         # 只有收藏夹还留着图、实时历史和索引都没有的任务
         if job_id in present_ids:
             continue
@@ -2306,8 +2320,7 @@ def _get_mobile_jobs_payload(
             if extra is not None:
                 jobs_out.append(extra)
     jobs_out = _mark_favorite_extra(jobs_out, limit)
-    # 首屏额外带上全部收藏任务，否则「只看收藏」视图在分页后会空白。
-    favorite_ids = _favorite_job_ids()
+    # 只有收藏筛选打开时才额外带回旧收藏，普通历史请求不做这份扫描和装饰。
     if offset == 0 and favorite_ids:
         jobs_out.extend(_favorite_extra_jobs(
             entries,
@@ -2402,7 +2415,7 @@ def register_routes() -> None:
             port = int(args.port)
         except (ImportError, TypeError, ValueError):
             port = 8188
-        tailscale_ips = _tailscale_ips()
+        tailscale_ips = await asyncio.to_thread(_tailscale_ips)
         return web.json_response(
             {
                 "ok": True,
@@ -2507,6 +2520,7 @@ def register_routes() -> None:
             len(result["copied"]),
             backup_root,
         )
+        await asyncio.to_thread(_prune_backups)
         return web.json_response(
             {
                 "ok": True,
@@ -2808,12 +2822,14 @@ def register_routes() -> None:
         requested_status = request.query.get("status", "")
         statuses = [part for part in requested_status.split(",") if part in JobStatus.ALL]
         summary = True
+        include_favorite_extras = request.query.get("favorites") == "1"
         payload = await asyncio.to_thread(
             _get_mobile_jobs_payload,
             limit,
             offset,
             statuses,
             summary,
+            include_favorite_extras,
         )
         # 几百 KB 的响应手机端每 8 秒拉一次：序列化和 gzip 都放线程里，别占事件循环。
         return await asyncio.to_thread(

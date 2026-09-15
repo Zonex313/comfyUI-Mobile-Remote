@@ -5,7 +5,7 @@ import { app } from "../../scripts/app.js";
 // 但节点自己的锁定/忽略状态保存在节点上（写进工作流），与手机端设置互相独立。
 
 const NODE_TYPE = "MobileTagCLIPTextEncode";
-const VERSION = "202609248";
+const VERSION = "202609290";
 const PANEL_HEIGHT = 202;
 
 let libraryPromise = null;
@@ -48,7 +48,9 @@ async function loadLibrary() {
 }
 
 function emptyState() {
-  return { slots: {}, custom: {}, freeText: "", extraText: "", catalog: null };
+  const state = { slots: {}, custom: {}, freeText: "", extraText: "" };
+  Object.defineProperty(state, "catalog", { value: null, writable: true, configurable: true, enumerable: false });
+  return state;
 }
 
 class TagPanel {
@@ -100,7 +102,13 @@ class TagPanel {
   engine() {
     if (!this.library) return null;
     const state = this.state;
-    if (!state.catalog || typeof state.catalog !== "object") state.catalog = this.library.editor;
+    // 目录是共享设置，不应随节点状态序列化成一份过期快照。
+    Object.defineProperty(state, "catalog", {
+      value: this.library.editor,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
     return this.library.Engine.create({
       categories: this.library.categories,
       state,
@@ -517,6 +525,11 @@ app.registerExtension({
     if (nodeData?.name !== NODE_TYPE) return;
     ensureStyles();
     installHook();
+    const removed = nodeType.prototype.onRemoved;
+    nodeType.prototype.onRemoved = function (...rest) {
+      if (this.__mtrPanel) this.__mtrPanel = null;
+      return removed?.apply(this, rest);
+    };
     const created = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function (...args) {
       const result = created?.apply(this, args);
@@ -540,11 +553,6 @@ app.registerExtension({
           return originalCallback?.apply(this, [value, ...rest]);
         };
       }
-      const removed = nodeType.prototype.onRemoved;
-      nodeType.prototype.onRemoved = function (...rest) {
-        if (this.__mtrPanel === panel) this.__mtrPanel = null;
-        return removed?.apply(this, rest);
-      };
       return result;
     };
     // 从工作流加载时前端会重建控件顺序，这里再兜一次（只包一层，不能放进 onNodeCreated）

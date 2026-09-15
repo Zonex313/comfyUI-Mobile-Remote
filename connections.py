@@ -584,11 +584,11 @@ class TunnelManager:
         return True
 
     async def _sync_cloudflare_with_tailscale(self) -> None:
+        # One fresh probe per watch round is enough; a second subprocess here
+        # only rechecked the same result and could add seconds to every poll.
         tailscale = await asyncio.to_thread(self.discovery.get, self.port, True)
         if tailscale_online(tailscale):
             async with self._control:
-                if not tailscale_online(await asyncio.to_thread(self.discovery.get, self.port, True)):
-                    return
                 if not self._tunnel_running():
                     if self.message != TAILSCALE_SUPPRESSED:
                         self._set_state("stopped", TAILSCALE_SUPPRESSED)

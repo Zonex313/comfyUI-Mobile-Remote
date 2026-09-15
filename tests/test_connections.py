@@ -718,6 +718,16 @@ class TunnelManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.message, connections.TAILSCALE_SUPPRESSED)
         self.assertEqual(self.supervisor.starts, 1)
 
+    async def test_tailscale_watch_round_uses_one_fresh_probe(self):
+        await self.start()
+        connected = {"state": "connected", "urls": ["http://100.70.1.2:8818/mobile"], "message": ""}
+        with mock.patch.object(self.manager.discovery, "get", side_effect=lambda port, fresh=False: dict(connected)) as discovery:
+            await self.manager._sync_cloudflare_with_tailscale()
+        self.assertEqual(discovery.call_args_list, [mock.call(8818, True)])
+        self.assertFalse(self.manager.enabled)
+        self.assertEqual(self.manager.state, "stopped")
+        self.assertEqual(self.manager.message, connections.TAILSCALE_SUPPRESSED)
+
     async def test_snapshot_combines_local_and_mock_discovery_without_starting(self):
         tailscale = {"state": "connected", "urls": ["http://100.70.1.2:8818/mobile"], "message": "fixture"}
         with mock.patch.object(self.manager.discovery, "get", return_value=tailscale) as discovery, \

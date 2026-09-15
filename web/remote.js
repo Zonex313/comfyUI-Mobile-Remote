@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-import { createPresetManager } from "./preset-manager.js?v=202609202";
+import { createPresetManager } from "./preset-manager.js?v=202609290";
 import { createWorkflowImporter } from "./workflow-import.js?v=202609268";
 
 const TAB_ID = "mobile-remote";
@@ -149,8 +149,9 @@ function makeUpdateButton(onApply) {
       const body = await response.json();
       state.info = body;
       state.hasUpdate = Boolean(body?.ok && body.has_update);
-    } catch {
+    } catch (error) {
       state.hasUpdate = false;
+      state.info = { ok: false, error: error?.message || "检查更新失败" };
     }
     paint();
     if (force) {
