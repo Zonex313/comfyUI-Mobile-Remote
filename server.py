@@ -46,6 +46,11 @@ _FAVORITES_LOADED = False
 
 # 缩略图列表缓存：同一份历史条目 + 同一版收藏状态只算一次。
 # /mobile/api/jobs 每次要给几百条历史建缩略图，逐个查磁盘是最大的开销之一。
+FAVORITE_META_BACKFILL_INTERVAL = 60.0   # 收藏元数据兜底回填的最小间隔（秒）
+HISTORY_PERSIST_INTERVAL = 30.0          # 历史索引落盘的最小间隔（秒）
+_FAVORITE_META_BACKFILL_AT = 0.0
+_HISTORY_PERSIST_AT = 0.0
+
 _GALLERY_CACHE: dict[str, tuple[Any, int, list[dict[str, str]]]] = {}
 _GALLERY_CACHE_LIMIT = 1500
 _GALLERY_REVISION = 0
@@ -1275,6 +1280,14 @@ def _history_item_from_favorite_meta(job_id: str) -> dict[str, Any]:
 
 
 def _backfill_favorite_meta() -> None:
+    """给收藏补 job.json。纯粹是兜底：新增收藏时 _ensure_favorite_copy 已经即时写过，
+    而这里每轮要给 166 个收藏各读一份元数据、再建一份 30KB 载荷比对，约 1.5 秒。
+    所以限频，不必每 15 秒来一次。"""
+    global _FAVORITE_META_BACKFILL_AT
+    now = time.monotonic()
+    if now - _FAVORITE_META_BACKFILL_AT < FAVORITE_META_BACKFILL_INTERVAL:
+        return
+    _FAVORITE_META_BACKFILL_AT = now
     for job_id in _favorite_disk_job_ids():
         path = _favorite_meta_path(job_id)
         if path is None:
@@ -1858,6 +1871,16 @@ def _scrub_stale_history_images(live_ids: set[str]) -> bool:
     return changed
 
 
+def _persist_history_index_if_due() -> None:
+    """历史索引写一次是 10.6MB / 约 1.2 秒，后台维护不必每轮都落盘。"""
+    global _HISTORY_PERSIST_AT
+    now = time.monotonic()
+    if now - _HISTORY_PERSIST_AT < HISTORY_PERSIST_INTERVAL:
+        return
+    _HISTORY_PERSIST_AT = now
+    _persist_history_index()
+
+
 def _sync_history_from_live_unlocked(maintenance: bool = True) -> None:
     try:
         from server import PromptServer
@@ -1888,14 +1911,24 @@ def _sync_history_from_live_unlocked(maintenance: bool = True) -> None:
         # 都是后台定时器（每 15 秒）该干的活，放在请求路径里会把接口拖到好几秒。
         return
     if changed:
-        _persist_history_index()
+        _persist_history_index_if_due()
     _backfill_favorite_meta()
 
 
 def _sync_history_from_live(maintenance: bool = True) -> None:
     """Serialize live-history refreshes from the timer and request workers."""
-    with _HISTORY_SYNC_LOCK:
-        _sync_history_from_live_unlocked(maintenance)
+    if maintenance:
+        with _HISTORY_SYNC_LOCK:
+            _sync_history_from_live_unlocked(True)
+        return
+    # 读取接口绝不排队等后台维护：抢不到锁就先用现有缓存返回。
+    # 否则每 15 秒后台一开始维护，这一批请求就集体被挡住好几秒。
+    if not _HISTORY_SYNC_LOCK.acquire(blocking=False):
+        return
+    try:
+        _sync_history_from_live_unlocked(False)
+    finally:
+        _HISTORY_SYNC_LOCK.release()
 
 
 def _persisted_job(job_id: str, entry: dict[str, Any]) -> dict[str, Any]:

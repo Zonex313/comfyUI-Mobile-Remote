@@ -30,7 +30,7 @@ class SyncMaintenanceTests(unittest.TestCase):
         old = sys.modules.get("server")
         sys.modules["server"] = _fake_prompt_server(history)
         try:
-            with mock.patch.object(server, "_persist_history_index") as persist, \
+            with mock.patch.object(server, "_persist_history_index_if_due") as persist, \
                     mock.patch.object(server, "_backfill_favorite_meta") as backfill, \
                     mock.patch.object(server, "_scrub_stale_history_images", return_value=True), \
                     mock.patch.object(server, "_load_history_index", return_value={}):
@@ -51,6 +51,52 @@ class SyncMaintenanceTests(unittest.TestCase):
         persist, backfill = self._run(maintenance=True)
         persist.assert_called_once()
         backfill.assert_called_once()
+
+
+class MaintenanceThrottleTests(unittest.TestCase):
+    """后台维护本身也别做无用功：限频，而且绝不阻塞读取请求。"""
+
+    def test_request_path_does_not_wait_for_maintenance(self):
+        import time as _time
+
+        server._HISTORY_SYNC_LOCK.acquire()
+        try:
+            with mock.patch.object(server, "_sync_history_from_live_unlocked") as inner:
+                started = _time.perf_counter()
+                server._sync_history_from_live(False)
+                elapsed = _time.perf_counter() - started
+            inner.assert_not_called()
+            self.assertLess(elapsed, 0.1)
+        finally:
+            server._HISTORY_SYNC_LOCK.release()
+
+    def test_favorite_meta_backfill_is_throttled(self):
+        import time as _time
+
+        server._FAVORITE_META_BACKFILL_AT = _time.monotonic()
+        try:
+            with mock.patch.object(server, "_favorite_disk_job_ids") as disk:
+                server._backfill_favorite_meta()
+            disk.assert_not_called()
+        finally:
+            server._FAVORITE_META_BACKFILL_AT = 0.0
+        with mock.patch.object(server, "_favorite_disk_job_ids", return_value=set()) as disk:
+            server._backfill_favorite_meta()
+        disk.assert_called_once()
+
+    def test_history_persist_is_throttled(self):
+        import time as _time
+
+        server._HISTORY_PERSIST_AT = _time.monotonic()
+        try:
+            with mock.patch.object(server, "_persist_history_index") as persist:
+                server._persist_history_index_if_due()
+            persist.assert_not_called()
+        finally:
+            server._HISTORY_PERSIST_AT = 0.0
+        with mock.patch.object(server, "_persist_history_index") as persist:
+            server._persist_history_index_if_due()
+        persist.assert_called_once()
 
 
 class FavoriteMetaWriteTests(unittest.TestCase):
