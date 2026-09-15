@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 import { createPresetManager } from "./preset-manager.js?v=202609202";
-import { createWorkflowImporter } from "./workflow-import.js?v=202609264";
+import { createWorkflowImporter } from "./workflow-import.js?v=202609266";
 
 const TAB_ID = "mobile-remote";
 const POLL_MS = 3000;
@@ -226,7 +226,6 @@ function mountPanel(container) {
       if (version) setText(versionTag, `v${version}`);
     })
     .catch(() => { /* 版本号拿不到就不显示 */ });
-  const refreshButton = button("刷新连接状态", "refresh");
   const tagsButton = button("标签管理", "list", "标签管理");
   tagsButton.node.classList.add("mobile-remote-tags-entry");
   const backButton = button("返回连接", "arrow-left", "返回");
@@ -260,7 +259,7 @@ function mountPanel(container) {
       window.alert(`更新失败：${error?.message || error}`);
     }
   });
-  headerActions.append(tagsButton.node, updateButton.node, refreshButton.node);
+  headerActions.append(tagsButton.node, updateButton.node);
   header.append(heading, headerActions);
   const readError = element("p", "mobile-remote-error mobile-remote-read-error");
   readError.setAttribute("role", "alert");
@@ -276,7 +275,6 @@ function mountPanel(container) {
   let epoch = 0;
   let pollTimer = 0;
   let reading = false;
-  let manualLoading = false;
   let pendingAction = null;
   let readErrorText = "";
   let actionErrorText = "";
@@ -415,43 +413,11 @@ function mountPanel(container) {
   ));
   connectView.append(warning);
 
-  // 「导入工作流」卡片：把磁盘上已保存的工作流挑几个导入，导入后常驻手机端。
-  // 没导入的仍然是老规矩——电脑端打开着，手机端才读得到。
-  const importCard = element("section", "mobile-remote-card mobile-remote-import-card");
-  const importHeader = element("div", "mobile-remote-card-header");
-  const importTitleGroup = element("div", "mobile-remote-card-title-group");
-  importTitleGroup.append(element("h3", "mobile-remote-card-title", "导入工作流"));
-  const importState = element("span", "mobile-remote-status", "读取中");
-  importHeader.append(importTitleGroup, importState);
-  const importButton = button("导入工作流", "download", "导入工作流");
-  importButton.node.classList.add("mobile-remote-primary");
-  importButton.node.addEventListener("click", () => showView("import"));
-  importCard.append(
-    importHeader,
-    element(
-      "p",
-      "mobile-remote-note",
-      "没导入的工作流，电脑端开着手机端才看得到；导入并常驻后，电脑端全关手机端也一直能用。",
-    ),
-    importButton.node,
-  );
-  connectView.append(importCard);
-
-  const importer = createWorkflowImporter({
-    element,
-    button,
-    setText,
-    onSummary: (summary) => {
-      if (summary.pinned) setText(importState, `已常驻 ${summary.pinned} 个`);
-      else if (summary.imported) setText(importState, `已导入 ${summary.imported} 个，都还没常驻`);
-      else setText(importState, "还没有常驻工作流");
-    },
-  });
-  root.append(importer.node);
-  void importer.loadSummary();
-
-  const nodeCard = element("section", "mobile-remote-card");
-  const nodeButton = button("把随机标签节点加入画布", "plus", "加入随机标签节点");
+  // 工作流相关的两个按钮并排一张卡片；卡片上不放任何文字，
+  // 有关工作流的说明都写在「导入工作流」子页里。
+  const actionCard = element("section", "mobile-remote-card mobile-remote-action-card");
+  const actionRow = element("div", "mobile-remote-action-row");
+  const nodeButton = button("加入随机标签节点", "plus", "加入随机标签节点");
   nodeButton.node.classList.add("mobile-remote-primary");
   nodeButton.node.addEventListener("click", () => {
     const error = addTagNodeToCanvas();
@@ -459,10 +425,15 @@ function mountPanel(container) {
     nodeButton.caption.textContent = error ? "加入失败" : "已加入画布";
     window.setTimeout(() => { nodeButton.caption.textContent = original; }, 2000);
   });
-  nodeCard.append(nodeButton.node);
-  // 上移一行：排在公网链接警告下面、「导入工作流」卡片上面
-  if (importCard?.parentElement) importCard.before(nodeCard);
-  else connectView.append(nodeCard);
+  const importButton = button("导入工作流", "download", "导入工作流");
+  importButton.node.classList.add("mobile-remote-primary");
+  importButton.node.addEventListener("click", () => showView("import"));
+  actionRow.append(nodeButton.node, importButton.node);
+  actionCard.append(actionRow);
+  connectView.append(actionCard);
+
+  const importer = createWorkflowImporter({ element, button, setText });
+  root.append(importer.node);
 
   const cloud = makeCard("Cloudflare丨临时公网", "cloud", "");
   const tunnelActions = element("div", "mobile-remote-tunnel-actions");
@@ -593,7 +564,6 @@ function mountPanel(container) {
     }
     requests.clear();
     reading = false;
-    manualLoading = false;
     pendingAction = null;
   }
 
@@ -651,9 +621,6 @@ function mountPanel(container) {
     const tunnel = snapshot?.tunnel;
     const tailscale = snapshot?.tailscale;
     const busy = Boolean(pendingAction);
-    refreshButton.node.disabled = reading || busy;
-    refreshButton.glyph.classList.toggle("mobile-remote-spinning", manualLoading || (!snapshot && reading));
-    refreshButton.node.setAttribute("aria-busy", String(reading));
     showMessage(readError, readErrorText);
     showMessage(actionError, actionErrorText);
     paintStatus(cloud, tunnel ? TUNNEL_STATES[tunnel.state] : [readErrorText ? "未获取" : "读取中", "muted"]);
@@ -739,12 +706,10 @@ function mountPanel(container) {
     }
   }
 
-  async function refresh({ manual = false, afterAction = false } = {}) {
+  async function refresh({ afterAction = false } = {}) {
     if (!active || !visible() || reading || (pendingAction && !afterAction)) return;
     clearPoll();
     reading = true;
-    manualLoading = manual;
-    if (manual) actionErrorText = "";
     const token = epoch;
     paint();
     try {
@@ -759,7 +724,6 @@ function mountPanel(container) {
     } finally {
       if (current(token)) {
         reading = false;
-        manualLoading = false;
         paint();
         schedulePoll();
       }
@@ -812,7 +776,6 @@ function mountPanel(container) {
     cancelWork();
   }
 
-  refreshButton.node.addEventListener("click", () => void refresh({ manual: true }));
   toggleButton.node.addEventListener("click", () => void tunnelAction(tunnelRunning(snapshot?.tunnel) ? "stop" : "start"));
   restartButton.node.addEventListener("click", () => void tunnelAction("restart"));
   autoCheckbox.addEventListener("change", () => void tunnelAction("settings", autoCheckbox.checked));
@@ -824,7 +787,7 @@ function mountPanel(container) {
     if (back) currentView = next;
     connectView.hidden = back;
     tagsButton.node.hidden = back;
-    refreshButton.node.hidden = back;
+    updateButton.node.hidden = back;   // 子页右上角只留「返回」
     backButton.node.hidden = !back;
     // 只改标题文字：heading 里还挂着版本号小字，直接写 textContent 会把它抹掉
     setText(headingText, next === "tags" ? "标签管理" : next === "import" ? "导入工作流" : "手机远程");
@@ -833,7 +796,6 @@ function mountPanel(container) {
     if (next === "import") void importer.open(); else importer.close();
     if (!back) {
       paint();
-      void importer.loadSummary();
       (currentView === "tags" ? tagsButton.node : importButton.node).focus({ preventScroll: true });
     }
   }
@@ -877,7 +839,7 @@ app.registerExtension({
       const stylesheet = document.createElement("link");
       stylesheet.id = "mobile-remote-styles";
       stylesheet.rel = "stylesheet";
-      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609264`;
+      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609266`;
       document.head.append(stylesheet);
     }
     app.extensionManager.registerSidebarTab({

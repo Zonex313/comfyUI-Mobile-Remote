@@ -604,6 +604,32 @@
   min-width: 0;
 }
 
+/* 工作流按钮卡片：两个按钮并排一行，卡片上不放任何文字 */
+.mobile-remote-action-card {
+  padding: 8px;
+}
+
+.mobile-remote-action-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.mobile-remote-action-row .mobile-remote-button {
+  gap: 4px;
+  width: 100%;
+  padding: 6px 6px;
+  font-size: 11.5px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.mobile-remote-action-row .mobile-remote-icon {
+  flex: 0 0 14px;
+  width: 14px;
+  font-size: 12px;
+}
+
 .mobile-remote-tags {
   display: flex;
   flex: 1 1 auto;

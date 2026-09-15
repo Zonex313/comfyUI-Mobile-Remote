@@ -1,4 +1,4 @@
-import "./workflow-library.js?v=202609264";
+import "./workflow-library.js?v=202609266";
 import { app } from "../../scripts/app.js";
 
 /*
@@ -38,7 +38,7 @@ function sizeLabel(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function createWorkflowImporter({ element, button, setText, onSummary = () => {} }) {
+export function createWorkflowImporter({ element, button, setText }) {
   const root = element("section", "mobile-remote-tags mobile-remote-import");
   root.hidden = true;
   root.setAttribute("aria-label", "导入工作流");
@@ -66,7 +66,13 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
   owned.append(ownedHeader, ownedList);
 
   const list = element("div", "mobile-remote-tags-list mobile-remote-import-list");
-  root.append(toolbar, status, owned, list);
+  // 关于工作流的说明都放在这个子页里，连接页那张卡片上只剩按钮
+  const intro = element(
+    "p",
+    "mobile-remote-note",
+    "没导入的工作流，电脑端开着手机端才看得到；导入并常驻后，电脑端全关手机端也一直能用。",
+  );
+  root.append(intro, toolbar, status, owned, list);
 
   let library = [];            // 磁盘上的工作流清单
   let records = [];            // 插件里已有的记录
@@ -324,7 +330,6 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
       for (const node of fullTree.folders) openDirs.add(node.path);
       dirsSeeded = true;
     }
-    onSummary(summary);
     paint();
   }
 
@@ -476,20 +481,6 @@ export function createWorkflowImporter({ element, button, setText, onSummary = (
 
   return {
     node: root,
-    /** 只读"已导入/常驻"数量，不碰工作流清单；连接页的卡片副标题用它。 */
-    async loadSummary() {
-      try {
-        const body = await readJson(await fetch(RECORDS_URL, { cache: "no-store" }));
-        const items = Array.isArray(body?.workflows) ? body.workflows : [];
-        onSummary({
-          total: summary.total,
-          imported: items.length,
-          pinned: items.filter((record) => record?.pinned).length,
-        });
-      } catch {
-        /* 拿不到就保持原样，不打扰用户 */
-      }
-    },
     async open() {
       root.hidden = false;
       if (ready) await refreshRecords();
