@@ -11,12 +11,12 @@
   <title>Comfy Remote</title>
   <link rel="manifest" href="/mobile/manifest.webmanifest">
   <link rel="icon" href="/mobile/assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202609266">
-  <script src="/mobile/assets/preset-catalog.js?v=202609266" defer></script>
-  <script src="/mobile/assets/preset-engine.js?v=202609266" defer></script>
-  <script src="/mobile/assets/settings-sync.js?v=202609266" defer></script>
-  <script src="/mobile/assets/progress-sync.js?v=202609266" defer></script>
-  <script src="/mobile/assets/app.js?v=202609266" defer></script>
+  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202609269">
+  <script src="/mobile/assets/preset-catalog.js?v=202609269" defer></script>
+  <script src="/mobile/assets/preset-engine.js?v=202609269" defer></script>
+  <script src="/mobile/assets/settings-sync.js?v=202609269" defer></script>
+  <script src="/mobile/assets/progress-sync.js?v=202609269" defer></script>
+  <script src="/mobile/assets/app.js?v=202609269" defer></script>
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -228,6 +228,10 @@
           <span id="repeatLens" class="repeat-lens" aria-hidden="true"></span>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 3 14 9-14 9V3Z"/></svg>
           <span id="repeatRuler" class="repeat-ruler" hidden></span>
+          <span id="submitState" class="fab-submit-state" aria-hidden="true">
+            <span class="fab-spinner"></span>
+            <span class="fab-submit-text">提交中</span>
+          </span>
           <span class="visually-hidden">加入队列</span>
         </button>
       </div>

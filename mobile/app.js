@@ -2721,6 +2721,7 @@
     if (centerNum) {
       centerNum.textContent = String(repeats);
     }
+    button.classList.toggle("is-submitting", submittingBatch);
     if (!submittingBatch) button.disabled = false;
   }
 
@@ -2940,6 +2941,8 @@
     submittingBatch = true;
     phoneSettings.beginBatch();
     button.disabled = true;
+    button.classList.add("is-submitting");
+    button.setAttribute("aria-busy", "true");
     $("workflowSelect").disabled = true;
     const hidden = button.querySelector(".visually-hidden");
     if (hidden) hidden.textContent = "正在提交";
@@ -3015,6 +3018,8 @@
       phoneSettings.endBatch();
       submittingBatch = false;
       button.disabled = false;
+      button.classList.remove("is-submitting");
+      button.setAttribute("aria-busy", "false");
       $("workflowSelect").disabled = false;
       if (hidden) hidden.textContent = "加入队列";
     }
