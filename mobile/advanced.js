@@ -25,7 +25,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "202610126";
+  const VERSION = "202610127";
   const STYLE_ID = "mtr-advanced-styles";
   const DEFAULT_STYLE_HREF = "/mobile/assets/advanced.css?v=" + VERSION;
   // 组折叠状态：{ "<工作流 id>": { "<组 id>": true|false } }

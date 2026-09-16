@@ -201,6 +201,26 @@ test("高级页跑参考项目的真实面板：渲染、连线、改值回写�
     // 面板的整站样式没有漏进手机页，手机页也没打进去：宿主 iframe 之外的 body 样式不变。
     assert.equal(await page.evaluate(() => getComputedStyle(document.body).backgroundColor), "rgba(0, 0, 0, 0)", "手机页 body 不被面板样式改掉");
 
+    // 背景必须无缝：面板的 iframe、iframe 的 html/body、以及面板外壳都不许画自己的底色，
+    // 否则会在手机页上贴出一块"贴上去"的黑底（外壳那层是参考项目自家整页的 bg-slate-950/88）。
+    assert.equal(
+      await page.evaluate(() => getComputedStyle(document.querySelector("#view-advanced .panel-frame")).backgroundColor),
+      "rgba(0, 0, 0, 0)",
+      "iframe 自身要透明",
+    );
+    const shell = await frame.locator("body").evaluate(() => ({
+      body: getComputedStyle(document.body).backgroundColor,
+      html: getComputedStyle(document.documentElement).backgroundColor,
+      wrapper: getComputedStyle(document.getElementById("node-list-wrapper")).backgroundColor,
+      wrapperTop: getComputedStyle(document.getElementById("node-list-wrapper")).top,
+    }));
+    assert.equal(shell.body, "rgba(0, 0, 0, 0)", "面板 body 要透明");
+    assert.equal(shell.html, "rgba(0, 0, 0, 0)", "面板 html 要透明");
+    assert.equal(shell.wrapper, "rgba(0, 0, 0, 0)", "面板外壳那层深色底要去掉");
+    assert.equal(shell.wrapperTop, "0px", "外壳不留为它自家顶栏预留的空隙");
+    // 卡片本身是面板自己的设计，必须还在。
+    assert.equal(await frame.locator('[id^="node-card-"]').count() >= 2, true, "卡片照旧渲染");
+
     await fs.promises.mkdir(shotDir, { recursive: true });
     await page.screenshot({ path: path.join(shotDir, "panel-390x844-zh.png") });
 

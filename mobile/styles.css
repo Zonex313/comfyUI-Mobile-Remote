@@ -1009,7 +1009,9 @@ body:has(#view-advanced.active) .main-content {
   width: 100%;
   height: 100%;
   border: 0;
-  background: #05070d;
+  /* 透明：面板只画它自己的卡片与组，底色一律透出手机页本身，视觉上无缝。 */
+  background: transparent;
+  color-scheme: dark;
 }
 
 @keyframes view-in {

@@ -1,9 +1,9 @@
-import { t } from "./i18n.js?v=202610126";
-import "/mobile/assets/preset-catalog.js?v=202610126";
-import { sharedCatalogStore } from "./preset-store.js?v=202610126";
+import { t } from "./i18n.js?v=202610127";
+import "/mobile/assets/preset-catalog.js?v=202610127";
+import { sharedCatalogStore } from "./preset-store.js?v=202610127";
 
 const Model = globalThis.MobilePresetCatalog;
-const CATALOG_URL = "/mobile/assets/prompt-presets.json?v=202610126";
+const CATALOG_URL = "/mobile/assets/prompt-presets.json?v=202610127";
 const keyOf = (category, slot) => `${category.id}.${slot.id}`;
 const unique = (tags) => [...new Set(tags)];
 const sameMembers = (a, b) => a.length === b.length && a.every((tag) => b.includes(tag));
