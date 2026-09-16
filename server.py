@@ -2658,6 +2658,8 @@ def _get_mobile_jobs_payload(
 # 只保留一份，免得两边的翻译逻辑各自跑偏。
 _MOBILE_ASSET_FILES = {
     "app.js",
+    "advanced.js",
+    "advanced.css",
     "settings-sync.js",
     "preset-catalog.js",
     "preset-engine.js",
