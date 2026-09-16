@@ -3550,21 +3550,13 @@
     socket.addEventListener("error", () => socket.close());
   }
 
-  async function refreshAll(showMessage = false) {
-    const button = $("refreshButton");
-    button.disabled = true;
-    button.classList.add("is-refreshing");
+  // 启动与重新联网时把状态、队列、进度、工作流列表一起拉一遍。
+  async function refreshAll() {
     const tasks = [loadStatus(), loadJobs(), loadProgress()];
     if (!submittingBatch && !applyingRemoteSettings) tasks.push(loadWorkflows(false));
     const results = await Promise.allSettled(tasks);
-    button.disabled = false;
-    button.classList.remove("is-refreshing");
     const failed = results.find((result) => result.status === "rejected");
-    if (failed) {
-      toast(failed.reason?.message || t("刷新失败"), "error");
-    } else if (showMessage) {
-      toast(t("已刷新"), "success");
-    }
+    if (failed) toast(failed.reason?.message || t("刷新失败"), "error");
   }
 
   // 语言菜单：手机端放在设置页右上角，选中后整页文案原地刷新，不重新加载页面。
@@ -3649,10 +3641,6 @@
     $("modelPickerSearch")?.addEventListener("input", renderModelPickerList);
     $("generationForm").addEventListener("submit", submitGeneration);
     bindGenerateSwipe();
-    $("refreshButton").addEventListener("click", async () => {
-      await refreshSharedSettings().catch(() => {});
-      await refreshAll(true);
-    });
     $("closeDialogButton").addEventListener("click", () => $("jobDialog").close());
     $("retryJobButton").addEventListener("click", retryDialogJob);
     $("jobDialog").addEventListener("click", (event) => {
@@ -4040,7 +4028,7 @@
       }
     });
 
-    window.addEventListener("online", () => refreshAll(false));
+    window.addEventListener("online", () => refreshAll());
     window.addEventListener("offline", () => {
       state.online = false;
       setText("connectionLabel", t("网络断开"));
@@ -4181,11 +4169,15 @@
       bindEvents();
       applyPhonePreferences();
       connectWebSocket();
-      await refreshAll(false);
+      await refreshAll();
       $("useComputerSettingsButton").addEventListener("click", () => chooseSettingsVersion("server"));
       $("keepPhoneSettingsButton").addEventListener("click", () => chooseSettingsVersion("local"));
       document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === "visible") refreshSharedSettings().catch(() => {});
+        if (document.visibilityState !== "visible") return;
+        refreshSharedSettings().catch(() => {});
+        // 原来靠顶栏的「刷新」按钮手动重读电脑端打开中的工作流列表；按钮已删除，
+        // 改成回到页面就自动重读。
+        if (!submittingBatch && !applyingRemoteSettings) loadWorkflows(false).catch(() => {});
       });
       window.setInterval(() => loadStatus().catch(() => {}), 5000);
       // 队列/历史列表：websocket 事件会即时触发刷新，这里只做兜底轮询，

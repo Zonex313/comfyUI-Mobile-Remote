@@ -415,3 +415,98 @@ test("标签溢出时用省略号单侧裁切，高度保持各控件原有定�
   assert.equal(failures.length, 0, `标签裁切方式不对：\n${failures.join("\n")}`);
 });
 
+/* 设置页长值：放得下就一行，放不下就整块换行占满整行，不许从中间硬切。 */
+test("设置页长文本换行合理，电脑端语言菜单不越界", { timeout: 300000 }, async () => {
+  const { chromium } = resolvePlaywright();
+  const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
+  const { server, base } = await startServer();
+  const failures = [];
+  try {
+    const phone = await browser.newContext({ locale: "en-US", viewport: { width: 320, height: 700 } });
+    const page = await phone.newPage();
+    page.on("pageerror", (error) => failures.push(`手机端页面异常：${error.message}`));
+    await page.goto(`${base}/mobile`);
+    await page.waitForFunction(() => !document.querySelector("#generationForm")?.classList.contains("hidden"), null, { timeout: 30000 });
+    await page.click(".nav-button[data-target=settings]");
+    await page.waitForTimeout(200);
+    // 逐字量：得到每一行的实际内容与断行处，才能判断「切在哪」是否合理。
+    const measureValue = (text) => page.evaluate((value) => {
+      const el = document.querySelector("#tailscaleAddress");
+      el.textContent = value;
+      const node = el.firstChild;
+      const range = document.createRange();
+      const chars = [];
+      for (let index = 0; index < value.length; index += 1) {
+        range.setStart(node, index);
+        range.setEnd(node, index + 1);
+        const rect = range.getBoundingClientRect();
+        if (!rect.width && !rect.height) continue;
+        chars.push({ char: value[index], top: Math.round(rect.top), left: rect.left, right: rect.right });
+      }
+      const box = el.getBoundingClientRect();
+      const lines = [];
+      for (const item of chars) {
+        const line = lines.find((entry) => Math.abs(entry.top - item.top) < 3);
+        if (line) { line.chars.push(item.char); line.left = Math.min(line.left, item.left); line.right = Math.max(line.right, item.right); }
+        else lines.push({ top: item.top, chars: [item.char], left: item.left, right: item.right });
+      }
+      return { lines: lines.length,
+        filled: lines.map((line) => Math.round(((line.right - line.left) / box.width) * 100)),
+        breaks: lines.slice(0, -1).map((line) => line.chars[line.chars.length - 1]) };
+    }, text);
+    // 常见地址应当整行显示
+    const typical = await measureValue("https://device.tailnet.ts.net:8188/mobile");
+    if (typical.lines !== 1) failures.push(`常见地址被折成 ${typical.lines} 行（占比 ${typical.filled.join("/")}%）`);
+    // 必须折行的超长地址：断点只能落在分隔符处，或者该行已经排满（≥70%）
+    const long = await measureValue("https://workstation-01.verylongtailnetname.ts.net:8188/mobile/index.html?token=abcdef");
+    const separators = new Set(["/", ".", ":", "-", "_", "?", "&", "=", "#", "~"]);
+    const ugly = long.breaks
+      .map((char, index) => ({ char, percent: long.filled[index] }))
+      .filter((item) => !separators.has(item.char) && item.percent < 70);
+    if (ugly.length) {
+      failures.push(`超长地址从中间硬切：断点 ${ugly.map((item) => `"${item.char}"@${item.percent}%`).join(" ")}（各行占比 ${long.filled.join("/")}%）`);
+    }
+    await phone.close();
+
+    // 电脑端语言菜单：往右展开，且始终落在侧栏内
+    const desktop = await browser.newContext({ locale: "zh-CN", viewport: { width: 900, height: 700 } });
+    const panel = await desktop.newPage();
+    panel.on("pageerror", (error) => failures.push(`电脑端页面异常：${error.message}`));
+    await panel.goto(`${base}/desktop`);
+    for (const width of [230, 260, 280, 340]) {
+      await panel.evaluate((size) => document.querySelector("#fixture").style.setProperty("--panel-width", `${size}px`), width);
+      await panel.evaluate(() => {
+        const button = document.querySelector(".mobile-remote-language-picker button");
+        if (button.getAttribute("aria-expanded") !== "true") button.click();
+      });
+      await panel.waitForTimeout(150);
+      const menu = await panel.evaluate(() => {
+        const menu = document.querySelector(".mobile-remote-language-menu");
+        const picker = document.querySelector(".mobile-remote-language-picker");
+        const panel = document.querySelector("#fixture");
+        const menuBox = menu.getBoundingClientRect();
+        const pickerBox = picker.getBoundingClientRect();
+        const panelBox = panel.getBoundingClientRect();
+        return { hidden: menu.hidden, rightOfButton: menuBox.left >= pickerBox.left - 1,
+          insideLeft: menuBox.left >= panelBox.left - 1, insideRight: menuBox.right <= panelBox.right + 1,
+          options: menu.querySelectorAll(".mobile-remote-language-option").length,
+          width: Math.round(menuBox.width) };
+      });
+      if (menu.hidden || !menu.options) failures.push(`[${width}px] 语言菜单没有展开`);
+      if (!menu.rightOfButton) failures.push(`[${width}px] 语言菜单弹到了按钮左侧`);
+      if (!menu.insideLeft || !menu.insideRight) failures.push(`[${width}px] 语言菜单超出侧栏（宽 ${menu.width}px）`);
+      await panel.evaluate(() => {
+        const button = document.querySelector(".mobile-remote-language-picker button");
+        if (button.getAttribute("aria-expanded") === "true") button.click();
+      });
+      await panel.waitForTimeout(80);
+    }
+    await desktop.close();
+  } finally {
+    await browser.close();
+    await stopServer(server);
+  }
+  assert.equal(failures.length, 0, `设置页/语言菜单排版不对：\n${failures.join("\n")}`);
+});
+
+

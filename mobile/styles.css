@@ -1211,33 +1211,9 @@ svg {
 
 .settings-sync-conflict p { margin: 0; color: var(--warning); font-size: 13px; }
 
-.topbar .icon-button {
-  width: 32px;
-  height: 32px;
-  flex: 0 0 auto;
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  transition: transform 140ms ease, background-color 140ms ease, border-color 140ms ease;
-}
-
-.topbar .icon-button:active {
-  transform: scale(0.92);
-  background: rgba(255, 255, 255, 0.09);
-}
-
-.topbar .icon-button.is-refreshing svg {
-  animation: spin-clockwise 650ms cubic-bezier(0.4, 0, 0.2, 1) infinite;
-}
-
 @keyframes spin-clockwise {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
-}
-
-.topbar .icon-button svg {
-  width: 17px;
-  height: 17px;
 }
 
 .topbar .stop-button {
@@ -2360,24 +2336,29 @@ select:focus {
   min-height: 68px;
   padding: 12px 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 24px;
+  gap: 4px 24px;
   border-bottom: 1px solid var(--border);
 }
 
 .settings-row span {
+  min-width: 0;
   color: var(--text-secondary);
   font-size: 14px;
 }
 
+/* 地址/显卡这类长值：放得下就贴右显示，放不下就整块换到下一行占满整行，
+   而不是被压到 62% 宽从中间硬切开。 */
 .settings-row strong {
+  flex: 1 1 12rem;
   min-width: 0;
-  max-width: 62%;
+  max-width: 100%;
   font-size: 13px;
   font-weight: 600;
   text-align: right;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .settings-actions {
