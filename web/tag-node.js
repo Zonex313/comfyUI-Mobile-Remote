@@ -8,6 +8,14 @@ import { app } from "../../scripts/app.js";
 // 随机/组合逻辑与手机端共用同一份引擎（mobile/preset-engine.js + preset-catalog.js），
 // 但节点自己的锁定/忽略状态保存在节点上（写进工作流），与手机端设置互相独立。
 
+/* 文本单独一层：按钮自己的匿名内容盒会被居中，省略号要放在真正的块级文本框上。 */
+function textSpan(className, text) {
+  const span = document.createElement("span");
+  span.className = className;
+  span.textContent = text;
+  return span;
+}
+
 const NODE_TYPE = "MobileTagCLIPTextEncode";
 const VERSION = "202609302";
 const PANEL_HEIGHT = 202;
@@ -259,7 +267,7 @@ class TagPanel {
       const label = document.createElement("button");
       label.type = "button";
       label.className = "mtr-row-label";
-      label.textContent = category.label;
+      label.append(textSpan("mtr-row-label-text", category.label));
       label.title = t("随机") + category.label;
       label.addEventListener("click", () => this.randomizeCategory(category.id));
       const divider = document.createElement("span");
@@ -282,7 +290,7 @@ class TagPanel {
         if ((category.slots || []).length >= 3) chip.classList.add("tight");
         if (current.locked) chip.classList.add("locked");
         if (current.ignored) chip.classList.add("ignored");
-        chip.textContent = value;
+        chip.append(textSpan("mtr-chip-text", value));
         chip.title = current.locked ? t("已锁定") : current.ignored ? t("已忽略") : value;
         chip.addEventListener("click", (event) => {
           event.stopPropagation();
@@ -410,7 +418,7 @@ function openEditor(panel, category, slot, anchor) {
     chip.type = "button";
     chip.className = "mtr-pool-chip";
     chip.dataset.tag = tag;
-    chip.textContent = tag;
+    chip.append(textSpan("mtr-pool-chip-text", tag));
     chip.addEventListener("click", () => { chosen = tag; input.value = tag; paint(); commit(); });
     pool.append(chip);
   });

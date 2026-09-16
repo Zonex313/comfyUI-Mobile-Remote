@@ -1171,6 +1171,14 @@
     }
   }
 
+  // 文本单独一层：按钮自己的匿名内容盒会被居中，省略号只在真正的块级文本框上生效。
+  function textSpan(className, text) {
+    const span = document.createElement("span");
+    span.className = className;
+    span.textContent = text;
+    return span;
+  }
+
   function renderPresetPanel() {
     const panel = state.presetPanel;
     if (!panel) return;
@@ -1231,7 +1239,7 @@
       const label = document.createElement("button");
       label.type = "button";
       label.className = "preset-row-label";
-      label.textContent = category.label;
+      label.append(textSpan("preset-row-label-text", category.label));
       label.setAttribute("aria-label", t("随机{label}", { label: category.label }));
       label.addEventListener("click", () => randomizePresetSlots(category.id));
       const divider = document.createElement("span");
@@ -1260,7 +1268,7 @@
         if ((category.slots || []).length >= 3) chip.classList.add("tight");
         if (current.locked) chip.classList.add("locked");
         if (current.ignored) chip.classList.add("ignored");
-        chip.textContent = status === "deleted" ? t("{val}（已删除）", { val: val }) : val;
+        chip.append(textSpan("preset-chip-text", status === "deleted" ? t("{val}（已删除）", { val: val }) : val));
         chip.title = [
           status === "deleted" ? t("当前标签已从目录删除，但仍保留在提示词中") : "",
           status === "free" ? t("自由标签") : "",
@@ -1323,7 +1331,7 @@
       const status = presetTagStatus(categoryId, slotId, item);
       if (item === current.value) chip.classList.add("active");
       if (status === "deleted") chip.classList.add("deleted");
-      chip.textContent = status === "deleted" ? t("{item}（已删除）", { item: item }) : item;
+      chip.append(textSpan("preset-pool-chip-text", status === "deleted" ? t("{item}（已删除）", { item: item }) : item));
       chip.title = status === "deleted" ? t("已删除，仅用于恢复当前提示词") : t("选择此标签");
       chip.addEventListener("click", () => {
         if (!canSelectPresetTag(categoryId, slotId, item)) return;

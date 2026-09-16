@@ -10,7 +10,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 const os = require("node:os");
-const { createFixture } = require("./helpers/layout-fixture.cjs");
+const { createFixture, LONG_TAG } = require("./helpers/layout-fixture.cjs");
 
 function resolvePlaywright() {
   if (process.env.PLAYWRIGHT_MODULE) return require(process.env.PLAYWRIGHT_MODULE);
@@ -257,3 +257,161 @@ test("电脑端四种语言的按钮都不被译文撑破，复制成功不再�
   }
   assert.equal(failures.length, 0, `电脑端按钮被文字撑破：\n${report(failures)}`);
 });
+
+/* 标签溢出时必须是「单侧裁切 + 省略号」：
+ * inline-flex + 居中会让溢出部分两端同时被剪掉，省略号也不会出现。 */
+const chipContract = (selectors) => `(() => {
+  const selectors = ${JSON.stringify(selectors)};
+  const out = [];
+  for (const selector of selectors) {
+    for (const el of document.querySelectorAll(selector)) {
+      if (!el.getClientRects().length) continue;
+      const text = (el.textContent || "").trim();
+      if (!text) continue;
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let textNode = null;
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.nodeValue && node.nodeValue.trim()) { textNode = node; break; }
+      }
+      const host = textNode && textNode.parentElement ? textNode.parentElement : el;
+      const style = getComputedStyle(host);
+      const range = document.createRange();
+      range.selectNodeContents(host);
+      const rects = [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
+      if (!rects.length) continue;
+      const hostBox = host.getBoundingClientRect();
+      const contentLeft = hostBox.left + host.clientLeft;
+      const contentRight = contentLeft + host.clientWidth;
+      const chipBox = el.getBoundingClientRect();
+      out.push({
+        selector,
+        text: text.slice(0, 20),
+        textHost: String(host.className || host.tagName),
+        overflowing: Math.max(...rects.map((rect) => rect.right)) > contentRight + 1,
+        oneSided: Math.min(...rects.map((rect) => rect.left)) - contentLeft <= 2,
+        ellipsis: style.textOverflow === "ellipsis",
+        centered: style.textAlign === "center",
+        display: style.display,
+        height: Math.round(chipBox.height),
+      });
+    }
+  }
+  return out;
+})()`;
+
+function checkChips(rows, where, failures, expectedHeight) {
+  if (!rows.length) failures.push(`${where} 没有渲染出标签芯片`);
+  for (const row of rows) {
+    const name = `${where} ${row.selector} "${row.text}"（${row.textHost}）`;
+    if (row.display !== "block") failures.push(`${name} 不是块级布局（${row.display}），省略号不会生效`);
+    if (!row.ellipsis) failures.push(`${name} 没有设置省略号`);
+    if (row.centered) failures.push(`${name} 居中排版：文字会被两端同时裁切`);
+    if (row.height !== expectedHeight) failures.push(`${name} 高度不是固定的 ${expectedHeight}px（${row.height}px）`);
+    if (row.overflowing && !row.oneSided) failures.push(`${name} 溢出时左侧也被裁切`);
+  }
+}
+
+test("标签溢出时用省略号单侧裁切，高度保持各控件原有定高", { timeout: 300000 }, async () => {
+  const { chromium } = resolvePlaywright();
+  const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
+  const { server, base } = await startServer();
+  const failures = [];
+  try {
+    // 手机端：打开标签预设面板，量真实的分类名与标签芯片。
+    const phone = await browser.newContext({ locale: "en-US", viewport: { width: 390, height: 844 } });
+    const page = await phone.newPage();
+    page.on("pageerror", (error) => failures.push(`手机端页面异常：${error.message}`));
+    await page.goto(`${base}/mobile`);
+    await page.waitForFunction(() => !document.querySelector("#generationForm")?.classList.contains("hidden"), null, { timeout: 30000 });
+    await page.evaluate(() => document.querySelector("#presetModeToggle")?.click());
+    await page.waitForTimeout(300);
+    checkChips(await page.evaluate(chipContract([".preset-chip", ".preset-row-label"])), "手机端预设", failures, 18);
+    // 标签编辑弹层里的「备选词库」也是标签芯片，一并检查
+    await page.evaluate(() => document.querySelector(".preset-chip")?.click());
+    await page.waitForTimeout(250);
+    checkChips(await page.evaluate(chipContract([".preset-pool-chip"])), "手机端备选词库", failures, 32);
+    await page.evaluate(() => document.getElementById("presetTagDialog")?.close());
+    await phone.close();
+
+    // 电脑端节点：注入真实 tag-node.css 与节点内部结构（不需要画布）。
+    const desktop = await browser.newContext({ locale: "en-US", viewport: { width: 900, height: 600 } });
+    const panel = await desktop.newPage();
+    panel.on("pageerror", (error) => failures.push(`电脑端页面异常：${error.message}`));
+    await panel.goto(`${base}/desktop`);
+    await panel.evaluate(() => {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = "/extensions/ComfyUI-Mobile-Remote/tag-node.css";
+      document.head.append(link);
+    });
+    await panel.waitForTimeout(150);
+    await panel.evaluate((longTag) => {
+      const holder = document.createElement("div");
+      holder.id = "mtr-holder";
+      holder.style.cssText = "width:270px;padding:10px;background:#0a0d16";
+      const panelNode = document.createElement("div");
+      panelNode.className = "mtr-panel";
+      const rows = document.createElement("div");
+      rows.className = "mtr-rows";
+      rows.style.cssText = "display:flex;flex-direction:column;grid-template-columns:none";
+      for (const [labelName, chipValue] of [["Landscape and environment", "photographic"], ["Lighting conditions", longTag]]) {
+        const row = document.createElement("div");
+        row.className = "mtr-row";
+        const label = document.createElement("button");
+        label.className = "mtr-row-label";
+        const labelText = document.createElement("span");
+        labelText.className = "mtr-row-label-text";
+        labelText.textContent = labelName;
+        label.append(labelText);
+        const values = document.createElement("div");
+        values.className = "mtr-values";
+        const chip = document.createElement("button");
+        chip.className = "mtr-chip";
+        const chipText = document.createElement("span");
+        chipText.className = "mtr-chip-text";
+        chipText.textContent = chipValue;
+        chip.append(chipText);
+        values.append(chip);
+        row.append(label, values);
+        rows.append(row);
+      }
+      panelNode.append(rows);
+      holder.append(panelNode);
+      document.body.append(holder);
+    }, LONG_TAG);
+    await panel.waitForTimeout(150);
+    await panel.evaluate((longTag) => {
+      const holder = document.getElementById("mtr-holder");
+      // 节点弹层里的备选词库芯片
+      const popup = document.createElement("div");
+      popup.className = "mtr-popup";
+      popup.style.cssText = "position:static;max-height:none";
+      const head = document.createElement("div");
+      head.className = "mtr-pool-head";
+      head.textContent = "Tags";
+      const pool = document.createElement("div");
+      pool.className = "mtr-pool";
+      for (const tag of ["daylight", longTag]) {
+        const chip = document.createElement("button");
+        chip.className = "mtr-pool-chip";
+        const text = document.createElement("span");
+        text.className = "mtr-pool-chip-text";
+        text.textContent = tag;
+        chip.append(text);
+        pool.append(chip);
+      }
+      popup.append(head, pool);
+      holder.append(popup);
+    }, LONG_TAG);
+    await panel.waitForTimeout(150);
+    checkChips(await panel.evaluate(chipContract([".mtr-chip", ".mtr-row-label"])), "电脑端节点", failures, 18);
+    checkChips(await panel.evaluate(chipContract([".mtr-pool-chip"])), "电脑端词库", failures, 20);
+    await desktop.close();
+  } finally {
+    await browser.close();
+    await stopServer(server);
+  }
+  assert.equal(failures.length, 0, `标签裁切方式不对：\n${failures.join("\n")}`);
+});
+

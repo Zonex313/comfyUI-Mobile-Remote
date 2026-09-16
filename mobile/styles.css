@@ -3277,6 +3277,8 @@ dialog:not([open]) {
   min-width: 2em;
   max-width: 46%;
   height: 18px;
+  display: block;
+  line-height: 18px;
   overflow: hidden;
   text-overflow: ellipsis;
   padding: 0;
@@ -3285,9 +3287,7 @@ dialog:not([open]) {
   background: transparent;
   font-size: 10px;
   font-weight: 650;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
+  text-align: left;
   white-space: nowrap;
   cursor: pointer;
   transition: color 120ms ease;
@@ -3329,22 +3329,34 @@ dialog:not([open]) {
   height: 18px;
   min-height: 18px;
   padding: 0 4px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  /* 定高 + 块级：文字只在右侧裁切并显示省略号。
+     inline-flex + 居中会让溢出部分两端同时被剪掉，省略号也不会出现。 */
+  display: block;
+  line-height: 16px;
   border: 1px solid transparent;
   border-radius: 3px;
   color: #f1f3f9;
   background: transparent;
   font-size: 10px;
   font-weight: 600;
-  line-height: 1;
   letter-spacing: -0.02em;
-  text-align: center;
+  text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
+}
+
+.preset-chip-text,
+.preset-row-label-text,
+.preset-pool-chip-text {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
 }
 
 .preset-chip.no-ellipsis {

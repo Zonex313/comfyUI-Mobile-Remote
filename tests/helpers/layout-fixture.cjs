@@ -57,7 +57,7 @@ function createFixture() {
     put(`/mobile/assets/${name}`, `mobile/${name}`, name.endsWith("css") ? "text/css" : name.endsWith("svg") ? "image/svg+xml" : "text/javascript");
   }
   put("/mobile/assets/i18n.js", "web/i18n.js", "text/javascript");
-  for (const name of ["remote.js", "remote.css", "i18n.js", "preset-manager.js", "preset-store.js", "workflow-import.js", "workflow-library.js"]) {
+  for (const name of ["remote.js", "remote.css", "tag-node.css", "i18n.js", "preset-manager.js", "preset-store.js", "workflow-import.js", "workflow-library.js"]) {
     put(`/extensions/ComfyUI-Mobile-Remote/${name}`, `web/${name}`, name.endsWith("css") ? "text/css" : "text/javascript");
   }
   for (const lang of ["en", "ja", "ko"]) put(`/mobile/api/i18n/${lang}`, `i18n/${lang}.json`, "application/json");
