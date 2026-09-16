@@ -22,6 +22,40 @@ def _fake_prompt_server(history: dict) -> types.SimpleNamespace:
     return types.SimpleNamespace(PromptServer=types.SimpleNamespace(instance=types.SimpleNamespace(prompt_queue=queue)))
 
 
+# 这个文件的用例会走到真实的落盘分支。曾经因为少 mock 了一层，一次测试运行
+# 就把用户的 mobile_history.json 覆盖成了这里的夹具；现在把插件的数据路径
+# 整体挪到临时目录，跑测试再也不可能碰到真实数据。
+_SANDBOX_DIR = None
+_SANDBOX = None
+
+
+def setUpModule():
+    global _SANDBOX_DIR, _SANDBOX
+    _SANDBOX_DIR = tempfile.TemporaryDirectory(prefix="history-hotpath-")
+    root = Path(_SANDBOX_DIR.name)
+    _SANDBOX = mock.patch.multiple(
+        server,
+        HISTORY_INDEX_PATH=root / "mobile_history.json",
+        FAVORITES_PATH=root / "mobile_favorites.json",
+        FAVORITE_FILES=root / "favorite_files",
+        WORKFLOW_ROOT=root / "workflows",
+        DRAFT_ROOT=root / "drafts",
+    )
+    _SANDBOX.start()
+    # 缓存标志也要清掉，否则下面的路径替换读不到沙箱里的文件。
+    server._HISTORY_CACHE.clear()
+    server._HISTORY_LOADED = False
+    server._FAVORITES.clear()
+    server._FAVORITES_LOADED = False
+
+
+def tearDownModule():
+    if _SANDBOX is not None:
+        _SANDBOX.stop()
+    if _SANDBOX_DIR is not None:
+        _SANDBOX_DIR.cleanup()
+
+
 class SyncMaintenanceTests(unittest.TestCase):
     """请求路径只更新内存缓存；重写索引和收藏元数据交给后台定时器。"""
 
@@ -163,6 +197,43 @@ class GalleryCacheTests(unittest.TestCase):
         with mock.patch.object(server, "_media_item_fresh", return_value=True):
             server._history_gallery(entry, "")
         self.assertEqual(server._GALLERY_CACHE, {})
+
+class RealDataSafetyTests(unittest.TestCase):
+    """回归：维护路径里那句未被 mock 的 _persist_history_index()，
+    曾经把测试夹具当成真实历史写进用户的 mobile_history.json。
+    这里故意「只 mock 上层」跑一遍，断言真实数据文件一个字节都没动。"""
+
+    REAL_FILES = ("mobile_history.json", "mobile_favorites.json", "mobile_settings.json")
+
+    def _snapshot(self):
+        return {name: (ROOT / name).read_bytes() if (ROOT / name).exists() else None
+                for name in self.REAL_FILES}
+
+    def test_maintenance_path_cannot_reach_the_real_data_files(self):
+        # 探针编号必须独特：如果哪天沙箱失效、真的写进了真实文件，
+        # 字节对比要能立刻看出来，而不是「恰好一样」地蒙混过关。
+        probe = "sandbox-probe-must-never-land-in-real-files"
+        before = self._snapshot()
+        history = {probe: {"prompt": [], "outputs": {}, "status": {}}}
+        old = sys.modules.get("server")
+        sys.modules["server"] = _fake_prompt_server(history)
+        try:
+            # 注意：这里刻意不 mock _persist_history_index，让它真的去落盘——
+            # 落盘目标必须是沙箱，而不是插件的真实目录。
+            with mock.patch.object(server, "_persist_history_index_if_due"), \
+                    mock.patch.object(server, "_backfill_favorite_meta"), \
+                    mock.patch.object(server, "_scrub_stale_history_images", return_value=True), \
+                    mock.patch.object(server, "_load_history_index", return_value={}):
+                server._sync_history_from_live(True)
+        finally:
+            if old is None:
+                sys.modules.pop("server", None)
+            else:
+                sys.modules["server"] = old
+        after = self._snapshot()
+        for name in self.REAL_FILES:
+            self.assertEqual(before[name], after[name], f"测试改写了真实的 {name}")
+            self.assertNotIn(probe.encode("utf-8"), after[name] or b"", f"探针编号落进了真实的 {name}")
 
 
 if __name__ == "__main__":
