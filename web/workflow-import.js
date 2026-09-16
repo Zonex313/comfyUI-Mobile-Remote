@@ -1,5 +1,5 @@
-import { t } from "./i18n.js?v=202609304";
-import "./workflow-library.js?v=202609304";
+import { t } from "./i18n.js?v=202609305";
+import "./workflow-library.js?v=202609305";
 import { app } from "../../scripts/app.js";
 
 /*

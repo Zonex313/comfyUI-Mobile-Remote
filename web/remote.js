@@ -1,10 +1,10 @@
-import { ready as i18nReady, t } from "./i18n.js?v=202609304";
+import { ready as i18nReady, t } from "./i18n.js?v=202609305";
 
 // 词典到位后再注册界面，否则侧边栏标题会先渲染成中文原文。
 await i18nReady;
 import { app } from "../../scripts/app.js";
-import { createPresetManager } from "./preset-manager.js?v=202609304";
-import { createWorkflowImporter } from "./workflow-import.js?v=202609304";
+import { createPresetManager } from "./preset-manager.js?v=202609305";
+import { createWorkflowImporter } from "./workflow-import.js?v=202609305";
 
 const TAB_ID = "mobile-remote";
 const POLL_MS = 3000;
@@ -947,7 +947,7 @@ app.registerExtension({
       const stylesheet = document.createElement("link");
       stylesheet.id = "mobile-remote-styles";
       stylesheet.rel = "stylesheet";
-      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609304`;
+      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609305`;
       document.head.append(stylesheet);
     }
     app.extensionManager.registerSidebarTab({

@@ -27,6 +27,10 @@
   --mr-pending: #f0b4c4;
   --mr-error: #f04878;
   --mr-control-size: 32px;
+  /* 右上角按钮里文字/图标的视觉补偿：CJK 与图标字体的墨迹中心比度量中心偏上，
+     这两个值就是实测出来的偏移量，以后微调只改这里。 */
+  --mr-header-text-nudge: 1px;
+  --mr-header-icon-nudge: 0.5px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -120,6 +124,17 @@
 
 .mobile-remote-panel .mobile-remote-header-actions .mobile-remote-button-label {
   line-height: 1;
+  /* 中文/日文/韩文字形的墨迹中心比字体度量中心偏高（10px 约 0.8px、11px 约 1.2px），
+     光靠 line-height / align-items 压不下来——墨迹相对盒子中心的位置与行高无关，
+     所以这里做 1px 的光学补偿，视觉上才是居中。 */
+  position: relative;
+  top: var(--mr-header-text-nudge);
+}
+
+/* 图标字体（PrimeIcons）的字形同样偏上约 0.4px，补一半。 */
+.mobile-remote-panel .mobile-remote-header-actions .mobile-remote-icon {
+  position: relative;
+  top: var(--mr-header-icon-nudge);
 }
 
 .mobile-remote-panel .mobile-remote-header-actions .mobile-remote-tags-entry {

@@ -274,11 +274,13 @@ test("电脑端四种语言的按钮都不被译文撑破，复制成功不再�
         for (const row of header) {
           const name = row.text || "图标按钮";
           if (row.height !== 28) failures.push(`${where} 右上角「${name}」高度不是 28px（${row.height}px）`);
-          if (row.iconDy !== null && Math.abs(row.iconDy) > 0.5) {
-            failures.push(`${where} 右上角「${name}」的图标纵向没居中：dy=${row.iconDy}`);
+          // 字号不同、字体墨迹也不同：这里只要求「盒子中心 ± 1.5px」，
+          // 真正的视觉居中靠 CSS 里那 1px / 0.5px 的光学补偿。
+          if (row.iconDy !== null && Math.abs(row.iconDy) > 1.5) {
+            failures.push(`${where} 右上角「${name}」的图标纵向偏太多：dy=${row.iconDy}`);
           }
-          if (row.labelDy !== null && Math.abs(row.labelDy) > 0.5) {
-            failures.push(`${where} 右上角「${name}」的文字纵向没居中：dy=${row.labelDy}`);
+          if (row.labelDy !== null && Math.abs(row.labelDy) > 1.5) {
+            failures.push(`${where} 右上角「${name}」的文字纵向偏太多：dy=${row.labelDy}`);
           }
           if (row.hasIcon && row.text) {
             if (Math.abs(row.leftGap - row.rightGap) > 0.5) {
