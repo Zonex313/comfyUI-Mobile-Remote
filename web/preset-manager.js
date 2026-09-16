@@ -1,8 +1,9 @@
-import "/mobile/assets/preset-catalog.js?v=202609290";
-import { sharedCatalogStore } from "./preset-store.js?v=202609290";
+import { t } from "./i18n.js?v=202609301";
+import "/mobile/assets/preset-catalog.js?v=202609301";
+import { sharedCatalogStore } from "./preset-store.js?v=202609301";
 
 const Model = globalThis.MobilePresetCatalog;
-const CATALOG_URL = "/mobile/assets/prompt-presets.json?v=202609290";
+const CATALOG_URL = "/mobile/assets/prompt-presets.json?v=202609301";
 const keyOf = (category, slot) => `${category.id}.${slot.id}`;
 const unique = (tags) => [...new Set(tags)];
 const sameMembers = (a, b) => a.length === b.length && a.every((tag) => b.includes(tag));
@@ -13,17 +14,17 @@ function setTags(map, key, tags) {
 export function createPresetManager({ element, button, setText, store = sharedCatalogStore(), fetchCatalog = null }) {
   const root = element("section", "mobile-remote-tags");
   root.hidden = true;
-  root.setAttribute("aria-label", "标签管理");
+  root.setAttribute("aria-label", t("标签管理"));
   const toolbar = element("div", "mobile-remote-tags-toolbar");
   const search = element("input", "mobile-remote-tags-search");
   search.type = "search";
-  search.placeholder = "搜索分类或标签";
-  search.setAttribute("aria-label", "搜索分类或标签");
+  search.placeholder = t("搜索分类或标签");
+  search.setAttribute("aria-label", t("搜索分类或标签"));
   const removedLabel = element("label", "mobile-remote-tags-toggle");
   const showRemoved = element("input", "mobile-remote-checkbox");
   showRemoved.type = "checkbox";
-  removedLabel.append(showRemoved, element("span", "", "已删除"));
-  const retry = button("重新读取与保存", "refresh");
+  removedLabel.append(showRemoved, element("span", "", t("已删除")));
+  const retry = button(t("重新读取与保存"), "refresh");
   toolbar.append(search, removedLabel, retry.node);
   const status = element("p", "mobile-remote-tags-status");
   status.setAttribute("role", "status");
@@ -118,15 +119,17 @@ export function createPresetManager({ element, button, setText, store = sharedCa
     captureEditorDraft();
     if (editorTagRemoved()) {
       closeEditor();
-      setText(status, "这个标签已被另一端删除");
+      setText(status, t("这个标签已被另一端删除"));
       status.dataset.tone = "error";
       return;
     }
     const { category, slot, tag } = editor;
     const draft = editor.draft;
     form.replaceChildren();
-    const heading = element("h3", "mobile-remote-card-title", `${tag ? "标签规则" : "新增标签"} · ${category.label} / ${slot.label}`);
-    const fieldLabel = element("label", "mobile-remote-tags-label", "标签");
+    const heading = element("h3", "mobile-remote-card-title", t("{mode} · {category} / {slot}", {
+      mode: tag ? t("标签规则") : t("新增标签"), category: category.label, slot: slot.label,
+    }));
+    const fieldLabel = element("label", "mobile-remote-tags-label", t("标签"));
     const input = element("input", "mobile-remote-tags-input");
     input.name = "tag";
     input.required = true;
@@ -138,7 +141,7 @@ export function createPresetManager({ element, button, setText, store = sharedCa
     error.setAttribute("role", "alert");
     error.hidden = true;
     const groupSection = element("details", "mobile-remote-rule-section");
-    groupSection.append(element("summary", "", "加入互斥组"));
+    groupSection.append(element("summary", "", t("加入互斥组")));
     const groups = effectiveGroups();
     const availableTags = new Set(knownTags());
     groups.forEach((group, index) => {
@@ -152,22 +155,24 @@ export function createPresetManager({ element, button, setText, store = sharedCa
       box.dataset.members = group.join("\u0000");
       box.disabled = Boolean(tag && group.includes(tag));
       box.checked = box.disabled || Boolean(draft?.groups?.includes(box.dataset.members));
-      label.title = visibleMembers.join("、");
-      label.append(box, element("span", "", `组 ${index + 1} (${visibleMembers.length}) · ${visibleMembers.join("、")}`));
+      label.title = visibleMembers.join(t("、"));
+      label.append(box, element("span", "", t("组 {index} ({count}) · {members}", {
+        index: index + 1, count: visibleMembers.length, members: visibleMembers.join(t("、")),
+      })));
       groupSection.append(label);
     });
     const peersSection = element("details", "mobile-remote-rule-section");
-    peersSection.append(element("summary", "", "与其他标签互斥"));
+    peersSection.append(element("summary", "", t("与其他标签互斥")));
     const peerSearch = element("input", "mobile-remote-tags-search");
     peerSearch.type = "search";
     peerSearch.value = draft?.peerQuery || "";
-    peerSearch.placeholder = "搜索全部分类的标签";
-    peerSearch.setAttribute("aria-label", "搜索互斥候选");
+    peerSearch.placeholder = t("搜索全部分类的标签");
+    peerSearch.setAttribute("aria-label", t("搜索互斥候选"));
     const candidates = knownTags().filter((t) => t !== tag);
     const selected = new Set(draft?.selected?.filter((text) => candidates.includes(text)) || []);
     const peerList = element("div", "mobile-remote-peer-list");
     const peerCount = element("p", "mobile-remote-note");
-    const more = button("更多互斥候选", "plus", "更多");
+    const more = button(t("更多互斥候选"), "plus", t("更多"));
     let limit = 80;
     const MAX_MUTEX_GROUP = 64;
     function peerBudget() {
@@ -189,16 +194,17 @@ export function createPresetManager({ element, button, setText, store = sharedCa
           const budget = peerBudget();
           if (box.checked && selected.size >= budget) {
             box.checked = false;
-            setText(peerCount, budget ? `该组最多再选 ${budget} 个互斥候选` : "这个互斥组已满，无法继续添加");
+            setText(peerCount, budget ? t("该组最多再选 {budget} 个互斥候选", { budget, n: budget }) : t("这个互斥组已满，无法继续添加"));
             return;
           }
           if (box.checked) selected.add(text); else selected.delete(text);
-          setText(peerCount, `${visible.length} 个候选 · 已选 ${selected.size}`);
+          setText(peerCount, t("{length} 个候选 · 已选 {size}", { length: visible.length, size: selected.size, n: visible.length }));
         });
         row.append(box, element("span", "", text));
         peerList.append(row);
       });
-      setText(peerCount, `${visible.length} 个候选 · 已选 ${selected.size}${peerBudget() < 63 ? ` · 本组上限 ${peerBudget()}` : ""}`);
+      setText(peerCount, t("{visible} 个候选 · 已选 {selected}", { visible: visible.length, selected: selected.size, n: visible.length })
+        + (peerBudget() < 63 ? t(" · 本组上限 {budget}", { budget: peerBudget() }) : ""));
       more.node.hidden = visible.length <= limit;
     }
     peerSearch.addEventListener("input", () => { limit = 80; renderPeers(); });
@@ -206,7 +212,7 @@ export function createPresetManager({ element, button, setText, store = sharedCa
     peersSection.append(peerSearch, peerCount, peerList, more.node);
     renderPeers();
     const advanced = element("details", "mobile-remote-rule-section");
-    advanced.append(element("summary", "", "组合规则"));
+    advanced.append(element("summary", "", t("组合规则")));
     const singleLabel = element("label", "mobile-remote-tags-toggle");
     const single = element("input", "mobile-remote-checkbox");
     single.type = "checkbox";
@@ -214,8 +220,8 @@ export function createPresetManager({ element, button, setText, store = sharedCa
     const builtinSingle = (rules.singletons || []).includes(tag);
     single.checked = builtinSingle || catalog.singletons.includes(tag) || Boolean(draft?.single);
     single.disabled = builtinSingle;
-    singleLabel.append(single, element("span", "", "单独输出，不拼接同类修饰词"));
-    advanced.append(singleLabel, element("p", "mobile-remote-note", "选中此标签时跳过的分类"));
+    singleLabel.append(single, element("span", "", t("单独输出，不拼接同类修饰词")));
+    advanced.append(singleLabel, element("p", "mobile-remote-note", t("选中此标签时跳过的分类")));
     const skipTargets = new Set(catalog.skipCategories.filter((r) => (r.whenAny || [r.whenTag]).includes(tag)).flatMap((r) => r.skip));
     const skipChecks = [];
     for (const target of categories) {
@@ -236,10 +242,10 @@ export function createPresetManager({ element, button, setText, store = sharedCa
       catalog.mutex.forEach((group) => {
         if (!group.includes(tag)) return;
         const row = element("div", "mobile-remote-rule-row");
-        row.append(element("span", "", group.join("、")));
-        const remove = button("删除自定义互斥规则", "trash");
+        row.append(element("span", "", group.join(t("、"))));
+        const remove = button(t("删除自定义互斥规则"), "trash");
         remove.node.addEventListener("click", () => {
-          if (!window.confirm("删除这条自定义互斥规则？")) return;
+          if (!window.confirm(t("删除这条自定义互斥规则？"))) return;
           change((next) => { next.mutex = next.mutex.filter((g) => !sameMembers(g, group)); });
           renderEditor();
         });
@@ -248,9 +254,9 @@ export function createPresetManager({ element, button, setText, store = sharedCa
       });
     }
     const actions = element("div", "mobile-remote-tags-form-actions");
-    const save = button("保存标签", "check", "保存");
+    const save = button(t("保存标签"), "check", t("保存"));
     save.node.type = "submit";
-    const cancel = button("取消编辑", "times", "取消");
+    const cancel = button(t("取消编辑"), "times", t("取消"));
     cancel.node.addEventListener("click", () => closeEditor());
     actions.append(save.node, cancel.node);
     form.append(heading, fieldLabel, error, groupSection, peersSection, advanced, actions);
@@ -259,9 +265,9 @@ export function createPresetManager({ element, button, setText, store = sharedCa
       const text = input.value.trim();
       const key = keyOf(category, slot);
       try {
-        if (!text) throw new Error("请输入标签");
-        if (!tag && pool(category, slot).includes(text)) throw new Error("这个分类中已有相同标签");
-        if (!tag && knownTags().includes(text) && !window.confirm("其他分类已有同名标签，规则会按文字共同生效。继续添加？")) return;
+        if (!text) throw new Error(t("请输入标签"));
+        if (!tag && pool(category, slot).includes(text)) throw new Error(t("这个分类中已有相同标签"));
+        if (!tag && knownTags().includes(text) && !window.confirm(t("其他分类已有同名标签，规则会按文字共同生效。继续添加？"))) return;
         const chosen = [...groupSection.querySelectorAll("input:checked:not(:disabled)")].map((box) => groups[Number(box.value)]);
         const targets = skipChecks.filter((box) => box.checked && !box.disabled).map((box) => box.value);
         for (const group of chosen) {
@@ -269,11 +275,11 @@ export function createPresetManager({ element, button, setText, store = sharedCa
           const extensions = catalog.mutex.filter((g) => group.every((t) => g.includes(t)));
           extensions.forEach((g) => g.forEach((t) => members.add(t)));
           if (members.size + selected.size > 64) {
-            throw new Error(`这个互斥组最多 64 个标签，还能再选 ${Math.max(0, 64 - members.size)} 个`);
+            throw new Error(t("这个互斥组最多 64 个标签，还能再选 {value} 个", { value: Math.max(0, 64 - members.size) }));
           }
         }
         if (!chosen.length && selected.size + 1 > 64) {
-          throw new Error("这个互斥组最多 64 个标签");
+          throw new Error(t("这个互斥组最多 64 个标签"));
         }
         store.change((next) => {
           if (!isBuiltin(category, slot, text)) setTags(next.custom, key, [...(next.custom[key] || []), text]);
@@ -305,27 +311,29 @@ export function createPresetManager({ element, button, setText, store = sharedCa
     const item = element("div", `mobile-remote-chip${removed ? " is-removed" : skipped ? " is-skipped" : ""}`);
     const name = element("button", "mobile-remote-chip-name", text);
     name.type = "button";
-    name.title = `${text} · ${isBuiltin(category, slot, text) ? "内置" : "自定义"} · 编辑规则`;
+    name.title = t("{text} · {kind} · 编辑规则", {
+      text, kind: isBuiltin(category, slot, text) ? t("内置") : t("自定义"),
+    });
     name.dataset.focus = focusId(key, text, "edit");
     name.addEventListener("click", () => openEditor(category, slot, text, name.dataset.focus));
     item.append(name);
     if (removed) {
-      const restore = smallButton(`恢复 ${text}`, "undo", focusId(key, text, "restore"));
+      const restore = smallButton(t("恢复 {text}", { text: text }), "undo", focusId(key, text, "restore"));
       restore.addEventListener("click", () => change((next) => {
         for (const kind of ["removed", "removedCustom"]) setTags(next[kind], key, (next[kind][key] || []).filter((t) => t !== text));
       }, focusId(key, text, "edit")));
       item.append(restore);
     } else {
-      const skip = smallButton(`${skipped ? "取消跳过" : "跳过随机"} ${text}`, "ban", focusId(key, text, "skip"));
+      const skip = smallButton(t("{action} {text}", { action: skipped ? t("取消跳过") : t("跳过随机"), text }), "ban", focusId(key, text, "skip"));
       skip.setAttribute("aria-pressed", String(skipped));
       skip.addEventListener("click", () => change((next) => {
         const tags = new Set(next.skipped[key] || []);
         if (tags.has(text)) tags.delete(text); else tags.add(text);
         setTags(next.skipped, key, [...tags]);
       }, skip.dataset.focus));
-      const remove = smallButton(`删除 ${text}`, "times", focusId(key, text, "remove"));
+      const remove = smallButton(t("删除 {text}", { text: text }), "times", focusId(key, text, "remove"));
       remove.addEventListener("click", () => {
-        if (!window.confirm(`删除“${text}”？可在“已删除”中恢复。`)) return;
+        if (!window.confirm(t("删除“{text}”？可在“已删除”中恢复。", { text: text }))) return;
         change((next) => {
           const kind = isBuiltin(category, slot, text) ? "removed" : "removedCustom";
           setTags(next[kind], key, [...(next[kind][key] || []), text]);
@@ -369,14 +377,14 @@ export function createPresetManager({ element, button, setText, store = sharedCa
           const head = element("div", "mobile-remote-tag-slot-head");
           head.append(element("h4", "mobile-remote-tag-slot-title", slot.label));
           const id = focusId(keyOf(category, slot), "add");
-          const add = smallButton(`新增${category.label} / ${slot.label}标签`, "plus", id);
+          const add = smallButton(t("新增{label} / {label1}标签", { label: category.label, label1: slot.label }), "plus", id);
           add.addEventListener("click", () => openEditor(category, slot, "", id));
           head.append(add);
           const wrap = element("div", "mobile-remote-chip-wrap");
           visible.forEach((text) => wrap.append(chip(category, slot, text)));
           if (showRemoved.checked) removed.forEach((text) => wrap.append(chip(category, slot, text, true)));
           block.append(head, wrap);
-          if (!Model.pool(category, slot, catalog, { random: true }).length) block.append(element("p", "mobile-remote-note", "暂无可随机标签"));
+          if (!Model.pool(category, slot, catalog, { random: true }).length) block.append(element("p", "mobile-remote-note", t("暂无可随机标签")));
           body.append(block);
         }
         detail.append(body);
@@ -392,7 +400,7 @@ export function createPresetManager({ element, button, setText, store = sharedCa
       });
       list.append(detail);
     });
-    if (!list.childElementCount) list.append(element("p", "mobile-remote-note", "没有匹配的标签"));
+    if (!list.childElementCount) list.append(element("p", "mobile-remote-note", t("没有匹配的标签")));
     painting = false;
     list.scrollTop = scroll;
     if (activeId) focusTarget(activeId);
@@ -402,8 +410,8 @@ export function createPresetManager({ element, button, setText, store = sharedCa
     const serialized = JSON.stringify(snapshot.catalog);
     catalog = snapshot.catalog;
     status.dataset.tone = snapshot.error ? "error" : snapshot.dirty ? "pending" : "success";
-    setText(status, snapshot.error || (!snapshot.known ? "正在读取目录…" : snapshot.saving ? "正在保存…" : snapshot.dirty
-      ? (snapshot.remainingMs ? `待保存，约 ${Math.ceil(snapshot.remainingMs / 1000)} 秒后重试` : "待保存") : "已同步"));
+    setText(status, snapshot.error || (!snapshot.known ? t("正在读取目录…") : snapshot.saving ? t("正在保存…") : snapshot.dirty
+      ? (snapshot.remainingMs ? t("待保存，约 {value} 秒后重试", { value: Math.ceil(snapshot.remainingMs / 1000) }) : t("待保存")) : t("已同步")));
     if (serialized !== lastCatalog) {
       lastCatalog = serialized;
       if (editor) renderEditor();
@@ -417,12 +425,12 @@ export function createPresetManager({ element, button, setText, store = sharedCa
     loading = (async () => {
       const getCatalog = fetchCatalog || (async () => {
         const response = await fetch(CATALOG_URL, { cache: "no-store", signal: AbortSignal.timeout(15000) });
-        if (!response.ok) throw new Error("内置目录读取失败");
+        if (!response.ok) throw new Error(t("内置目录读取失败"));
         return response.json();
       });
       const [data] = await Promise.all([getCatalog(), store.load()]);
       if (disposed) return;
-      if (!Array.isArray(data.categories)) throw new Error("内置目录格式错误");
+      if (!Array.isArray(data.categories)) throw new Error(t("内置目录格式错误"));
       categories = data.categories;
       rules = data.rules || {};
       ready = true;

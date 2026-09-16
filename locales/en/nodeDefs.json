@@ -1,0 +1,23 @@
+{
+  "MobileTagCLIPTextEncode": {
+    "display_name": "CLIP Text Encode | Random Tags",
+    "description": "Encodes a prompt into conditioning with CLIP, plus \"Tag mode\" and \"Re-roll every run\" switches for the front-end random tag composer.",
+    "inputs": {
+      "clip": {
+        "tooltip": "The CLIP model used for encoding the text."
+      },
+      "text": {
+        "name": "Text",
+        "tooltip": "Prompt text"
+      },
+      "标签模式": {
+        "name": "Tag mode",
+        "tooltip": "When on, the front-end composes random tags from the tag catalogue and injects them into the prompt; when off it behaves exactly like the built-in CLIP text encode."
+      },
+      "每次随机": {
+        "name": "Re-roll every run",
+        "tooltip": "When on, tags are re-rolled for every queued run (each batch item too); when off the tags currently shown on the node are reused."
+      }
+    }
+  }
+}

@@ -5,6 +5,11 @@
 })(typeof window === "undefined" ? globalThis : window, function () {
   "use strict";
 
+  const t = (text, params) => {
+    const api = globalThis.MobileI18n;
+    return api ? api.t(text, params) : text;
+  };
+
   const idOf = (value) => value == null ? "" : String(value);
   const numeric = (value) => typeof value === "number" && Number.isFinite(value);
   const bounded = (value) => Math.max(0, Math.min(100, value));
@@ -198,7 +203,7 @@
       return {
         nodeId: node?.nodeId || "",
         displayId: node?.displayId || "",
-        label: node?.displayId ? `节点 ${node.displayId}` : "正在采样",
+        label: node?.displayId ? t("节点 {displayId}", { displayId: node.displayId }) : t("正在采样"),
         value: node?.value ?? null,
         max: node?.max ?? null,
         percent: node?.measured ? bounded(node.value / node.max * 100) : null,

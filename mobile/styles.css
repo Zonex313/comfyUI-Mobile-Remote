@@ -3428,3 +3428,51 @@ dialog:not([open]) {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* 语言选择：设置页右上角的图标按钮 + 下拉菜单，按钮不带文字。 */
+.language-picker {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.language-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 132px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--glass-bar);
+  backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+}
+
+.language-menu[hidden] { display: none; }
+
+.language-option {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 9px;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 560;
+  color: var(--text);
+  background: transparent;
+  cursor: pointer;
+}
+
+.language-option:hover,
+.language-option:focus-visible { background: var(--surface); }
+
+/* 当前语言：左侧一条短竖线，比整块高亮更安静。 */
+.language-option[aria-checked="true"] {
+  color: #fff0f5;
+  background: var(--surface);
+  box-shadow: inset 2px 0 0 #f06a9a;
+}

@@ -2,6 +2,13 @@
   "use strict";
 
   const $ = (id) => document.getElementById(id);
+  const i18n = () => globalThis.MobileI18n;
+  // 界面文案统一走这个入口：词典没到或没翻到就原样显示中文原文。
+  const t = (text, params) => {
+    const api = i18n();
+    return api ? api.t(text, params) : text;
+  };
+
   // 关闭大图后短暂屏蔽底部导航：关闭按钮正压在「设置」标签正上方，
   // 若画面尚未落帧，用户的第二下点击会穿透到导航并误切页面。
   const GALLERY_CLOSE_GUARD_MS = 450;
@@ -80,24 +87,27 @@
   let catalogInvalidNotified = false;
   const phoneSettings = new window.MobileSettingsSync({ onStatus: renderSettingsSync });
 
+  let lastSettingsStatus = null;
+
   function renderSettingsSync(status) {
+    lastSettingsStatus = status;
     const saved = status.savedAt ? new Date(status.savedAt) : null;
-    const time = saved ? `${String(saved.getHours()).padStart(2, "0")}：${String(saved.getMinutes()).padStart(2, "0")}` : "";
-    const labels = { loading: "读取设置", pending: "待同步", saving: "同步中", offline: "未同步", conflict: "设置冲突" };
-    const label = status.state === "synced" ? (time ? `${time}已同步` : "尚未同步") : (labels[status.state] || "待同步");
+    const time = saved ? localeTime(saved) : "";
+    const labels = { loading: t("读取设置"), pending: t("待同步"), saving: t("同步中"), offline: t("未同步"), conflict: t("设置冲突") };
+    const label = status.state === "synced" ? (time ? t("{time}已同步", { time: time }) : t("尚未同步")) : (labels[status.state] || t("待同步"));
     const element = $("settingsSyncLabel");
     if (element) {
       element.textContent = label;
       element.dataset.state = status.state;
-      element.title = status.error || (time ? `最近保存于 ${time}；新修改满一分钟后合并上传` : "新修改满一分钟后合并上传");
+      element.title = status.error || (time ? t("最近保存于 {time}；新修改满一分钟后合并上传", { time: time }) : t("新修改满一分钟后合并上传"));
     }
     setText("settingsSyncDetail", label);
     $("settingsSyncConflict")?.classList.toggle("hidden", status.state !== "conflict");
     if (status.catalogInvalid) {
-      if (element) element.title = "电脑上的标签目录损坏，其它设置仍会同步；未上传的标签改动会留在本机";
+      if (element) element.title = t("电脑上的标签目录损坏，其它设置仍会同步；未上传的标签改动会留在本机");
       if (!catalogInvalidNotified) {
         catalogInvalidNotified = true;
-        toast("电脑标签目录损坏，其它设置仍会同步", "error");
+        toast(t("电脑标签目录损坏，其它设置仍会同步"), "error");
       }
     } else catalogInvalidNotified = false;
     if (status.catalogRebased) applyCatalogFromSettings();
@@ -143,23 +153,38 @@
     return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
   }
 
+  // 日期时间交给 Intl：「今天 14:03」「Sep 15 14:03」这类写法各语言差别太大，
+  // 用拼字符串的方式拼不出自然的日语和韩语。
+  function localeTime(date) {
+    const api = i18n();
+    const options = { hour: "2-digit", minute: "2-digit" };
+    return api ? api.formatTime(date, options) : date.toLocaleTimeString();
+  }
+
+  function localeDateTime(date) {
+    const api = i18n();
+    // 运行时没加载时退回中文写法，和 t() 的兜底保持一致。
+    if (!api) return `${date.getMonth() + 1}月${date.getDate()}日 ${localeTime(date)}`;
+    return `${api.formatDate(date, { month: "short", day: "numeric" })} ${localeTime(date)}`;
+  }
+
   function formatTime(value) {
     const timestamp = Number(value || 0);
-    if (!timestamp) return "时间未知";
+    if (!timestamp) return t("时间未知");
     const date = new Date(timestamp);
     const today = new Date();
     const sameDay = date.toDateString() === today.toDateString();
-    const time = date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-    return sameDay ? `今天 ${time}` : `${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
+    return sameDay ? t("今天 {time}", { time: localeTime(date) }) : localeDateTime(date);
   }
 
-  function describeError(body, fallback = "请求失败") {
+  function describeError(body, fallback = t("请求失败")) {
     if (!body) return fallback;
-    if (typeof body.error === "string") return body.error;
-    if (body.error?.message) return body.error.message;
-    if (typeof body.details === "string") return body.details;
-    if (body.details?.error?.message) return body.details.error.message;
-    if (body.details?.error?.details) return body.details.error.details;
+    // 后端已按请求语言返回；这里再过一层词典兜底，没翻到的仍是中文原文。
+    if (typeof body.error === "string") return t(body.error);
+    if (body.error?.message) return t(body.error.message);
+    if (typeof body.details === "string") return t(body.details);
+    if (body.details?.error?.message) return t(body.details.error.message);
+    if (body.details?.error?.details) return t(body.details.error.details);
     return fallback;
   }
 
@@ -175,7 +200,8 @@
   function toast(message, type = "") {
     const item = document.createElement("div");
     item.className = `toast ${type}`.trim();
-    item.textContent = String(message || "").replace(/[，。、；：！？,.!?;:…—·“”‘’"'（）()[\]《》【】]/g, "").trim();
+    // 提示里可能混着后端原文，统一再过一次词典。
+    item.textContent = t(String(message || "")).replace(/[，。、；：！？,.!?;:…—·“”‘’"'（）()[\]《》【】]/g, "").trim();
     if (!item.textContent) return;
     $("toastRegion").append(item);
     window.setTimeout(() => {
@@ -200,23 +226,23 @@
   function uiVersion() {
     const src = document.querySelector('script[src*="app.js"]')?.src || "";
     const match = /[?&]v=([^&]+)/.exec(src);
-    return match ? match[1] : "未知";
+    return match ? match[1] : t("未知");
   }
 
   function renderStatus(status) {
     state.status = status;
     state.online = Boolean(status?.online);
-    setText("connectionLabel", state.online ? "已连接" : "离线");
+    setText("connectionLabel", state.online ? t("已连接") : t("离线"));
     setText("runningCount", status?.running ?? 0);
     setText("pendingCount", status?.pending ?? 0);
 
     const gpu = status?.gpu || {};
-    const gpuName = gpu.name || "GPU 状态未知";
+    const gpuName = gpu.name || t("GPU 状态未知");
     const memory = gpu.total ? `${formatBytes(gpu.used)} / ${formatBytes(gpu.total)}` : "";
     setText("settingsGpu", memory ? `${gpuName} · ${memory}` : gpuName);
-    setText("pluginVersion", `${status?.version || "-"} · 界面 ${uiVersion()}`);
+    setText("pluginVersion", t("{value} · 界面 {value1}", { value: status?.version || "-", value1: uiVersion() }));
     setText("currentAddress", `${location.origin}/mobile`);
-    setText("tailscaleAddress", status?.mobile_urls?.[0] || "未检测到");
+    setText("tailscaleAddress", status?.mobile_urls?.[0] || t("未检测到"));
 
     const activeCount = Number(status?.running || 0) + Number(status?.pending || 0);
     const badge = $("queueBadge");
@@ -230,7 +256,7 @@
       renderStatus(body);
     } catch {
       state.online = false;
-      setText("connectionLabel", "连接失败");
+      setText("connectionLabel", t("连接失败"));
     }
   }
 
@@ -360,8 +386,8 @@
     const picker = $("modelPickerButton");
     if (picker) {
       const names = selectedModelQueue();
-      const first = names[0] || "选择模型";
-      picker.textContent = names.length > 1 ? `${first} · ${names.length}个` : first;
+      const first = names[0] || t("选择模型");
+      picker.textContent = names.length > 1 ? t("{first} · {length}个", { first: first, length: names.length }) : first;
       picker.title = names.join("\n");
     }
     document.querySelector(".generate-fab")?.classList.toggle("multi-model", state.multiModel);
@@ -431,7 +457,7 @@
       list.append(row);
     });
     const count = $("modelPickerCount");
-    if (count) count.textContent = `已选 ${selected.size} 个`;
+    if (count) count.textContent = t("已选 {size} 个", { size: selected.size });
   }
 
   function openModelPicker() {
@@ -468,8 +494,8 @@
     const tools = document.createElement("div");
     tools.className = "model-tools";
     tools.append(
-      makeMiniToggle("multiModelToggle", "多模型", setMultiModel),
-      makeMiniToggle("fixedSeedToggle", "单次种子固定", setFixedSeed),
+      makeMiniToggle("multiModelToggle", t("多模型"), setMultiModel),
+      makeMiniToggle("fixedSeedToggle", t("单次种子固定"), setFixedSeed),
     );
     const labelRow = wrapper.querySelector(".field-label-row");
     labelRow?.after(tools);
@@ -523,7 +549,7 @@
     decrement.type = "button";
     decrement.className = "stepper-button";
     decrement.textContent = "−";
-    decrement.setAttribute("aria-label", `${field.label}减小`);
+    decrement.setAttribute("aria-label", t("{label}减小", { label: field.label }));
 
     const input = document.createElement("input");
     input.type = "number";
@@ -537,7 +563,7 @@
     increment.type = "button";
     increment.className = "stepper-button";
     increment.textContent = "+";
-    increment.setAttribute("aria-label", `${field.label}增大`);
+    increment.setAttribute("aria-label", t("{label}增大", { label: field.label }));
 
     let randomButton = null;
     const paint = () => {
@@ -546,7 +572,7 @@
       input.value = random ? "" : state.values[field.id] ?? field.value;
       if (randomButton) {
         randomButton.classList.toggle("active", random);
-        randomButton.textContent = "随机";
+        randomButton.textContent = t("随机");
       }
     };
 
@@ -617,14 +643,14 @@
       input.value = random ? "" : state.values[field.id] ?? field.value;
       if (randomButton) {
         randomButton.classList.toggle("active", random);
-        randomButton.textContent = "随机";
+        randomButton.textContent = t("随机");
       }
     };
 
     randomButton = document.createElement("button");
     randomButton.type = "button";
     randomButton.className = "random-button";
-    randomButton.setAttribute("aria-label", `${field.label}随机开关`);
+    randomButton.setAttribute("aria-label", t("{label}随机开关", { label: field.label }));
     randomButton.addEventListener("click", () => {
       const random = state.values[field.id] === "__random__";
       updateFieldValue(field, random ? field.value : "__random__");
@@ -652,7 +678,7 @@
     input.checked = Boolean(state.values[field.id]);
     const visual = document.createElement("span");
     visual.setAttribute("aria-hidden", "true");
-    const paint = () => { value.textContent = input.checked ? "已开启" : "已关闭"; };
+    const paint = () => { value.textContent = input.checked ? t("已开启") : t("已关闭"); };
     input.addEventListener("change", () => {
       updateFieldValue(field, input.checked);
       paint();
@@ -693,11 +719,11 @@
 
     const upload = document.createElement("label");
     upload.className = "upload-button";
-    upload.innerHTML = `${ICONS.upload}<span>上传</span>`;
+    upload.innerHTML = `${ICONS.upload}<span>${t("上传")}</span>`;
     const file = document.createElement("input");
     file.type = "file";
     file.accept = "image/*";
-    file.setAttribute("aria-label", `上传${field.label}`);
+    file.setAttribute("aria-label", t("上传{label}", { label: field.label }));
     upload.append(file);
 
     const preview = document.createElement("img");
@@ -726,14 +752,14 @@
       try {
         const response = await fetch("/upload/image", { method: "POST", body: form });
         const body = await response.json().catch(() => ({}));
-        if (!response.ok || !body.name) throw new Error(describeError(body, "图片上传失败"));
+        if (!response.ok || !body.name) throw new Error(describeError(body, t("图片上传失败")));
         const next = [body.subfolder, body.name].filter(Boolean).join("/");
         input.value = next;
         updateFieldValue(field, next);
         paintPreview();
-        toast("图片已上传", "success");
+        toast(t("图片已上传"), "success");
       } catch (error) {
-        toast(error.message || "图片上传失败", "error");
+        toast(error.message || t("图片上传失败"), "error");
       } finally {
         upload.classList.remove("busy");
         file.value = "";
@@ -957,8 +983,8 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609290", { cache: "no-store" });
-      if (!response.ok) throw new Error("标签目录读取失败");
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609301", { cache: "no-store" });
+      if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];
       state.presetRules = body?.rules && typeof body.rules === "object" ? body.rules : {};
@@ -1070,7 +1096,7 @@
     if (presetTagStatus(categoryId, slotId, text) === "deleted") return true;
     if (catalogTagSet("skipped", categoryId, slotId).has(text)) return true;
     if (!tagConflicts(text, selectedTagsExcept(categoryId, slotId))) return true;
-    toast("这个标签与已选标签互斥，请先取消冲突标签", "error");
+    toast(t("这个标签与已选标签互斥，请先取消冲突标签"), "error");
     return false;
   }
   function filterSlotValues(values) {
@@ -1154,11 +1180,11 @@
       const bar = document.createElement("div");
       bar.className = "preset-panel-bar";
       const hint = document.createElement("span");
-      hint.textContent = "点分类名随机，点标签修改";
+      hint.textContent = t("点分类名随机，点标签修改");
       const randomButton = document.createElement("button");
       randomButton.type = "button";
       randomButton.className = "preset-random-button";
-      randomButton.textContent = "随机";
+      randomButton.textContent = t("随机");
       randomButton.addEventListener("click", () => randomizePresetSlots());
       bar.append(hint, randomButton);
 
@@ -1166,16 +1192,16 @@
       customWrap.className = "advanced-section preset-custom";
       const summary = document.createElement("summary");
       const customLabel = document.createElement("span");
-      customLabel.textContent = "自定义";
+      customLabel.textContent = t("自定义");
       const customHint = document.createElement("span");
       customHint.className = "preset-custom-hint";
-      customHint.textContent = "此处输入文字会注入在提示词最后";
+      customHint.textContent = t("此处输入文字会注入在提示词最后");
       summary.append(customLabel, customHint);
       summary.insertAdjacentHTML("beforeend", '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>');
       const customInput = document.createElement("textarea");
       customInput.id = "presetCustomText";
       customInput.rows = 2;
-      customInput.placeholder = "额外要加进提示词的文字";
+      customInput.placeholder = t("额外要加进提示词的文字");
       customInput.value = state.presetState.extraText || "";
       customInput.addEventListener("input", () => {
         state.presetState.extraText = customInput.value;
@@ -1205,7 +1231,7 @@
       label.type = "button";
       label.className = "preset-row-label";
       label.textContent = category.label;
-      label.setAttribute("aria-label", `随机${category.label}`);
+      label.setAttribute("aria-label", t("随机{label}", { label: category.label }));
       label.addEventListener("click", () => randomizePresetSlots(category.id));
       const divider = document.createElement("span");
       divider.className = "preset-row-divider";
@@ -1216,14 +1242,14 @@
         if (index > 0) {
           const sep = document.createElement("span");
           sep.className = "preset-chip-sep";
-          sep.textContent = "、";
+          sep.textContent = t("、");
           values.append(sep);
         }
         const current = getSlotState(category.id, slot.id);
         const chip = document.createElement("button");
         chip.type = "button";
         chip.className = "preset-chip";
-        const val = current.value || "未选";
+        const val = current.value || t("未选");
         const status = presetTagStatus(category.id, slot.id, current.value);
         const conflict = conflicts.has(slotStorageKey(category.id, slot.id));
         if (val.length <= 2) chip.classList.add("no-ellipsis");
@@ -1233,13 +1259,18 @@
         if ((category.slots || []).length >= 3) chip.classList.add("tight");
         if (current.locked) chip.classList.add("locked");
         if (current.ignored) chip.classList.add("ignored");
-        chip.textContent = status === "deleted" ? `${val}（已删除）` : val;
+        chip.textContent = status === "deleted" ? t("{val}（已删除）", { val: val }) : val;
         chip.title = [
-          status === "deleted" ? "当前标签已从目录删除，但仍保留在提示词中" : "",
-          status === "free" ? "自由标签" : "",
-          conflict ? "与其他已选标签互斥，请编辑其中一个" : "",
-        ].filter(Boolean).join("；");
-        chip.setAttribute("aria-label", `编辑${category.label}${slot.label}${status === "deleted" ? "，已删除" : ""}${conflict ? "，存在互斥" : ""}`);
+          status === "deleted" ? t("当前标签已从目录删除，但仍保留在提示词中") : "",
+          status === "free" ? t("自由标签") : "",
+          conflict ? t("与其他已选标签互斥，请编辑其中一个") : "",
+        ].filter(Boolean).join(t("；"));
+        const chipLabel = [
+          t("编辑{category}{slot}", { category: category.label, slot: slot.label }),
+          status === "deleted" ? t("，已删除") : "",
+          conflict ? t("，存在互斥") : "",
+        ].join("");
+        chip.setAttribute("aria-label", chipLabel);
         chip.addEventListener("click", () => openPresetTagEditor(category.id, slot.id));
         values.append(chip);
       });
@@ -1268,8 +1299,8 @@
     const current = getSlotState(state.presetEditing.categoryId, state.presetEditing.slotId);
     $("presetLockButton").classList.toggle("active", current.locked);
     $("presetIgnoreButton").classList.toggle("active", current.ignored);
-    $("presetLockButton").textContent = current.locked ? "已锁定" : "锁定";
-    $("presetIgnoreButton").textContent = current.ignored ? "已忽略" : "忽略";
+    $("presetLockButton").textContent = current.locked ? t("已锁定") : t("锁定");
+    $("presetIgnoreButton").textContent = current.ignored ? t("已忽略") : t("忽略");
   }
 
   function renderPresetPool() {
@@ -1291,8 +1322,8 @@
       const status = presetTagStatus(categoryId, slotId, item);
       if (item === current.value) chip.classList.add("active");
       if (status === "deleted") chip.classList.add("deleted");
-      chip.textContent = status === "deleted" ? `${item}（已删除）` : item;
-      chip.title = status === "deleted" ? "已删除，仅用于恢复当前提示词" : "选择此标签";
+      chip.textContent = status === "deleted" ? t("{item}（已删除）", { item: item }) : item;
+      chip.title = status === "deleted" ? t("已删除，仅用于恢复当前提示词") : t("选择此标签");
       chip.addEventListener("click", () => {
         if (!canSelectPresetTag(categoryId, slotId, item)) return;
         $("presetTagInput").value = item;
@@ -1307,7 +1338,7 @@
         const remove = document.createElement("span");
         remove.className = "preset-pool-remove";
         remove.textContent = "×";
-        remove.title = "删除自定义标签";
+        remove.title = t("删除自定义标签");
           remove.addEventListener("click", (event) => {
             event.stopPropagation();
             removePresetCustomTag(categoryId, slotId, item);
@@ -1350,7 +1381,7 @@
     renderPresetPool();
     renderPresetPanel();
     applyPresetPrompt();
-    toast(added ? "已加入备选" : "已选择标签");
+    toast(added ? t("已加入备选") : t("已选择标签"));
   }
 
   function savePresetTagEditor() {
@@ -1376,12 +1407,12 @@
     if (labelRow && !wrapper.querySelector(".preset-toggle-wrap")) {
       const switchLabel = document.createElement("label");
       switchLabel.className = "toggle preset-toggle";
-      switchLabel.title = "标签预设";
+      switchLabel.title = t("标签预设");
       const input = document.createElement("input");
       input.type = "checkbox";
       input.id = "presetModeToggle";
       input.checked = state.presetEnabled;
-      input.setAttribute("aria-label", "标签预设");
+      input.setAttribute("aria-label", t("标签预设"));
       const visual = document.createElement("span");
       visual.setAttribute("aria-hidden", "true");
       input.addEventListener("change", () => setPresetEnabled(input.checked));
@@ -1390,7 +1421,7 @@
       wrap.className = "preset-toggle-wrap";
       const caption = document.createElement("span");
       caption.className = "preset-toggle-caption";
-      caption.textContent = "标签模式";
+      caption.textContent = t("标签模式");
       wrap.append(caption, switchLabel);
       const node = labelRow.querySelector(".field-node");
       if (node) labelRow.insertBefore(wrap, node);
@@ -1546,7 +1577,7 @@
     $("primaryFields").classList.add("hidden");
     $("advancedSection").classList.remove("hidden");
     setText("advancedCount", advanced.length + trio.length + 1 + (batch ? 1 : 0) + (seed ? 1 : 0));
-    setText("workflowMeta", `${workflow.node_count} 个节点 · ${fields.length} 个可调参数`);
+    setText("workflowMeta", t("{node_count} 个节点 · {length} 个可调参数", { node_count: workflow.node_count, length: fields.length }));
     syncSizePresetSelection();
     paintModelTools();
     $("generationForm").classList.remove("hidden");
@@ -1560,7 +1591,7 @@
       return;
     }
     const token = ++state.workflowLoadToken;
-    setText("workflowMeta", "正在读取参数");
+    setText("workflowMeta", t("正在读取参数"));
     try {
       const body = await requestJson(`/mobile/api/workflows/${encodeURIComponent(workflowId)}?_=${Date.now()}`);
       if (token !== state.workflowLoadToken) return;
@@ -1578,7 +1609,7 @@
       if (token !== state.workflowLoadToken) return;
       state.workflow = null;
       $("generationForm").classList.add("hidden");
-      setText("workflowMeta", error.message);
+      setText("workflowMeta", t(error.message));
       toast(error.message, "error");
     }
   }
@@ -1593,7 +1624,7 @@
     if (state.workflows.length === 0) {
       const option = document.createElement("option");
       option.value = "";
-      option.textContent = "暂无工作流";
+      option.textContent = t("暂无工作流");
       select.append(option);
       $("workflowEmpty").classList.remove("hidden");
       $("generationForm").classList.add("hidden");
@@ -1615,8 +1646,8 @@
       });
       select.append(group);
     };
-    appendGroup("常驻 · 电脑端不开也能用", state.workflows.filter((workflow) => workflow.pinned));
-    appendGroup("电脑端打开中", state.workflows.filter((workflow) => !workflow.pinned));
+    appendGroup(t("常驻 · 电脑端不开也能用"), state.workflows.filter((workflow) => workflow.pinned));
+    appendGroup(t("电脑端打开中"), state.workflows.filter((workflow) => !workflow.pinned));
     const selected = state.workflows.some((workflow) => workflow.id === previous)
       ? previous
       : state.workflows[0].id;
@@ -1713,7 +1744,7 @@
     if (kind === "image") {
       const image = document.createElement("img");
       image.src = mediaUrl(item, compact);
-      image.alt = compact ? "" : "生成结果";
+      image.alt = compact ? "" : t("生成结果");
       image.loading = compact ? "lazy" : "eager";
       image.decoding = "async";
       if (compact) image.fetchPriority = "low";
@@ -1752,21 +1783,21 @@
   }
 
   const STATUS_LABELS = {
-    pending: "排队中",
-    in_progress: "运行中",
-    completed: "已完成",
-    failed: "失败",
-    cancelled: "已停止",
+    pending: t("排队中"),
+    in_progress: t("运行中"),
+    completed: t("已完成"),
+    failed: t("失败"),
+    cancelled: t("已停止"),
   };
 
   function jobStatusLabel(status) {
-    return STATUS_LABELS[status] || status || "未知";
+    return STATUS_LABELS[status] || status || t("未知");
   }
 
   async function cancelJob(jobId) {
     try {
       await requestJson(`/mobile/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
-      toast("任务已停止", "success");
+      toast(t("任务已停止"), "success");
       state.progress.delete(jobId);
       await Promise.all([loadStatus(), loadJobs()]);
     } catch (error) {
@@ -1789,9 +1820,9 @@
   function progressDisplay(job) {
     const progress = job.status === "in_progress" ? state.progress.get(job.id) : null;
     const percent = progress?.percent ?? null;
-    const label = job.status === "pending" ? "等待执行"
+    const label = job.status === "pending" ? t("等待执行")
       : progress?.displayId && progress.displayId !== "sampling" ? nodeDisplayName(progress.displayId)
-      : "正在处理";
+      : t("正在处理");
     return { percent, text: percent == null ? "—" : `${Math.round(percent)}%`, label };
   }
 
@@ -1823,7 +1854,7 @@
     const time = card.querySelector(".job-copy > span");
     const status = card.querySelector(".job-status");
     if (thumb) thumb.innerHTML = job.status === "in_progress" ? ICONS.image : ICONS.queue;
-    if (title) title.textContent = job.workflow_name || "电脑端任务";
+    if (title) title.textContent = job.workflow_name || t("电脑端任务");
     if (time) time.textContent = formatTime(job.create_time);
     if (status) {
       status.className = `job-status ${job.status}`;
@@ -1834,7 +1865,7 @@
       if (!progressWrap) {
         progressWrap = document.createElement("div");
         progressWrap.className = "job-progress-wrap";
-        progressWrap.innerHTML = '<div class="job-progress-bar"><div class="job-progress-fill"></div></div><div class="job-progress-meta"><span class="job-progress-label">正在执行</span><span class="job-progress-percent">0%</span></div>';
+        progressWrap.innerHTML = t('<div class="job-progress-bar"><div class="job-progress-fill"></div></div><div class="job-progress-meta"><span class="job-progress-label">正在执行</span><span class="job-progress-percent">0%</span></div>');
         card.querySelector(".job-copy")?.append(progressWrap);
       }
       paintQueueProgress(card, job.id);
@@ -1859,8 +1890,8 @@
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.className = "icon-button";
-    cancel.setAttribute("aria-label", "停止任务");
-    cancel.title = "停止任务";
+    cancel.setAttribute("aria-label", t("停止任务"));
+    cancel.title = t("停止任务");
     cancel.innerHTML = ICONS.stop;
     cancel.addEventListener("click", () => cancelJob(job.id));
     actions.append(status, cancel);
@@ -1871,7 +1902,7 @@
 
   function renderQueue() {
     const jobs = visibleQueueJobs();
-    setText("queueTotal", `${jobs.length} 个任务`);
+    setText("queueTotal", t("{length} 个任务", { length: jobs.length, n: jobs.length }));
     $("queueEmpty").classList.toggle("hidden", jobs.length !== 0);
     const list = $("queueList");
     const current = new Map([...list.querySelectorAll(".job-card")].map((card) => [card.dataset.jobId, card]));
@@ -1934,7 +1965,7 @@
 
   async function galleryJobRecord() {
     const jobId = currentGalleryJobId();
-    if (!jobId) throw new Error("找不到这张图的任务");
+    if (!jobId) throw new Error(t("找不到这张图的任务"));
     if (state.dialogJob?.id === jobId) return state.dialogJob;
     const body = await requestJson(`/mobile/api/jobs/${encodeURIComponent(jobId)}?_=${Date.now()}`);
     state.dialogJob = body.job;
@@ -1987,7 +2018,7 @@
     if (prompt && rebuilt !== prompt) {
       setPresetFreeText(prompt);
       savePresetState();
-      toast("历史目录已变化，已按原始提示词恢复", "success");
+      toast(t("历史目录已变化，已按原始提示词恢复"), "success");
       return false;
     }
     savePresetState();
@@ -2011,7 +2042,7 @@
     }
     copyText(prompt);
     goToGenerate();
-    toast("已还原提示词");
+    toast(t("已还原提示词"));
   }
 
   function restoreSeedFromJob() {
@@ -2034,7 +2065,7 @@
     if (advanced) advanced.open = true;
     copyText(seed);
     goToGenerate();
-    toast("已还原种子");
+    toast(t("已还原种子"));
   }
 
   function galleryAbsUrl(url) {
@@ -2084,7 +2115,7 @@
     image.onload = () => finish(true);
     image.onerror = () => finish(false);
     if (image.src !== abs) image.src = url;
-    image.alt = `生成结果，第 ${state.galleryIndex + 1} 张，共 ${total} 张`;
+    image.alt = t("生成结果，第 {value} 张，共 {total} 张", { value: state.galleryIndex + 1, total: total });
     if (image.complete && image.naturalWidth > 0) finish(true);
     const zoom = state.galleryZoom;
     if (zoom) {
@@ -2166,15 +2197,15 @@
     button.disabled = favoriteToggleInFlight.has(key);
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", active ? "true" : "false");
-    button.setAttribute("aria-label", active ? "取消收藏" : "收藏这张图");
-    button.title = active ? "取消收藏" : "收藏";
+    button.setAttribute("aria-label", active ? t("取消收藏") : t("收藏这张图"));
+    button.title = active ? t("取消收藏") : t("收藏");
   }
 
   async function toggleCurrentGalleryFavorite() {
     const item = state.galleryItems[state.galleryIndex];
     const jobId = currentGalleryJobId();
     if (!item?.filename || !jobId) {
-      toast("这张图不能收藏", "error");
+      toast(t("这张图不能收藏"), "error");
       return;
     }
     const previous = Boolean(item.favorite);
@@ -2200,12 +2231,12 @@
       updateFavoriteState(jobId, item.filename, subfolder, type, Boolean(body.favorite));
       syncFavoriteButton();
       if (state.favoritesOnly) renderHistory();
-      toast(body.favorite ? "已收藏" : "已取消收藏");
+      toast(body.favorite ? t("已收藏") : t("已取消收藏"));
     } catch (error) {
       updateFavoriteState(jobId, item.filename, subfolder, type, previous);
       syncFavoriteButton();
       if (state.favoritesOnly) renderHistory();
-      toast(error.message || "收藏失败", "error");
+      toast(error.message || t("收藏失败"), "error");
     } finally {
       favoriteToggleInFlight.delete(key);
       syncFavoriteButton();
@@ -2216,10 +2247,10 @@
     const item = state.galleryItems[state.galleryIndex];
     const jobId = currentGalleryJobId();
     if (!item?.filename || !jobId) {
-      toast("无法删除这张图", "error");
+      toast(t("无法删除这张图"), "error");
       return;
     }
-    if (!window.confirm("删除这张图？删除后无法恢复。")) return;
+    if (!window.confirm(t("删除这张图？删除后无法恢复。"))) return;
     try {
       await requestJson("/mobile/api/outputs/delete", {
         method: "POST",
@@ -2240,10 +2271,10 @@
         }
         renderGalleryItem();
       }
-      toast("已删除");
+      toast(t("已删除"));
       await loadJobs();
     } catch (error) {
-      toast(error.message || "删除失败", "error");
+      toast(error.message || t("删除失败"), "error");
     }
   }
 
@@ -2318,9 +2349,9 @@
       link.download = name;
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(href), 2000);
-      toast("已开始下载");
+      toast(t("已开始下载"));
     } catch {
-      toast("下载失败", "error");
+      toast(t("下载失败"), "error");
     }
   }
 
@@ -2435,12 +2466,12 @@
     card._historyEntry = entry;
     card.dataset.historyKey = entry.key;
     const mediaButton = card.querySelector(".history-media-button");
-    mediaButton?.setAttribute("aria-label", `查看大图，第 ${flatIndex + 1} 张，共 ${total} 张`);
+    mediaButton?.setAttribute("aria-label", t("查看大图，第 {value} 张，共 {total} 张", { value: flatIndex + 1, total: total }));
     const title = card.querySelector(".history-title-button");
-    const name = entry.job.model_name || entry.job.workflow_name || "电脑端任务";
+    const name = entry.job.model_name || entry.job.workflow_name || t("电脑端任务");
     if (title && title.textContent !== name) {
       title.textContent = name;
-      title.setAttribute("aria-label", `查看${name}的生成参数`);
+      title.setAttribute("aria-label", t("查看{name}的生成参数", { name: name }));
     }
     const meta = card.querySelector(".history-overlay-meta");
     const metaText = historyOverlayText(entry);
@@ -2520,8 +2551,8 @@
     setText(
       "historyTotal",
       imageTotal > 0
-        ? `${batchCount} 个批次 · ${imageTotal} 张`
-        : (state.favoritesOnly ? "暂无收藏" : `${jobs.length} 条记录`),
+        ? t("{batchCount} 个批次 · {imageTotal} 张", { batchCount: batchCount, imageTotal: imageTotal })
+        : (state.favoritesOnly ? t("暂无收藏") : t("{length} 条记录", { length: jobs.length, n: jobs.length })),
     );
     $("historyEmpty").classList.toggle("hidden", entries.length !== 0);
     paintHistoryMore();
@@ -2570,7 +2601,7 @@
   }
 
   function nodeDisplayName(nodeId) {
-    return state.nodeTitles?.get(String(nodeId)) || `节点 ${nodeId}`;
+    return state.nodeTitles?.get(String(nodeId)) || t("节点 {nodeId}", { nodeId: nodeId });
   }
 
   function setProgressRing(value) {
@@ -2595,12 +2626,12 @@
       setText("activeJobName", "Comfy Remote");
       setProgressRing(null);
       setText("progressValue", "—");
-      setText("progressLabel", "空闲");
+      setText("progressLabel", t("空闲"));
       $("livePreview").classList.add("hidden");
       return;
     }
 
-    setText("activeJobName", active.workflow_name || "电脑端任务");
+    setText("activeJobName", active.workflow_name || t("电脑端任务"));
     const display = progressDisplay(active);
     setProgressRing(display.percent);
     setText("progressValue", display.text);
@@ -2667,7 +2698,7 @@
     button.id = "historyMoreButton";
     button.type = "button";
     button.className = "secondary-button full hidden";
-    button.textContent = "加载更早的";
+    button.textContent = t("加载更早的");
     button.addEventListener("click", () => {
       loadMoreJobs().catch(() => {});
     });
@@ -2696,7 +2727,7 @@
     const disabled = busy || !hasMore;
     if (button.disabled !== disabled) button.disabled = disabled;
     button.setAttribute("aria-busy", String(busy));
-    const label = busy ? "加载中…" : hasMore ? "加载更早的" : "已经到底了";
+    const label = busy ? t("加载中…") : hasMore ? t("加载更早的") : t("已经到底了");
     if (button.textContent !== label) button.textContent = label;
   }
 
@@ -2762,7 +2793,7 @@
     try {
       await jobsMoreRefresh.run(true);
     } catch (error) {
-      toast(error.message || "更早的记录读取失败", "error");
+      toast(error.message || t("更早的记录读取失败"), "error");
     } finally {
       state.jobsMoreLoading = false;
       paintHistoryMore();
@@ -2805,7 +2836,7 @@
   function detailValue(value) {
     if (value === undefined || value === null || value === "") return "";
     if (typeof value === "number") return Number.isFinite(value) ? String(value) : "";
-    if (typeof value === "boolean") return value ? "开启" : "关闭";
+    if (typeof value === "boolean") return value ? t("开启") : t("关闭");
     return String(value);
   }
 
@@ -2816,27 +2847,27 @@
     const height = promptValue(prompt, ["height"]);
     const size = width !== undefined && height !== undefined ? `${width} × ${height}` : "";
     const rows = [
-      ["工作流", job.workflow_name || "电脑端任务"],
-      ["模型", detailValue(promptValue(prompt, ["unet_name", "ckpt_name", "model_name"]))],
+      [t("工作流"), job.workflow_name || t("电脑端任务")],
+      [t("模型"), detailValue(promptValue(prompt, ["unet_name", "ckpt_name", "model_name"]))],
       ["VAE", detailValue(promptValue(prompt, ["vae_name"]))],
-      ["采样器", detailValue(promptValue(prompt, ["sampler_name"]))],
-      ["调度器", detailValue(promptValue(prompt, ["scheduler"]))],
-      ["尺寸", size],
-      ["采样步数", detailValue(promptValue(prompt, ["steps"]))],
+      [t("采样器"), detailValue(promptValue(prompt, ["sampler_name"]))],
+      [t("调度器"), detailValue(promptValue(prompt, ["scheduler"]))],
+      [t("尺寸"), size],
+      [t("采样步数"), detailValue(promptValue(prompt, ["steps"]))],
       ["CFG", detailValue(promptValue(prompt, ["cfg"]))],
-      ["重绘幅度", detailValue(promptValue(prompt, ["denoise"]))],
-      ["批量数量", detailValue(promptValue(prompt, ["batch_size"]))],
-      ["输出图片", gallery.length ? `${gallery.length} 张` : detailValue(job.outputs_count)],
-      ["提交时间", formatTime(job.create_time)],
-      ["任务编号", job.id],
+      [t("重绘幅度"), detailValue(promptValue(prompt, ["denoise"]))],
+      [t("批量数量"), detailValue(promptValue(prompt, ["batch_size"]))],
+      [t("输出图片"), gallery.length ? t("{length} 张", { length: gallery.length, n: gallery.length }) : detailValue(job.outputs_count)],
+      [t("提交时间"), formatTime(job.create_time)],
+      [t("任务编号"), job.id],
     ].filter(([, value]) => value !== "");
-    if (job.execution_error?.exception_message) rows.push(["错误", job.execution_error.exception_message]);
+    if (job.execution_error?.exception_message) rows.push([t("错误"), job.execution_error.exception_message]);
     return rows;
   }
 
   function paintJobDialog(job) {
     state.dialogJob = job;
-    setText("dialogTitle", job.workflow_name || "任务详情");
+    setText("dialogTitle", job.workflow_name || t("任务详情"));
     setText("dialogStatus", jobStatusLabel(job.status));
     $("dialogStatus").className = `status-chip ${job.status || ""}`;
     const elements = jobDetailRows(job).map(([term, description]) => {
@@ -2864,7 +2895,7 @@
     const preview = state.jobs.find((job) => String(job.id) === String(jobId)) || {
       id: jobId,
       status: "completed",
-      workflow_name: "任务详情",
+      workflow_name: t("任务详情"),
     };
     const dialog = $("jobDialog");
     paintJobDialog(preview);
@@ -2897,7 +2928,7 @@
       });
       state.currentJobId = body.prompt_id;
       $("jobDialog").close();
-      toast("已重新加入队列", "success");
+      toast(t("已重新加入队列"), "success");
       showView("queue");
       await Promise.all([loadStatus(), loadJobs()]);
     } catch (error) {
@@ -2913,7 +2944,7 @@
     if (!bubble) return;
     window.clearTimeout(modeTipTimer);
     bubble.classList.toggle("is-random", isRandom);
-    bubble.innerHTML = `<span class="mode-tip-title">${isRandom ? "随机生成模式" : "普通生成模式"}</span>`;
+    bubble.innerHTML = `<span class="mode-tip-title">${isRandom ? t("随机生成模式") : t("普通生成模式")}</span>`;
     bubble.hidden = false;
     window.requestAnimationFrame(() => {
       bubble.classList.add("is-visible");
@@ -2937,12 +2968,12 @@
     button.classList.toggle("multi-model", state.multiModel);
     button.classList.toggle("has-repeat", repeats > 1);
     const label = state.multiModel
-      ? (random ? "按模型顺序随机生成" : "按模型顺序加入队列")
-      : (random ? (repeats > 1 ? `连发 ${repeats} 次随机生成` : "随机生成") : (repeats > 1 ? `连发 ${repeats} 次` : "加入队列"));
+      ? (random ? t("按模型顺序随机生成") : t("按模型顺序加入队列"))
+      : (random ? (repeats > 1 ? t("连发 {repeats} 次随机生成", { repeats: repeats }) : t("随机生成")) : (repeats > 1 ? t("连发 {repeats} 次", { repeats: repeats }) : t("加入队列")));
     button.setAttribute("aria-label", label);
     button.title = state.multiModel
-      ? `${label}（上滑切换随机；多模型下不能改次数）`
-      : (random ? "随机生成（上滑切回普通生成）" : "加入队列（上滑切换随机生成）");
+      ? t("{label}（上滑切换随机；多模型下不能改次数）", { label: label })
+      : (random ? t("随机生成（上滑切回普通生成）") : t("加入队列（上滑切换随机生成）"));
     const svg = button.querySelector("svg");
     if (svg) {
       svg.innerHTML = random
@@ -3090,7 +3121,7 @@
           if (state.multiModel) {
             axis = "blocked";
             skipClick = true;
-            toast("多模型开启时不能改次数");
+            toast(t("多模型开启时不能改次数"));
             return;
           }
           beginHorizontal(clientX);
@@ -3273,13 +3304,13 @@
     event.preventDefault();
     if (!state.workflow?.id || submittingBatch || applyingRemoteSettings) return;
     if (!state.randomGenerate && presetSubmissionHasConflicts()) {
-      toast("存在互斥标签，请先修改冲突项", "error");
+      toast(t("存在互斥标签，请先修改冲突项"), "error");
       renderPresetPanel();
       return;
     }
     const models = selectedModelQueue();
     if (!models.length) {
-      toast("请选择模型", "error");
+      toast(t("请选择模型"), "error");
       return;
     }
     const times = state.multiModel ? models.length : Math.max(1, Math.min(10, Number(state.repeatCount) || 1));
@@ -3303,7 +3334,7 @@
     button.setAttribute("aria-busy", "true");
     $("workflowSelect").disabled = true;
     const hidden = button.querySelector(".visually-hidden");
-    if (hidden) hidden.textContent = "正在提交";
+    if (hidden) hidden.textContent = t("正在提交");
     let submitted = 0;
     const originalValues = clonePresetData(state.values, {});
     const originalPreset = clonePresetData(state.presetState, { slots: {}, custom: {}, freeText: "", extraText: "", catalog: emptyCatalog() });
@@ -3314,7 +3345,7 @@
       try {
         for (let index = 0; index < times; index += 1) {
           if (state.randomGenerate) randomizePresetSlots("", { persist: false });
-          if (presetSubmissionHasConflicts()) throw new Error("存在互斥标签，请先修改冲突项");
+          if (presetSubmissionHasConflicts()) throw new Error(t("存在互斥标签，请先修改冲突项"));
           if (state.presetEnabled) applyPresetPrompt();
           const values = { ...state.values };
           if (state.multiModel && state.modelField) values[state.modelField.id] = models[index];
@@ -3350,7 +3381,7 @@
           priority: body.number ?? 0,
           create_time: Date.now(),
           workflow_id: workflowId,
-          workflow_name: String(body.workflow_name || "手机工作流"),
+          workflow_name: String(body.workflow_name || t("手机工作流")),
           outputs_count: 0,
           previewable_outputs_count: 0,
           gallery: [],
@@ -3360,7 +3391,7 @@
         renderQueue();
         updateActiveJob();
       }
-      toast(submitted > 1 ? `已加入 ${submitted} 个任务` : "任务已加入队列", "success");
+      toast(submitted > 1 ? t("已加入 {submitted} 个任务", { submitted, n: submitted }) : t("任务已加入队列"), "success");
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
       if (submitted === 0) {
@@ -3370,7 +3401,7 @@
         markPresetConflicts();
         if (state.presetEnabled) applyPresetPrompt();
       }
-      toast(submitted ? `已加入 ${submitted} 个，后续失败` : (error.message || "提交失败"), "error");
+      toast(submitted ? t("已加入 {submitted} 个，后续失败", { submitted: submitted }) : (error.message || t("提交失败")), "error");
     } finally {
       phoneSettings.endBatch();
       submittingBatch = false;
@@ -3384,7 +3415,7 @@
       window.setTimeout(() => button.classList.remove("is-icon-in"), 460);
       button.setAttribute("aria-busy", "false");
       $("workflowSelect").disabled = false;
-      if (hidden) hidden.textContent = "加入队列";
+      if (hidden) hidden.textContent = t("加入队列");
       // 队列/历史/状态的刷新放到解锁之后再跑：/mobile/api/jobs 在条数多时要好几秒，
       // 让「提交中」的锁一直挂在那儿不值当。任务已经入队，刷新只是补界面，
       // 而且乐观条目在提交循环里已经先渲染出来了，失败也不影响任务本身。
@@ -3404,7 +3435,7 @@
     }
     if (type === "execution_start" && promptId) {
       state.progress.begin(promptId);
-      state.progress.set(promptId, { percent: 0, value: 0, max: 0, label: "开始执行" });
+      state.progress.set(promptId, { percent: 0, value: 0, max: 0, label: t("开始执行") });
       loadJobs().catch(() => {});
     } else if (type === "executing" && promptId && data.node) {
       if (state.progress.executing(data)) {
@@ -3423,7 +3454,7 @@
         state.progress.set(promptId, {
           value,
           max,
-          label: data.node ? nodeDisplayName(data.node) : "正在采样",
+          label: data.node ? nodeDisplayName(data.node) : t("正在采样"),
           nodeId: data.node ? String(data.node) : "",
         });
         updateActiveJob();
@@ -3437,9 +3468,9 @@
         if (card) paintQueueProgress(card, promptId);
       }
     } else if (["execution_success", "execution_error", "execution_interrupted"].includes(type)) {
-      if (type === "execution_success") toast("生成完成", "success");
-      if (type === "execution_error") toast(data.exception_message || "生成失败", "error");
-      if (type === "execution_interrupted") toast("任务已停止");
+      if (type === "execution_success") toast(t("生成完成"), "success");
+      if (type === "execution_error") toast(data.exception_message || t("生成失败"), "error");
+      if (type === "execution_interrupted") toast(t("任务已停止"));
       state.progress.delete(promptId);
       window.setTimeout(() => Promise.all([loadStatus(), loadJobs(true), loadProgress(true)]).catch(() => {}), 250);
       window.setTimeout(() => loadJobs(true).catch(() => {}), 900);
@@ -3521,13 +3552,70 @@
     button.classList.remove("is-refreshing");
     const failed = results.find((result) => result.status === "rejected");
     if (failed) {
-      toast(failed.reason?.message || "刷新失败", "error");
+      toast(failed.reason?.message || t("刷新失败"), "error");
     } else if (showMessage) {
-      toast("已刷新", "success");
+      toast(t("已刷新"), "success");
     }
   }
 
+  // 语言菜单：手机端放在设置页右上角，选中后整页文案原地刷新，不重新加载页面。
+  function setupLanguageMenu() {
+    const button = $("languageButton");
+    const menu = $("languageMenu");
+    const api = i18n();
+    if (!button || !menu || !api) return;
+    const close = () => {
+      menu.hidden = true;
+      button.setAttribute("aria-expanded", "false");
+    };
+    const paint = () => {
+      menu.replaceChildren();
+      for (const item of api.locales) {
+        const option = document.createElement("button");
+        option.type = "button";
+        option.className = "language-option";
+        option.setAttribute("role", "menuitemradio");
+        option.setAttribute("aria-checked", String(item.id === api.locale));
+        option.textContent = item.label;
+        option.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          close();
+          if (item.id === api.locale) return;
+          await api.set(item.id);
+          paint();
+        });
+        menu.append(option);
+      }
+    };
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (menu.hidden) {
+        paint();
+        menu.hidden = false;
+        button.setAttribute("aria-expanded", "true");
+      } else close();
+    });
+    menu.addEventListener("click", (event) => event.stopPropagation());
+    document.addEventListener("click", close);
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); });
+    paint();
+  }
+
+  // 语言变了只需重画「由脚本生成」的部分，静态标记由运行时统一处理。
+  function applyLocaleChange() {
+    if (lastSettingsStatus) renderSettingsSync(lastSettingsStatus);
+    paintModelTools();
+    paintGenerateButton();
+    paintHistoryMore();
+    renderQueue();
+    renderHistory();
+    renderPresetPanel();
+    if (state.workflow) renderWorkflow(state.workflow);
+  }
+
   function bindEvents() {
+    setupLanguageMenu();
+    i18n()?.onChange?.(() => applyLocaleChange());
     const content = document.querySelector(".main-content");
     const topbar = document.querySelector(".topbar");
     content?.addEventListener("scroll", () => {
@@ -3619,7 +3707,7 @@
         await galleryJobRecord();
         restorePromptFromJob();
       } catch (error) {
-        toast(error.message || "无法复制提示词", "error");
+        toast(error.message || t("无法复制提示词"), "error");
       }
     });
     $("copyGallerySeed").addEventListener("click", async () => {
@@ -3628,7 +3716,7 @@
         await galleryJobRecord();
         restoreSeedFromJob();
       } catch (error) {
-        toast(error.message || "无法复制种子", "error");
+        toast(error.message || t("无法复制种子"), "error");
       }
     });
     $("galleryDialog").addEventListener("click", () => setGalleryCopyMenu(false));
@@ -3946,7 +4034,7 @@
     window.addEventListener("online", () => refreshAll(false));
     window.addEventListener("offline", () => {
       state.online = false;
-      setText("connectionLabel", "网络断开");
+      setText("connectionLabel", t("网络断开"));
     });
 
     const grid = $("historyGrid");
@@ -3969,8 +4057,8 @@
     const applyFavoritesOnly = () => {
       favoritesButton.classList.toggle("active", state.favoritesOnly);
       favoritesButton.setAttribute("aria-pressed", state.favoritesOnly ? "true" : "false");
-      favoritesButton.setAttribute("aria-label", state.favoritesOnly ? "显示全部照片" : "只看收藏");
-      favoritesButton.title = state.favoritesOnly ? "显示全部照片" : "只看收藏";
+      favoritesButton.setAttribute("aria-label", state.favoritesOnly ? t("显示全部照片") : t("只看收藏"));
+      favoritesButton.title = state.favoritesOnly ? t("显示全部照片") : t("只看收藏");
       renderHistory();
     };
     favoritesButton.addEventListener("click", () => {
@@ -3987,8 +4075,8 @@
     const applyHistoryCols = (cols) => {
       grid.classList.remove("cols-3", "cols-4");
       if (cols !== 2) grid.classList.add(`cols-${cols}`);
-      layoutButton.title = `切换列数（当前 ${cols} 列）`;
-      layoutButton.setAttribute("aria-label", `切换列数，当前 ${cols} 列`);
+      layoutButton.title = t("切换列数（当前 {cols} 列）", { cols: cols });
+      layoutButton.setAttribute("aria-label", t("切换列数，当前 {cols} 列", { cols: cols }));
     };
     let initialHistoryCols = Number(phoneSettings.getItem("comfy-mobile-remote.historyCols")) || 2;
     state.historyCols = [2, 3, 4].includes(initialHistoryCols) ? initialHistoryCols : 2;
@@ -4016,16 +4104,16 @@
     const favoriteButton = $("historyFavoritesButton");
     favoriteButton.classList.toggle("active", state.favoritesOnly);
     favoriteButton.setAttribute("aria-pressed", String(state.favoritesOnly));
-    favoriteButton.setAttribute("aria-label", state.favoritesOnly ? "显示全部照片" : "只看收藏");
-    favoriteButton.title = state.favoritesOnly ? "显示全部照片" : "只看收藏";
+    favoriteButton.setAttribute("aria-label", state.favoritesOnly ? t("显示全部照片") : t("只看收藏"));
+    favoriteButton.title = state.favoritesOnly ? t("显示全部照片") : t("只看收藏");
     const cols = Number(phoneSettings.getItem("comfy-mobile-remote.historyCols") || 2);
     state.historyCols = [2, 3, 4].includes(cols) ? cols : 2;
     const grid = $("historyGrid");
     grid.classList.toggle("cols-3", state.historyCols === 3);
     grid.classList.toggle("cols-4", state.historyCols === 4);
     const layoutButton = $("historyLayoutButton");
-    layoutButton.title = `切换列数（当前 ${state.historyCols} 列）`;
-    layoutButton.setAttribute("aria-label", `切换列数，当前 ${state.historyCols} 列`);
+    layoutButton.title = t("切换列数（当前 {historyCols} 列）", { historyCols: state.historyCols });
+    layoutButton.setAttribute("aria-label", t("切换列数，当前 {historyCols} 列", { historyCols: state.historyCols }));
     renderHistory();
     if (previousFavoritesOnly !== state.favoritesOnly) loadJobs(true).catch(() => {});
   }
@@ -4064,7 +4152,7 @@
       await phoneSettings.resolveConflict(choice);
       await applySharedSettings();
     } catch (error) {
-      toast(error.message || "设置读取失败，请稍后重试", "error");
+      toast(error.message || t("设置读取失败，请稍后重试"), "error");
     } finally {
       buttons.forEach((button) => { button.disabled = false; });
     }
@@ -4072,12 +4160,14 @@
 
   async function start() {
     try {
+      // 词典没到位就先渲染的话，用户会先看到一闪而过的中文原文。
+      await globalThis.MobileI18nReady?.catch?.(() => {});
       await phoneSettings.init();
       try {
         await loadPresetCatalog();
       } catch (error) {
         state.presetEnabled = false;
-        toast(error.message || "标签目录读取失败", "error");
+        toast(error.message || t("标签目录读取失败"), "error");
       }
       bindEvents();
       applyPhonePreferences();
@@ -4094,7 +4184,7 @@
       window.setInterval(() => loadJobs().catch(() => {}), 8000);
       window.setInterval(() => loadProgress().catch(() => {}), 1000);
     } catch (error) {
-      toast(error.message || "页面启动失败", "error");
+      toast(error.message || t("页面启动失败"), "error");
     } finally {
       const button = $("generateButton");
       if (button && !submittingBatch) button.disabled = false;

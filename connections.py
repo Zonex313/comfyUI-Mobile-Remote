@@ -29,6 +29,19 @@ from aiohttp import ClientError, ClientSession, ClientTimeout, WSMsgType, web
 from yarl import URL
 
 LOG = logging.getLogger("comfyui.mobile_remote.connections")
+
+
+def _t(text: str, **params: Any) -> str:
+    """复用服务端的界面词典；本模块被单独加载（测试）时退回中文原文。"""
+    try:
+        from .server import _t as translate
+    except ImportError:
+        return text
+    try:
+        return translate(text, **params)
+    except Exception:  # pragma: no cover - 翻译失败绝不能影响连接功能
+        LOG.exception("[Mobile Remote] translation failed")
+        return text
 ROOT = Path(__file__).resolve().parent
 TAILSCALE_SUPPRESSED = "Tailscale生效中，自动关闭 Cloudflare"
 NO_CACHE = {"Cache-Control": "no-store"}
@@ -36,12 +49,14 @@ MAX_UPLOAD = 100 * 1024 * 1024
 PUBLIC_URL = re.compile(r"https://[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\.com\b")
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                "te", "trailer", "transfer-encoding", "upgrade"}
+# accept-language 要带上：隧道里服务端只能靠它判断提示语用哪种语言。
+# Cookie 依旧不转发（公网入口不接受任何凭据，见敏感请求头测试）。
 REQUEST_HEADERS = {"content-type", "content-length", "accept", "accept-encoding", "range",
-                   "if-range", "if-none-match", "if-modified-since"}
+                   "if-range", "if-none-match", "if-modified-since", "accept-language"}
 GET_PATHS = (
     r"/mobile/?", r"/mobile/manifest\.webmanifest",
-    r"/mobile/assets/(?:app\.js|settings-sync\.js|preset-catalog\.js|preset-engine\.js|progress-sync\.js|styles\.css|icon\.svg|prompt-presets\.json)",
-    r"/mobile/api/(?:status|settings|progress|workflows|jobs|favorites/file|preview)",
+    r"/mobile/assets/(?:app\.js|i18n\.js|settings-sync\.js|preset-catalog\.js|preset-engine\.js|progress-sync\.js|styles\.css|icon\.svg|prompt-presets\.json)",
+    r"/mobile/api/(?:status|settings|progress|workflows|jobs|favorites/file|preview|i18n/[a-z]{2})",
     r"/mobile/api/workflows/[a-f0-9]{20}",
     r"/mobile/api/jobs/[A-Za-z0-9_-]{1,128}", r"/view", r"/ws",
 )
@@ -396,7 +411,7 @@ class MobileGateway:
             if response is not None and response.prepared:
                 response.force_close()
                 return response
-            raise web.HTTPBadGateway(text="电脑端连接暂时中断，请稍后重试。") from exc
+            raise web.HTTPBadGateway(text=_t("电脑端连接暂时中断，请稍后重试。")) from exc
 
     async def _public_status(self, request: web.Request, upstream) -> web.Response:
         raw = await upstream.read()
@@ -723,7 +738,7 @@ def register_connections(prompt_server) -> TunnelManager:
     async def connections_action(request: web.Request):
         # Desktop calls send JSON; browsers cannot mutate this endpoint with a cross-origin form.
         if request.content_type != "application/json" or request.headers.get("Sec-Fetch-Site") == "cross-site":
-            return web.json_response({"ok": False, "error": "请从电脑端连接面板操作。"}, status=403, headers=NO_CACHE)
+            return web.json_response({"ok": False, "error": _t("请从电脑端连接面板操作。")}, status=403, headers=NO_CACHE)
         origin = request.headers.get("Origin")
         try:
             if not _same_host(origin, request.host):
@@ -738,12 +753,12 @@ def register_connections(prompt_server) -> TunnelManager:
             if autostart is not None and not isinstance(autostart, bool):
                 raise ValueError("autostart")
         except (ValueError, web.HTTPException):
-            return web.json_response({"ok": False, "error": "连接设置格式有误。"}, status=400, headers=NO_CACHE)
+            return web.json_response({"ok": False, "error": _t("连接设置格式有误。")}, status=400, headers=NO_CACHE)
         try:
             await manager.action(action, autostart)
         except OSError:
             LOG.exception("[Mobile Remote] failed to save connection settings")
-            return web.json_response({"ok": False, "error": "连接设置保存失败，请检查插件目录权限。"}, status=500, headers=NO_CACHE)
+            return web.json_response({"ok": False, "error": _t("连接设置保存失败，请检查插件目录权限。")}, status=500, headers=NO_CACHE)
         return web.json_response(await manager.snapshot(), headers=NO_CACHE)
 
     prompt_server.app.on_startup.append(manager.startup)

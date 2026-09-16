@@ -1,4 +1,5 @@
-import "./workflow-library.js?v=202609268";
+import { t } from "./i18n.js?v=202609301";
+import "./workflow-library.js?v=202609301";
 import { app } from "../../scripts/app.js";
 
 /*
@@ -42,15 +43,15 @@ function sizeLabel(bytes) {
 export function createWorkflowImporter({ element, button, setText }) {
   const root = element("section", "mobile-remote-tags mobile-remote-import");
   root.hidden = true;
-  root.setAttribute("aria-label", "导入工作流");
+  root.setAttribute("aria-label", t("导入工作流"));
 
   const toolbar = element("div", "mobile-remote-tags-toolbar");
   const search = element("input", "mobile-remote-tags-search");
   search.type = "search";
-  search.placeholder = "搜索工作流名或目录";
-  search.setAttribute("aria-label", "搜索工作流名或目录");
-  const expandToggle = button("展开全部", "chevron-down", "展开全部");
-  const reload = button("重新读取工作流列表", "refresh");
+  search.placeholder = t("搜索工作流名或目录");
+  search.setAttribute("aria-label", t("搜索工作流名或目录"));
+  const expandToggle = button(t("展开全部"), "chevron-down", t("展开全部"));
+  const reload = button(t("重新读取工作流列表"), "refresh");
   toolbar.append(search, expandToggle.node, reload.node);
 
   const status = element("p", "mobile-remote-tags-status");
@@ -60,8 +61,8 @@ export function createWorkflowImporter({ element, button, setText }) {
   const owned = element("section", "mobile-remote-card mobile-remote-import-owned");
   const ownedHeader = element("div", "mobile-remote-card-header");
   const ownedTitleGroup = element("div", "mobile-remote-card-title-group");
-  ownedTitleGroup.append(element("h3", "mobile-remote-card-title", "已导入的工作流"));
-  const ownedState = element("span", "mobile-remote-status", "读取中");
+  ownedTitleGroup.append(element("h3", "mobile-remote-card-title", t("已导入的工作流")));
+  const ownedState = element("span", "mobile-remote-status", t("读取中"));
   ownedHeader.append(ownedTitleGroup, ownedState);
   const ownedList = element("div", "mobile-remote-import-owned-list");
   owned.append(ownedHeader, ownedList);
@@ -71,7 +72,7 @@ export function createWorkflowImporter({ element, button, setText }) {
   const intro = element(
     "p",
     "mobile-remote-note",
-    "没导入的工作流，电脑端开着手机端才看得到；导入并常驻后，电脑端全关手机端也一直能用。",
+    t("没导入的工作流，电脑端开着手机端才看得到；导入并常驻后，电脑端全关手机端也一直能用。"),
   );
   root.append(intro, toolbar, status, owned, list);
 
@@ -110,7 +111,7 @@ export function createWorkflowImporter({ element, button, setText }) {
 
   function applyStatus() {
     if (busyName) {
-      setText(status, `正在导入「${busyName}」…`);
+      setText(status, t("正在导入「{busyName}」…", { busyName: busyName }));
       status.dataset.tone = "pending";
       return;
     }
@@ -119,7 +120,7 @@ export function createWorkflowImporter({ element, button, setText }) {
       status.dataset.tone = notice.tone;
       return;
     }
-    setText(status, `磁盘上共 ${summary.total} 个已保存工作流`);
+    setText(status, t("磁盘上共 {total} 个已保存工作流", { total: summary.total }));
     status.dataset.tone = "success";
   }
 
@@ -129,9 +130,9 @@ export function createWorkflowImporter({ element, button, setText }) {
 
   function updateExpandLabel() {
     const expanded = allExpanded();
-    const label = expanded ? "收起全部" : "展开全部";
+    const label = expanded ? t("收起全部") : t("展开全部");
     setText(expandToggle.caption, label);
-    expandToggle.node.title = expanded ? "收起全部文件夹" : "展开全部文件夹";
+    expandToggle.node.title = expanded ? t("收起全部文件夹") : t("展开全部文件夹");
     expandToggle.node.setAttribute("aria-label", expandToggle.node.title);
   }
 
@@ -168,8 +169,8 @@ export function createWorkflowImporter({ element, button, setText }) {
     const entry = entryByRecordId.get(id) || null;
     return {
       key: `rec:${id}`,
-      name: String(record?.name || "未命名工作流"),
-      address: entry ? entry.path : String(record?.library_path || record?.source || "（磁盘上已找不到这个文件）"),
+      name: String(record?.name || t("未命名工作流")),
+      address: entry ? entry.path : String(record?.library_path || record?.source || t("（磁盘上已找不到这个文件）")),
       size: entry ? entry.size : 0,
       pinned: Boolean(record?.pinned),
       imported: true,
@@ -192,8 +193,8 @@ export function createWorkflowImporter({ element, button, setText }) {
     const main = element("div", "mobile-remote-import-main");
     main.append(element("span", "mobile-remote-import-name", model.name));
     if (model.showChip !== false) {
-      if (model.pinned) main.append(element("span", "mobile-remote-import-state", "常驻"));
-      else if (model.imported) main.append(element("span", "mobile-remote-import-state", "已导入"));
+      if (model.pinned) main.append(element("span", "mobile-remote-import-state", t("常驻")));
+      else if (model.imported) main.append(element("span", "mobile-remote-import-state", t("已导入")));
     }
     row.append(main);
 
@@ -205,7 +206,7 @@ export function createWorkflowImporter({ element, button, setText }) {
     const busy = busyKey === model.key;
     if (model.entry) {
       const importButton = chip(
-        busy ? "处理中" : model.imported ? "刷新" : "导入",
+        busy ? t("处理中") : model.imported ? t("刷新") : t("导入"),
         "download",
         `import:${model.key}`,
         () => void importEntry(model),
@@ -215,12 +216,12 @@ export function createWorkflowImporter({ element, button, setText }) {
     }
     if (model.recordId) {
       actions.append(chip(
-        model.pinned ? "取消常驻" : "设为常驻",
+        model.pinned ? t("取消常驻") : t("设为常驻"),
         model.pinned ? "times" : "check",
         `pin:${model.key}`,
         () => void setPinned(model.recordId, !model.pinned),
       ));
-      actions.append(chip("删除", "trash", `delete:${model.key}`, () => void deleteRecord(model.recordId, model.name)));
+      actions.append(chip(t("删除"), "trash", `delete:${model.key}`, () => void deleteRecord(model.recordId, model.name)));
     }
     row.append(actions);
     return row;
@@ -235,11 +236,11 @@ export function createWorkflowImporter({ element, button, setText }) {
         return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
       });
     const pinnedCount = models.filter((model) => model.pinned).length;
-    setText(ownedState, models.length ? `已导入 ${models.length} 个 · 常驻 ${pinnedCount} 个` : "还没有");
+    setText(ownedState, models.length ? t("已导入 {length} 个 · 常驻 {pinnedCount} 个", { length: models.length, pinnedCount: pinnedCount }) : t("还没有"));
     ownedList.replaceChildren();
 
     if (!models.length) {
-      ownedList.append(element("p", "mobile-remote-note", "还没有导入任何工作流。在下面的目录树里点「导入」，它就会常驻在手机端。"));
+      ownedList.append(element("p", "mobile-remote-note", t("还没有导入任何工作流。在下面的目录树里点「导入」，它就会常驻在手机端。")));
       return;
     }
     const group = (label, items) => {
@@ -250,8 +251,8 @@ export function createWorkflowImporter({ element, button, setText }) {
         if (row) ownedList.append(row);
       }
     };
-    group("常驻 · 电脑端不开也能用", models.filter((model) => model.pinned));
-    group("仅电脑端打开时可见", models.filter((model) => !model.pinned));
+    group(t("常驻 · 电脑端不开也能用"), models.filter((model) => model.pinned));
+    group(t("仅电脑端打开时可见"), models.filter((model) => !model.pinned));
   }
 
   /** 递归铺一层文件夹：<details> 套 <details>，跟磁盘上的目录结构一一对应。 */
@@ -305,9 +306,9 @@ export function createWorkflowImporter({ element, button, setText }) {
     list.replaceChildren();
 
     if (!entries.length) {
-      list.append(element("p", "mobile-remote-note", ready ? "磁盘上没读到已保存的工作流" : "正在读取工作流列表…"));
+      list.append(element("p", "mobile-remote-note", ready ? t("磁盘上没读到已保存的工作流") : t("正在读取工作流列表…")));
     } else if (!filtered.length) {
-      list.append(element("p", "mobile-remote-note", "没有匹配的工作流"));
+      list.append(element("p", "mobile-remote-note", t("没有匹配的工作流")));
     } else {
       for (const entry of tree.files) {
         const row = makeRow(entryModel(entry), rendered);
@@ -318,7 +319,7 @@ export function createWorkflowImporter({ element, button, setText }) {
         if (block) list.append(block);
       }
       if (rendered.trimmed) {
-        list.append(element("p", "mobile-remote-note", `还有 ${rendered.trimmed} 个没显示，用上面的搜索框缩小范围`));
+        list.append(element("p", "mobile-remote-note", t("还有 {trimmed} 个没显示，用上面的搜索框缩小范围", { trimmed: rendered.trimmed })));
       }
     }
 
@@ -351,23 +352,23 @@ export function createWorkflowImporter({ element, button, setText }) {
   /** 电脑端浏览器里把画布格式的工作流转成可执行格式，用一张独立的图，不动当前画布。 */
   async function convert(entry) {
     const response = await fetch(`/userdata/${encodeURIComponent(`workflows/${entry.path}`)}`, { cache: "no-store" });
-    if (!response.ok) throw new Error(`读取工作流文件失败（HTTP ${response.status}）`);
+    if (!response.ok) throw new Error(t("读取工作流文件失败（HTTP {status}）", { status: response.status }));
     const graphData = await response.json();
     const factory = globalThis.LiteGraph;
-    if (!factory || typeof factory.LGraph !== "function") throw new Error("读不到 ComfyUI 的画布接口，刷新页面再试");
-    if (typeof app?.graphToPrompt !== "function") throw new Error("读不到 ComfyUI 的转换接口，刷新页面再试");
+    if (!factory || typeof factory.LGraph !== "function") throw new Error(t("读不到 ComfyUI 的画布接口，刷新页面再试"));
+    if (typeof app?.graphToPrompt !== "function") throw new Error(t("读不到 ComfyUI 的转换接口，刷新页面再试"));
 
     const graph = new factory.LGraph();
     graph.configure(JSON.parse(JSON.stringify(graphData)));
     const expected = Array.isArray(graphData.nodes) ? graphData.nodes.length : 0;
     const built = Array.isArray(graph?._nodes) ? graph._nodes.length : 0;
     if (expected && built < expected) {
-      throw new Error(`这个工作流有 ${expected - built} 个节点本机没装，先在电脑端打开确认能跑再导入`);
+      throw new Error(t("这个工作流有 {value} 个节点本机没装，先在电脑端打开确认能跑再导入", { value: expected - built, n: expected - built }));
     }
     const converted = await app.graphToPrompt(graph);
     const prompt = converted?.output;
     if (!prompt || typeof prompt !== "object" || Object.keys(prompt).length === 0) {
-      throw new Error("这个工作流里没有可执行的节点");
+      throw new Error(t("这个工作流里没有可执行的节点"));
     }
     return { prompt, workflow: graphData };
   }
@@ -395,9 +396,9 @@ export function createWorkflowImporter({ element, button, setText }) {
       });
       const body = await readJson(response);
       const name = body?.workflow?.name || entry.name;
-      setNotice(`已导入「${name}」，手机端电脑不开也能用了`, "success");
+      setNotice(t("已导入「{name}」，手机端电脑不开也能用了", { name: name }), "success");
     } catch (error) {
-      setNotice(`导入失败：${error?.message || error}`, "error");
+      setNotice(t("导入失败：{value}", { value: error?.message || error }), "error");
     } finally {
       busyKey = "";
       busyName = "";
@@ -415,9 +416,9 @@ export function createWorkflowImporter({ element, button, setText }) {
         cache: "no-store",
         body: JSON.stringify({ pinned }),
       }));
-      setNotice(pinned ? "已设为常驻" : "已取消常驻（电脑端打开它时手机端还能看到）", "success");
+      setNotice(pinned ? t("已设为常驻") : t("已取消常驻（电脑端打开它时手机端还能看到）"), "success");
     } catch (error) {
-      setNotice(`操作失败：${error?.message || error}`, "error");
+      setNotice(t("操作失败：{value}", { value: error?.message || error }), "error");
     }
     await refreshRecords();
   }
@@ -427,9 +428,9 @@ export function createWorkflowImporter({ element, button, setText }) {
     setNotice(null);
     try {
       await readJson(await fetch(recordUrl(id), { method: "DELETE", cache: "no-store" }));
-      setNotice(`已从手机端删除「${name}」（磁盘上的工作流文件没动）`, "success");
+      setNotice(t("已从手机端删除「{name}」（磁盘上的工作流文件没动）", { name: name }), "success");
     } catch (error) {
-      setNotice(`删除失败：${error?.message || error}`, "error");
+      setNotice(t("删除失败：{value}", { value: error?.message || error }), "error");
     }
     await refreshRecords();
   }
@@ -439,7 +440,7 @@ export function createWorkflowImporter({ element, button, setText }) {
       const body = await readJson(await fetch(RECORDS_URL, { cache: "no-store" }));
       records = Array.isArray(body?.workflows) ? body.workflows : [];
     } catch (error) {
-      if (!notice) setNotice(`读取已导入列表失败：${error?.message || error}`, "error");
+      if (!notice) setNotice(t("读取已导入列表失败：{value}", { value: error?.message || error }), "error");
     }
     sync();
   }
@@ -463,7 +464,7 @@ export function createWorkflowImporter({ element, button, setText }) {
       await loading;
     } catch (error) {
       if (!disposed) {
-        setNotice(`读取工作流列表失败：${error?.message || error}`, "error");
+        setNotice(t("读取工作流列表失败：{value}", { value: error?.message || error }), "error");
         paint();
       }
     } finally {

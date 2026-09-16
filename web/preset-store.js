@@ -1,4 +1,5 @@
-import "/mobile/assets/preset-catalog.js?v=202609290";
+import { t } from "./i18n.js?v=202609301";
+import "/mobile/assets/preset-catalog.js?v=202609301";
 
 const Model = globalThis.MobilePresetCatalog;
 const LEGACY_KEY = "comfy-mobile-remote.catalog-editor.v2";
@@ -160,7 +161,7 @@ export class CatalogStore {
           writeSlot(this.storage, PREFIX + sessionId, null);
         }
       }
-    } catch { this.error = "本页暂存读取失败，请重新打开标签管理检查"; }
+    } catch { this.error = t("本页暂存读取失败，请重新打开标签管理检查"); }
 
     try {
       const migrated = this.takeLegacy();
@@ -170,7 +171,7 @@ export class CatalogStore {
       this.applyEntry(this.mergeEntries(orphans));
       for (const item of orphans) writeSlot(this.storage, PREFIX + item.id, null);
       this.error = "";
-    } catch { if (!this.error) this.error = "本页暂存读取失败，请重新打开标签管理检查"; }
+    } catch { if (!this.error) this.error = t("本页暂存读取失败，请重新打开标签管理检查"); }
   }
   journal() {
     try {
@@ -181,7 +182,7 @@ export class CatalogStore {
       writeSlot(this.storage, key, JSON.stringify({ schema: 1, base: this.base, value: this.value,
         revision: this.revision, retryUntil: this.retryUntil, aliveUntil, updatedAt: now }));
       this.scheduleLease();
-    } catch { this.error = "浏览器暂存不可用，请等保存完成再关闭页面"; }
+    } catch { this.error = t("浏览器暂存不可用，请等保存完成再关闭页面"); }
   }
   scheduleLease() {
     if (this.leaseTimer !== null) this.clearTimer(this.leaseTimer);
@@ -197,7 +198,7 @@ export class CatalogStore {
     return entry && entry.revision === this.revision && equal(entry.base, this.base) && equal(entry.value, this.value);
   }
   change(mutator) {
-    if (this.disposed || !this.known) throw new Error("请等待目录读取完成");
+    if (this.disposed || !this.known) throw new Error(t("请等待目录读取完成"));
     const next = copy(this.value);
     mutator(next);
     this.value = Model.normalize(next);
@@ -232,12 +233,12 @@ export class CatalogStore {
       let body = {};
       try { body = await response.json(); } catch { body = {}; }
       if (![200, 409, 429].includes(response.status)) {
-        const error = new Error(body.error || "目录保存服务暂未就绪");
+        const error = new Error(body.error || t("目录保存服务暂未就绪"));
         error.status = response.status;
         throw error;
       }
       if (!Number.isSafeInteger(body.revision) || body.revision < 0 || !body.values || typeof body.values !== "object") {
-        throw new Error("服务器返回的目录格式不完整");
+        throw new Error(t("服务器返回的目录格式不完整"));
       }
       return { status: response.status, body };
     } finally {
@@ -261,7 +262,7 @@ export class CatalogStore {
     if (this.saving) await this.saving;
     this.loading = (async () => {
       const { status, body } = await this.request();
-      if (status !== 200) throw new Error(body.error || "读取目录失败");
+      if (status !== 200) throw new Error(body.error || t("读取目录失败"));
       if (!this.disposed) { this.adopt(body); this.error = ""; }
     })();
     try { await this.loading; }
@@ -294,7 +295,7 @@ export class CatalogStore {
     try { await this.saving; }
     catch (error) {
       if (!this.disposed) {
-        this.error = error.message || "保存未成功，稍后重试";
+        this.error = error.message || t("保存未成功，稍后重试");
         if (Number.isInteger(error.status) && error.status >= 400 && error.status < 500 && error.status !== 409) {
           this.blocked = true;
         } else {

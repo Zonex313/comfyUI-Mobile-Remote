@@ -1,3 +1,7 @@
+import { ready as i18nReady, t } from "./i18n.js?v=202609301";
+
+// 词典到位后再注册界面，否则侧边栏标题会先渲染成中文原文。
+await i18nReady;
 import { app } from "../../scripts/app.js";
 
 // 电脑端「CLIP文本编码丨随机标签」节点面板。
@@ -5,7 +9,7 @@ import { app } from "../../scripts/app.js";
 // 但节点自己的锁定/忽略状态保存在节点上（写进工作流），与手机端设置互相独立。
 
 const NODE_TYPE = "MobileTagCLIPTextEncode";
-const VERSION = "202609290";
+const VERSION = "202609301";
 const PANEL_HEIGHT = 202;
 
 let libraryPromise = null;
@@ -30,9 +34,9 @@ async function loadLibrary() {
     ]);
     const Catalog = globalThis.MobilePresetCatalog;
     const Engine = globalThis.MobilePresetEngine;
-    if (!Catalog || !Engine) throw new Error("标签引擎加载失败");
+    if (!Catalog || !Engine) throw new Error(t("标签引擎加载失败"));
     const response = await fetch("/mobile/assets/prompt-presets.json?v=" + VERSION, { cache: "no-store" });
-    if (!response.ok) throw new Error("标签词库读取失败");
+    if (!response.ok) throw new Error(t("标签词库读取失败"));
     const body = await response.json();
     const categories = Array.isArray(body?.categories) ? body.categories : [];
     const builtin = body?.rules && typeof body.rules === "object" ? body.rules : {};
@@ -69,18 +73,18 @@ class TagPanel {
     bar.className = "mtr-bar";
     const hint = document.createElement("span");
     hint.className = "mtr-hint";
-    hint.textContent = "点分类名随机，点标签修改";
+    hint.textContent = t("点分类名随机，点标签修改");
     this.copyButton = document.createElement("button");
     this.copyButton.type = "button";
     this.copyButton.className = "mtr-copy";
-    this.copyButton.textContent = "复制";
-    this.copyButton.title = "复制当前完整提示词（随机标签 + 文本框里你自己输入的文字）";
+    this.copyButton.textContent = t("复制");
+    this.copyButton.title = t("复制当前完整提示词（随机标签 + 文本框里你自己输入的文字）");
     this.copyButton.addEventListener("click", () => this.copyPrompt());
     this.randomButton = document.createElement("button");
     this.randomButton.type = "button";
     this.randomButton.className = "mtr-random";
-    this.randomButton.textContent = "随机";
-    this.randomButton.title = "重新随机所有标签";
+    this.randomButton.textContent = t("随机");
+    this.randomButton.title = t("重新随机所有标签");
     this.randomButton.addEventListener("click", () => this.randomizeAll());
     bar.append(hint, this.copyButton, this.randomButton);
     this.root.append(bar, this.rows);
@@ -122,7 +126,7 @@ class TagPanel {
       this.library = await loadLibrary();
       this.error = "";
     } catch (error) {
-      this.error = error?.message || "标签引擎加载失败";
+      this.error = error?.message || t("标签引擎加载失败");
     }
     this.render();
   }
@@ -190,7 +194,7 @@ class TagPanel {
     const flash = (label) => {
       this.copyButton.textContent = label;
       clearTimeout(this.copyTimer);
-      this.copyTimer = setTimeout(() => { this.copyButton.textContent = "复制"; }, 1200);
+      this.copyTimer = setTimeout(() => { this.copyButton.textContent = t("复制"); }, 1200);
     };
     try {
       if (navigator.clipboard && window.isSecureContext) {
@@ -208,10 +212,10 @@ class TagPanel {
         document.execCommand("copy");
         area.remove();
       }
-      flash("已复制");
+      flash(t("已复制"));
     } catch (error) {
       console.error("[Mobile Remote] 复制提示词失败", error);
-      flash("复制失败");
+      flash(t("复制失败"));
     }
   }
 
@@ -243,7 +247,7 @@ class TagPanel {
     if (!engine) {
       const tip = document.createElement("div");
       tip.className = "mtr-error";
-      tip.textContent = "载入中…";
+      tip.textContent = t("载入中…");
       this.rows.append(tip);
       this.resize();
       return;
@@ -256,7 +260,7 @@ class TagPanel {
       label.type = "button";
       label.className = "mtr-row-label";
       label.textContent = category.label;
-      label.title = "随机" + category.label;
+      label.title = t("随机") + category.label;
       label.addEventListener("click", () => this.randomizeCategory(category.id));
       const divider = document.createElement("span");
       divider.className = "mtr-divider";
@@ -266,11 +270,11 @@ class TagPanel {
         if (index > 0) {
           const sep = document.createElement("span");
           sep.className = "mtr-sep";
-          sep.textContent = "、";
+          sep.textContent = t("、");
           values.append(sep);
         }
         const current = engine.slotState(category.id, slot.id);
-        const value = current.value || "未选";
+        const value = current.value || t("未选");
         const chip = document.createElement("button");
         chip.type = "button";
         chip.className = "mtr-chip";
@@ -279,7 +283,7 @@ class TagPanel {
         if (current.locked) chip.classList.add("locked");
         if (current.ignored) chip.classList.add("ignored");
         chip.textContent = value;
-        chip.title = current.locked ? "已锁定" : current.ignored ? "已忽略" : value;
+        chip.title = current.locked ? t("已锁定") : current.ignored ? t("已忽略") : value;
         chip.addEventListener("click", (event) => {
           event.stopPropagation();
           openEditor(this, category, slot, chip);
@@ -367,35 +371,35 @@ function openEditor(panel, category, slot, anchor) {
   const lock = document.createElement("button");
   lock.type = "button";
   lock.className = "mtr-flag" + (current.locked ? " active" : "");
-  lock.textContent = current.locked ? "已锁定" : "锁定";
+  lock.textContent = current.locked ? t("已锁定") : t("锁定");
   const ignore = document.createElement("button");
   ignore.type = "button";
   ignore.className = "mtr-flag" + (current.ignored ? " active" : "");
-  ignore.textContent = current.ignored ? "已忽略" : "忽略";
+  ignore.textContent = current.ignored ? t("已忽略") : t("忽略");
   const clear = document.createElement("button");
   clear.type = "button";
   clear.className = "mtr-flag";
-  clear.textContent = "清除";
+  clear.textContent = t("清除");
   flags.append(lock, ignore, clear);
 
   const input = document.createElement("input");
   input.className = "mtr-input";
   input.type = "text";
   input.value = current.value || "";
-  input.placeholder = "自定义标签";
+  input.placeholder = t("自定义标签");
 
   const poolHead = document.createElement("div");
   poolHead.className = "mtr-pool-head";
-  poolHead.textContent = (slot.label || "标签") + " 词库";
+  poolHead.textContent = (slot.label || t("标签")) + t(" 词库");
   const pool = document.createElement("div");
   pool.className = "mtr-pool";
   let chosen = current.value || "";
   const paint = () => {
     [...pool.children].forEach((chip) => chip.classList.toggle("active", chip.dataset.tag === chosen));
     lock.classList.toggle("active", current.locked);
-    lock.textContent = current.locked ? "已锁定" : "锁定";
+    lock.textContent = current.locked ? t("已锁定") : t("锁定");
     ignore.classList.toggle("active", current.ignored);
-    ignore.textContent = current.ignored ? "已忽略" : "忽略";
+    ignore.textContent = current.ignored ? t("已忽略") : t("忽略");
   };
   const commit = () => {
     current.value = chosen;
@@ -507,7 +511,7 @@ function installHook() {
 }
 
 // 文本框的空状态提示语（中文一行 + 英文一行）
-const TEXT_PLACEHOLDER = "此处输入的文字将注入所有标签后方\nText entered here will be appended after all the tags";
+const TEXT_PLACEHOLDER = t("此处输入的文字将注入所有标签后方\nText entered here will be appended after all the tags");
 
 // 把提示词文本框挪到widgets 数组最后，让它显示在标签面板下方。
 function moveTextToBottom(node) {

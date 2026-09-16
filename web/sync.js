@@ -1,3 +1,4 @@
+import { t } from "./i18n.js?v=202609301";
 import { app } from "../../scripts/app.js";
 
 const LOG_PREFIX = "[Mobile Remote]";
@@ -37,10 +38,10 @@ function activeWorkflowInfo(workflow) {
   }
 
   source = String(source || workflow?.path || workflow?.filename || workflow?.id || "current-workflow");
-  name = String(name || source.split(/[\\/]/).pop() || "当前工作流");
+  name = String(name || source.split(/[\\/]/).pop() || t("当前工作流"));
   name = name.replace(/\.json$/i, "").replace(/\s*[-|]\s*ComfyUI.*$/i, "").trim();
   const hasFileSource = Boolean(candidate?.path || candidate?.filename || workflow?.path || workflow?.filename);
-  return { source, name: name || "当前工作流", saved, hasFileSource };
+  return { source, name: name || t("当前工作流"), saved, hasFileSource };
 }
 
 // A real path is authoritative. Names such as Untitled.json are valid saved

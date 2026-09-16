@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import gzip
 import hashlib
@@ -15,6 +16,7 @@ import subprocess
 import threading
 import time
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,12 @@ from aiohttp import web
 
 PLUGIN_ROOT = Path(__file__).resolve().parent
 MOBILE_ROOT = PLUGIN_ROOT / "mobile"
+# 界面词典：手机页、电脑端面板和服务端提示共用同一份，避免三处各翻一套。
+I18N_ROOT = PLUGIN_ROOT / "i18n"
+# 中文是源码里的原文（也是词典的键），所以不需要 zh.json。
+MOBILE_LOCALES = ("zh", "en", "ja", "ko")
+FALLBACK_LOCALE = "en"
+LOCALE_COOKIE = "mtr_locale"  # 手机页与电脑端面板都会写，服务端据此翻译提示语
 WORKFLOW_ROOT = PLUGIN_ROOT / "workflows"
 DRAFT_ROOT = PLUGIN_ROOT / "drafts"
 HISTORY_INDEX_PATH = PLUGIN_ROOT / "mobile_history.json"
@@ -152,8 +160,85 @@ FIELD_ORDER = {
 }
 
 
+# 当前请求的语言：中间件按请求设置，后台线程读到的就是默认值（中文）。
+_REQUEST_LANG: contextvars.ContextVar[str] = contextvars.ContextVar("mobile_remote_lang", default="zh")
+
+
+@lru_cache(maxsize=16)
+def _locale_catalog(lang: str) -> dict[str, str]:
+    """读取某个语言的界面词典；任何异常都退回空词典（也就是中文原文）。"""
+    if lang not in MOBILE_LOCALES or lang == "zh":
+        return {}
+    path = I18N_ROOT / f"{lang}.json"
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        LOG.exception("[Mobile Remote] locale dictionary unreadable: %s", path)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {key: value for key, value in data.items() if isinstance(key, str) and isinstance(value, str)}
+
+
+def _t(text: str, **params: Any) -> str:
+    """把中文原文翻成当前请求语言；查不到就原样返回，占位符用 {name} 代入。"""
+    template = _locale_catalog(_REQUEST_LANG.get()).get(text, text)
+    if not params:
+        return template
+    try:
+        return template.format(**params)
+    except (KeyError, IndexError, ValueError):
+        # 译文里的花括号坏掉了也不能让接口 500：退回中文原文。
+        return text
+
+
+def _accept_language(header: str) -> str:
+    """从 Accept-Language 里挑第一个我们支持的语言。"""
+    for chunk in str(header or "").split(","):
+        tag = chunk.split(";")[0].strip().lower().replace("_", "-")
+        primary = tag.split("-")[0]
+        if primary in MOBILE_LOCALES:
+            return primary
+    return "zh"
+
+
+def _request_locale(request: web.Request) -> str:
+    """语言优先取 cookie（用户在面板里选过），否则按浏览器默认语言。"""
+    cookie = str(request.cookies.get(LOCALE_COOKIE) or "").strip().lower()
+    if cookie in MOBILE_LOCALES:
+        return cookie
+    return _accept_language(request.headers.get("Accept-Language", ""))
+
+
+@web.middleware
+async def _locale_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
+    """给每个请求绑定语言，后面的 _t() 才能翻出用户看得懂的提示。"""
+    token = _REQUEST_LANG.set(_request_locale(request))
+    try:
+        return await handler(request)
+    finally:
+        _REQUEST_LANG.reset(token)
+
+
+def _install_locale_middleware(server: Any) -> None:
+    """挂载语言中间件；挂不上最多是提示语不翻译，绝不能让面板起不来。"""
+    middlewares = getattr(getattr(server, "app", None), "middlewares", None)
+    if middlewares is None or not hasattr(middlewares, "append"):
+        LOG.warning("[Mobile Remote] aiohttp app unavailable; locale middleware skipped")
+        return
+    if _locale_middleware in middlewares:
+        return
+    try:
+        middlewares.append(_locale_middleware)
+    except RuntimeError:
+        LOG.warning("[Mobile Remote] app already started; locale middleware skipped")
+
+
 def _json_error(message: str, status: int = 400, details: Any = None) -> web.Response:
-    payload: dict[str, Any] = {"ok": False, "error": message}
+    payload: dict[str, Any] = {"ok": False, "error": _t(message)}
     if details is not None:
         payload["details"] = details
     return web.json_response(payload, status=status, headers=NO_CACHE)
@@ -818,6 +903,11 @@ def _infer_fields(prompt: Any) -> list[dict[str, Any]]:
     return fields
 
 
+def _translated_field_label(field: dict[str, Any]) -> str:
+    """参数名也是给用户看的，跟着界面一起翻。"""
+    return _t(str(field.get("label") or ""))
+
+
 def _coerce_value(value: Any, field: dict[str, Any]) -> Any:
     if value == "__random__" and field.get("randomizable"):
         return random.randrange(0, 2**53)
@@ -831,7 +921,7 @@ def _coerce_value(value: Any, field: dict[str, Any]) -> Any:
         elif str(value).lower() in {"0", "false", "no", "off"}:
             result = False
         else:
-            raise ValueError(f"{field['label']} 必须是开或关")
+            raise ValueError(_t("{label} 必须是开或关", label=_translated_field_label(field)))
     elif isinstance(original, int) and not isinstance(original, bool):
         result = int(value)
     elif isinstance(original, float):
@@ -839,15 +929,15 @@ def _coerce_value(value: Any, field: dict[str, Any]) -> Any:
     else:
         result = str(value)
         if len(result) > 200000:
-            raise ValueError(f"{field['label']} 内容过长")
+            raise ValueError(_t("{label} 内容过长", label=_translated_field_label(field)))
 
     minimum = field.get("min")
     maximum = field.get("max")
     if isinstance(result, (int, float)):
         if isinstance(minimum, (int, float)) and result < minimum:
-            raise ValueError(f"{field['label']} 不能小于 {minimum}")
+            raise ValueError(_t("{label} 不能小于 {minimum}", label=_translated_field_label(field), minimum=minimum))
         if isinstance(maximum, (int, float)) and result > maximum:
-            raise ValueError(f"{field['label']} 不能大于 {maximum}")
+            raise ValueError(_t("{label} 不能大于 {maximum}", label=_translated_field_label(field), maximum=maximum))
 
     options = field.get("options", [])
     if options and result not in options:
@@ -855,7 +945,7 @@ def _coerce_value(value: Any, field: dict[str, Any]) -> Any:
         if str(result) in comparable:
             result = comparable[str(result)]
         else:
-            raise ValueError(f"{field['label']} 的选项无效")
+            raise ValueError(_t("{label} 的选项无效", label=_translated_field_label(field)))
     return result
 
 
@@ -881,7 +971,7 @@ async def _enqueue_prompt(
     request_data = prompt_server.trigger_on_prompt(request_data)
     prompt = request_data.get("prompt")
     if not isinstance(prompt, dict):
-        return None, {"type": "no_prompt", "message": "工作流数据无效"}
+        return None, {"type": "no_prompt", "message": _t("工作流数据无效")}
 
     number = prompt_server.number
     prompt_server.number += 1
@@ -2385,11 +2475,41 @@ def _get_mobile_jobs_payload(
     }
 
 
+# 手机页面的静态资源。i18n.js 是手机页和电脑端面板共用的同一份实现，
+# 只保留一份，免得两边的翻译逻辑各自跑偏。
+_MOBILE_ASSET_FILES = {
+    "app.js",
+    "settings-sync.js",
+    "preset-catalog.js",
+    "preset-engine.js",
+    "progress-sync.js",
+    "styles.css",
+    "icon.svg",
+    "prompt-presets.json",
+}
+_SHARED_ASSET_FILES: dict[str, Path] = {"i18n.js": PLUGIN_ROOT / "web" / "i18n.js"}
+
+
 def _asset_response(filename: str) -> web.StreamResponse:
-    allowed = {"app.js", "settings-sync.js", "preset-catalog.js", "preset-engine.js", "progress-sync.js", "styles.css", "icon.svg", "prompt-presets.json"}
-    if filename not in allowed:
+    if filename in _SHARED_ASSET_FILES:
+        path = _SHARED_ASSET_FILES[filename]
+    elif filename in _MOBILE_ASSET_FILES:
+        path = MOBILE_ROOT / filename
+    else:
         raise web.HTTPNotFound()
-    path = MOBILE_ROOT / filename
+    if not path.is_file():
+        raise web.HTTPNotFound()
+    return web.FileResponse(path, headers=NO_CACHE)
+
+
+def _locale_response(lang: str) -> web.StreamResponse:
+    """界面词典：zh 直接返回空对象（中文就是源码原文），其余读 i18n/<lang>.json。"""
+    name = str(lang or "").strip().lower()
+    if name not in MOBILE_LOCALES:
+        raise web.HTTPNotFound()
+    if name == "zh":
+        return web.json_response({}, headers=NO_CACHE)
+    path = I18N_ROOT / f"{name}.json"
     if not path.is_file():
         raise web.HTTPNotFound()
     return web.FileResponse(path, headers=NO_CACHE)
@@ -2404,6 +2524,7 @@ def register_routes() -> None:
     from .progress_snapshot import ProgressSnapshotUnavailable, snapshot_progress
 
     routes = PromptServer.instance.routes
+    _install_locale_middleware(PromptServer.instance)
 
     @routes.get("/mobile")
     @routes.get("/mobile/")
@@ -2413,6 +2534,10 @@ def register_routes() -> None:
     @routes.get("/mobile/assets/{filename}")
     async def mobile_asset(request: web.Request) -> web.StreamResponse:
         return _asset_response(request.match_info["filename"])
+
+    @routes.get("/mobile/api/i18n/{lang}")
+    async def mobile_locale(request: web.Request) -> web.StreamResponse:
+        return _locale_response(str(request.match_info.get("lang") or ""))
 
     @routes.get("/mobile/manifest.webmanifest")
     async def mobile_manifest(_request: web.Request) -> web.Response:
@@ -2521,13 +2646,13 @@ def register_routes() -> None:
         try:
             latest = await asyncio.to_thread(_fetch_remote_version)
         except Exception as exc:
-            return web.json_response({"ok": False, "error": f"读取远端版本失败：{exc}"})
+            return web.json_response({"ok": False, "error": _t("读取远端版本失败：{error}", error=exc)})
         if not force and not _version_newer(latest, current):
-            return web.json_response({"ok": False, "error": f"已经是最新版本 {current}"})
+            return web.json_response({"ok": False, "error": _t("已经是最新版本 {version}", version=current)})
         expect = str(request.query.get("version") or "").lstrip("vV")
         if expect and expect != latest:
             return web.json_response(
-                {"ok": False, "error": f"远端版本已变成 {latest}，请重新点一次「检查更新」"}
+                {"ok": False, "error": _t("远端版本已变成 {version}，请重新点一次「检查更新」", version=latest)}
             )
         zip_url = f"https://github.com/{UPDATE_REPO}/archive/refs/tags/v{latest}.zip"
         try:
@@ -2535,7 +2660,7 @@ def register_routes() -> None:
             plan = await asyncio.to_thread(_update_plan, archive_path)
         except Exception as exc:
             LOG.info("[Mobile Remote] update download failed: %s", exc)
-            return web.json_response({"ok": False, "error": f"下载或解压失败：{exc}"})
+            return web.json_response({"ok": False, "error": _t("下载或解压失败：{error}", error=exc)})
         confirm = request.query.get("confirm") == "1"
         if not confirm:
             LOG.info(
@@ -2560,7 +2685,7 @@ def register_routes() -> None:
         backup_root = PLUGIN_ROOT / ".runtime" / f"backup-{stamp}-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
         result = await asyncio.to_thread(_apply_update_and_prune, plan["root"], PLUGIN_ROOT, backup_root)
         if not result["ok"]:
-            return web.json_response({"ok": False, "error": result["error"], "copied": len(result["copied"])})
+            return web.json_response({"ok": False, "error": _t(result["error"]), "copied": len(result["copied"])})
         LOG.info(
             "[Mobile Remote] updated to %s: %d files, backup at %s",
             latest,
@@ -2574,7 +2699,7 @@ def register_routes() -> None:
                 "updated_to": latest,
                 "copied_count": len(result["copied"]),
                 "backup": str(backup_root.relative_to(PLUGIN_ROOT)),
-                "message": "更新完成，请重启 ComfyUI 生效",
+                "message": _t("更新完成，请重启 ComfyUI 生效"),
             }
         )
 
@@ -2591,7 +2716,7 @@ def register_routes() -> None:
         except Exception as exc:
             LOG.info("[Mobile Remote] update check failed: %s", exc)
             return web.json_response(
-                {"ok": False, "current": current, "error": f"连接 GitHub 失败：{exc}"}
+                {"ok": False, "current": current, "error": _t("连接 GitHub 失败：{error}", error=exc)}
             )
         payload = {
             "ok": True,

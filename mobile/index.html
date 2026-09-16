@@ -11,17 +11,18 @@
   <title>Comfy Remote</title>
   <link rel="manifest" href="/mobile/manifest.webmanifest">
   <link rel="icon" href="/mobile/assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202609290">
-  <script src="/mobile/assets/preset-catalog.js?v=202609290" defer></script>
-  <script src="/mobile/assets/preset-engine.js?v=202609290" defer></script>
-  <script src="/mobile/assets/settings-sync.js?v=202609290" defer></script>
-  <script src="/mobile/assets/progress-sync.js?v=202609290" defer></script>
-  <script src="/mobile/assets/app.js?v=202609290" defer></script>
+  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202609301">
+  <script type="module" src="/mobile/assets/i18n.js?v=202609301"></script>
+  <script src="/mobile/assets/preset-catalog.js?v=202609301" defer></script>
+  <script src="/mobile/assets/preset-engine.js?v=202609301" defer></script>
+  <script src="/mobile/assets/settings-sync.js?v=202609301" defer></script>
+  <script src="/mobile/assets/progress-sync.js?v=202609301" defer></script>
+  <script src="/mobile/assets/app.js?v=202609301" defer></script>
 </head>
 <body>
   <div id="app" class="app-shell">
     <header class="topbar">
-      <div class="progress-ring" id="progressRing" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="任务进度">
+      <div class="progress-ring" id="progressRing" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="任务进度" data-i18n-aria-label="任务进度">
         <svg viewBox="0 0 44 44" aria-hidden="true">
           <circle class="progress-ring-track" cx="22" cy="22" r="18"></circle>
           <circle id="progressBar" class="progress-ring-fill" cx="22" cy="22" r="18" pathLength="113.1"></circle>
@@ -34,12 +35,12 @@
           <span class="meta-status"><span id="connectionBeacon" class="status-beacon is-idle" aria-hidden="true"></span><span id="connectionLabel">正在连接</span><span class="meta-sep">·</span><span id="progressLabel">空闲</span></span>
         </span>
       </div>
-      <img id="livePreview" class="live-preview hidden" alt="生成预览">
+      <img id="livePreview" class="live-preview hidden" alt="生成预览" data-i18n-alt="生成预览">
       <div class="topbar-aside">
         <span id="settingsSyncLabel" class="settings-sync-label" role="status" aria-live="polite">读取设置</span>
         <span class="meta-counts">运行 <b id="runningCount">0</b><span class="meta-sep">·</span>排队 <b id="pendingCount">0</b></span>
       </div>
-      <button id="refreshButton" class="icon-button" type="button" aria-label="刷新" title="刷新">
+      <button id="refreshButton" class="icon-button" type="button" aria-label="刷新" title="刷新" data-i18n-aria-label="刷新" data-i18n-title="刷新">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg>
       </button>
     </header>
@@ -51,9 +52,9 @@
           <span class="empty-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7"/><path d="m17 15 3 3m0-3-3 3"/></svg>
           </span>
-          <h3>暂无手机工作流</h3>
-          <p class="empty-hint">在电脑端「手机远程」面板里点「导入工作流」，导入后会常驻在这里，电脑端不开也能用。</p>
-          <a href="/" class="secondary-button">打开电脑端 ComfyUI</a>
+          <h3 data-i18n="暂无手机工作流">暂无手机工作流</h3>
+          <p class="empty-hint" data-i18n="在电脑端「手机远程」面板里点「导入工作流」，导入后会常驻在这里，电脑端不开也能用。">在电脑端「手机远程」面板里点「导入工作流」，导入后会常驻在这里，电脑端不开也能用。</p>
+          <a href="/" class="secondary-button" data-i18n="打开电脑端 ComfyUI">打开电脑端 ComfyUI</a>
         </div>
 
         <form id="generationForm" class="generation-form hidden">
@@ -61,7 +62,7 @@
 
           <details id="negativeSection" class="advanced-section negative-section hidden">
             <summary>
-              <span>反向提示词</span>
+              <span data-i18n="反向提示词">反向提示词</span>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
             </summary>
             <div id="negativeFields" class="fields-list advanced-fields"></div>
@@ -71,14 +72,14 @@
 
           <section id="sizeSection" class="size-section hidden" aria-labelledby="sizeTitle">
             <div class="size-section-head">
-              <span id="sizeTitle">图像尺寸</span>
+              <span id="sizeTitle" data-i18n="图像尺寸">图像尺寸</span>
             </div>
             <div class="size-grid">
               <div id="sizeFields" class="size-fields"></div>
               <span class="select-wrap size-preset-cell">
-                <span class="field-label-row"><span class="field-label">常用尺寸</span></span>
-                <select id="sizePresetSelect" aria-label="常用尺寸">
-                  <option value="">常用尺寸</option>
+                <span class="field-label-row"><span class="field-label" data-i18n="常用尺寸">常用尺寸</span></span>
+                <select id="sizePresetSelect" aria-label="常用尺寸" data-i18n-aria-label="常用尺寸">
+                  <option value="" data-i18n="常用尺寸">常用尺寸</option>
                   <option value="1024x1024">1024×1024 | 1:1</option>
                   <option value="720x1280">720×1280 | 9:16</option>
                   <option value="1280x720">1280×720 | 16:9</option>
@@ -100,16 +101,16 @@
 
           <details id="advancedSection" class="advanced-section hidden">
             <summary>
-              <span>高级参数</span>
+              <span data-i18n="高级参数">高级参数</span>
               <span id="advancedCount" class="count-badge">0</span>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
             </summary>
             <div class="advanced-content">
               <label class="field workflow-picker" id="workflowPickerField">
-                <span class="field-label">选择工作流</span>
+                <span class="field-label" data-i18n="选择工作流">选择工作流</span>
                 <span class="select-wrap">
                   <select id="workflowSelect" aria-describedby="workflowMeta">
-                    <option value="">正在读取</option>
+                    <option value="" data-i18n="正在读取">正在读取</option>
                   </select>
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
                 </span>
@@ -124,8 +125,8 @@
       <section id="view-queue" class="view" data-view="queue" aria-labelledby="queueTitle">
         <div class="section-heading page-heading">
           <div>
-            <span class="eyebrow">任务</span>
-            <h2 id="queueTitle">队列</h2>
+            <span class="eyebrow" data-i18n="任务">任务</span>
+            <h2 id="queueTitle" data-i18n="队列">队列</h2>
           </div>
           <span id="queueTotal" class="section-meta"></span>
         </div>
@@ -134,20 +135,20 @@
           <span class="empty-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
           </span>
-          <h3>队列为空</h3>
+          <h3 data-i18n="队列为空">队列为空</h3>
         </div>
       </section>
 
-      <section id="view-history" class="view" data-view="history" aria-label="历史">
+      <section id="view-history" class="view" data-view="history" aria-label="历史" data-i18n-aria-label="历史">
         <div class="section-heading page-heading">
           <div class="history-heading-copy">
-            <p class="history-hint">插件仅保存最近500批次，想永久保存请长按下载或收藏</p>
+            <p class="history-hint" data-i18n="插件仅保存最近500批次，想永久保存请长按下载或收藏">插件仅保存最近500批次，想永久保存请长按下载或收藏</p>
             <span id="historyTotal" class="history-total"></span>
           </div>
-          <button id="historyFavoritesButton" class="icon-button" type="button" aria-label="只看收藏" title="只看收藏">
+          <button id="historyFavoritesButton" class="icon-button" type="button" aria-label="只看收藏" title="只看收藏" data-i18n-aria-label="只看收藏" data-i18n-title="只看收藏">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5C7 16.6 3.5 13.3 3.5 9.6 3.5 7 5.6 5 8.1 5c1.5 0 3 .8 3.9 2.1C12.9 5.8 14.4 5 15.9 5c2.5 0 4.6 2 4.6 4.6 0 3.7-3.5 7-8.5 10.9Z"/></svg>
           </button>
-          <button id="historyLayoutButton" class="icon-button" type="button" aria-label="切换列数" title="切换列数（当前 2 列）">
+          <button id="historyLayoutButton" class="icon-button" type="button" aria-label="切换列数" title="切换列数（当前 2 列）" data-i18n-aria-label="切换列数">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
           </button>
         </div>
@@ -156,74 +157,81 @@
           <span class="empty-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>
           </span>
-          <h3>暂无生成记录</h3>
+          <h3 data-i18n="暂无生成记录">暂无生成记录</h3>
         </div>
       </section>
 
       <section id="view-settings" class="view" data-view="settings" aria-labelledby="settingsTitle">
         <div class="section-heading page-heading">
           <div>
-            <span class="eyebrow">连接</span>
-            <h2 id="settingsTitle">设置</h2>
+            <span class="eyebrow" data-i18n="连接">连接</span>
+            <h2 id="settingsTitle" data-i18n="设置">设置</h2>
+          </div>
+          <div class="language-picker">
+            <button id="languageButton" class="icon-button" type="button" aria-haspopup="menu" aria-expanded="false"
+              aria-label="语言" title="语言" data-i18n-aria-label="语言" data-i18n-title="语言">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>
+            </button>
+            <div id="languageMenu" class="language-menu" role="menu" hidden></div>
           </div>
         </div>
         <div class="settings-list">
-          <p class="settings-hint">工作流处于打开状态才可以被手机读取</p>
+          <p class="settings-hint" data-i18n="工作流处于打开状态才可以被手机读取">工作流处于打开状态才可以被手机读取</p>
           <div class="settings-row">
-            <span>手机设置同步</span>
+            <span data-i18n="手机设置同步">手机设置同步</span>
             <strong id="settingsSyncDetail">读取设置</strong>
           </div>
           <div id="settingsSyncConflict" class="settings-sync-conflict hidden">
-            <p>另一个页面已更新设置，本页修改尚未上传。</p>
-            <button id="useComputerSettingsButton" class="secondary-button full" type="button">使用电脑设置</button>
-            <button id="keepPhoneSettingsButton" class="secondary-button full" type="button">保留本页修改，稍后同步</button>
+            <p data-i18n="另一个页面已更新设置，本页修改尚未上传。">另一个页面已更新设置，本页修改尚未上传。</p>
+            <button id="useComputerSettingsButton" class="secondary-button full" type="button" data-i18n="使用电脑设置">使用电脑设置</button>
+            <button id="keepPhoneSettingsButton" class="secondary-button full" type="button" data-i18n="保留本页修改，稍后同步">保留本页修改，稍后同步</button>
           </div>
           <div class="settings-row">
-            <span>当前地址</span>
+            <span data-i18n="当前地址">当前地址</span>
             <strong id="currentAddress">-</strong>
           </div>
           <div class="settings-row">
-            <span>Tailscale 地址</span>
+            <span data-i18n="Tailscale 地址">Tailscale 地址</span>
             <strong id="tailscaleAddress">-</strong>
           </div>
           <div class="settings-row">
-            <span>显卡</span>
+            <span data-i18n="显卡">显卡</span>
             <strong id="settingsGpu">-</strong>
           </div>
           <div class="settings-row">
-            <span>插件版本</span>
+            <span data-i18n="插件版本">插件版本</span>
             <strong id="pluginVersion">-</strong>
           </div>
         </div>
         <div class="settings-actions">
           <a href="/" class="secondary-button full">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 22h8M12 18v4"/></svg>
-            电脑端界面
+            <span data-i18n="电脑端界面">电脑端界面</span>
           </a>
         </div>
       </section>
     </main>
 
-    <nav class="bottom-nav" aria-label="主导航">
-      <button class="nav-button active" type="button" data-target="generate" aria-label="生成">
+    <nav class="bottom-nav" aria-label="主导航" data-i18n-aria-label="主导航">
+      <button class="nav-button active" type="button" data-target="generate" aria-label="生成" data-i18n-aria-label="生成">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 3 14 9-14 9V3Z"/></svg>
-        <span>生成</span>
+        <span data-i18n="生成">生成</span>
       </button>
-      <button class="nav-button" type="button" data-target="queue" aria-label="队列">
+      <button class="nav-button" type="button" data-target="queue" aria-label="队列" data-i18n-aria-label="队列">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
-        <span>队列</span>
+        <span data-i18n="队列">队列</span>
         <b id="queueBadge" class="nav-badge hidden">0</b>
       </button>
       <div class="nav-dock">
         <div id="repeatBubble" class="repeat-bubble" hidden aria-hidden="true">
-          <span class="repeat-bubble-label">连发</span>
+          <span class="repeat-bubble-label" data-i18n="连发">连发</span>
           <b id="repeatBubbleNum" class="repeat-bubble-num">1</b>
-          <span class="repeat-bubble-unit">次</span>
+          <span class="repeat-bubble-unit" data-i18n="次">次</span>
         </div>
         <div id="modeTipBubble" class="mode-tip-bubble" hidden aria-hidden="true">
-          <span id="modeTipText" class="mode-tip-text">普通模式</span>
+          <span id="modeTipText" class="mode-tip-text" data-i18n="普通模式">普通模式</span>
         </div>
-        <button id="generateButton" class="generate-fab" type="submit" form="generationForm" aria-label="加入队列" title="加入队列">
+        <button id="generateButton" class="generate-fab" type="submit" form="generationForm" aria-label="加入队列" title="加入队列" data-i18n-aria-label="加入队列">
           <span class="fab-random-layer" aria-hidden="true"></span>
           <span id="repeatCenterNum" class="repeat-center-num" aria-hidden="true"></span>
           <span id="repeatLens" class="repeat-lens" aria-hidden="true"></span>
@@ -232,16 +240,16 @@
           <span id="submitState" class="fab-submit-state" aria-hidden="true">
             <span class="fab-spinner"></span>
           </span>
-          <span class="visually-hidden">加入队列</span>
+          <span class="visually-hidden" data-i18n="加入队列">加入队列</span>
         </button>
       </div>
-      <button class="nav-button" type="button" data-target="history" aria-label="历史">
+      <button class="nav-button" type="button" data-target="history" aria-label="历史" data-i18n-aria-label="历史">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>
-        <span>历史</span>
+        <span data-i18n="历史">历史</span>
       </button>
-      <button class="nav-button" type="button" data-target="settings" aria-label="设置">
+      <button class="nav-button" type="button" data-target="settings" aria-label="设置" data-i18n-aria-label="设置">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.2 2h-.4a2 2 0 0 0-2 2v.2a2 2 0 0 1-1 1.7l-.4.2a2 2 0 0 1-2 0l-.1-.1a2 2 0 0 0-2.7.7l-.2.4a2 2 0 0 0 .7 2.7l.2.1a2 2 0 0 1 1 1.7v.5a2 2 0 0 1-1 1.7l-.2.1a2 2 0 0 0-.7 2.7l.2.4a2 2 0 0 0 2.7.7l.1-.1a2 2 0 0 1 2 0l.4.2a2 2 0 0 1 1 1.7v.2a2 2 0 0 0 2 2h.4a2 2 0 0 0 2-2v-.2a2 2 0 0 1 1-1.7l.4-.2a2 2 0 0 1 2 0l.1.1a2 2 0 0 0 2.7-.7l.2-.4a2 2 0 0 0-.7-2.7l-.2-.1a2 2 0 0 1-1-1.7v-.5a2 2 0 0 1 1-1.7l.2-.1a2 2 0 0 0 .7-2.7l-.2-.4a2 2 0 0 0-2.7-.7l-.1.1a2 2 0 0 1-2 0l-.4-.2a2 2 0 0 1-1-1.7V4a2 2 0 0 0-2-2Z"/><circle cx="12" cy="12" r="3"/></svg>
-        <span>设置</span>
+        <span data-i18n="设置">设置</span>
       </button>
     </nav>
   </div>
@@ -250,124 +258,124 @@
     <div class="sheet-handle"></div>
     <div id="jobDialogLoading" class="job-dialog-loading">
       <span class="job-dialog-spinner" aria-hidden="true"></span>
-      <span>正在载入</span>
+      <span data-i18n="正在载入">正在载入</span>
     </div>
     <div class="dialog-head">
       <div>
         <span id="dialogStatus" class="status-chip">已完成</span>
-        <h2 id="dialogTitle">任务详情</h2>
+        <h2 id="dialogTitle" data-i18n="任务详情">任务详情</h2>
       </div>
-      <button id="closeDialogButton" class="icon-button" type="button" aria-label="关闭">
+      <button id="closeDialogButton" class="icon-button" type="button" aria-label="关闭" data-i18n-aria-label="关闭">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
     </div>
     <div class="copy-menu">
       <div id="jobPromptRow" class="copy-menu-row">
-        <span class="copy-menu-label">提示词</span>
-        <span id="jobPromptText" class="copy-menu-text" role="button" tabindex="0" title="点按展开全文">—</span>
-        <button id="copyJobPrompt" class="copy-menu-button" type="button">复制</button>
+        <span class="copy-menu-label" data-i18n="提示词">提示词</span>
+        <span id="jobPromptText" class="copy-menu-text" role="button" tabindex="0" title="点按展开全文" data-i18n-title="点按展开全文">—</span>
+        <button id="copyJobPrompt" class="copy-menu-button" type="button" data-i18n="复制">复制</button>
       </div>
       <div class="copy-menu-row">
-        <span class="copy-menu-label">种子</span>
+        <span class="copy-menu-label" data-i18n="种子">种子</span>
         <span id="jobSeedText" class="copy-menu-text">—</span>
-        <button id="copyJobSeed" class="copy-menu-button" type="button">复制</button>
+        <button id="copyJobSeed" class="copy-menu-button" type="button" data-i18n="复制">复制</button>
       </div>
     </div>
     <dl id="dialogMeta" class="dialog-meta"></dl>
     <div class="dialog-actions">
       <button id="retryJobButton" class="primary-button" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></svg>
-        重新生成
+        <span data-i18n="重新生成">重新生成</span>
       </button>
     </div>
   </dialog>
 
-  <dialog id="galleryDialog" class="gallery-dialog" aria-label="图片预览">
+  <dialog id="galleryDialog" class="gallery-dialog" aria-label="图片预览" data-i18n-aria-label="图片预览">
     <div id="galleryStage" class="gallery-stage">
-      <img id="galleryImage" alt="生成结果" draggable="false">
-      <button id="galleryPreviousButton" class="gallery-nav gallery-nav-prev" type="button" aria-label="上一张" title="上一张">
+      <img id="galleryImage" alt="生成结果" draggable="false" data-i18n-alt="生成结果">
+      <button id="galleryPreviousButton" class="gallery-nav gallery-nav-prev" type="button" aria-label="上一张" title="上一张" data-i18n-title="上一张">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
       </button>
-      <button id="galleryNextButton" class="gallery-nav gallery-nav-next" type="button" aria-label="下一张" title="下一张">
+      <button id="galleryNextButton" class="gallery-nav gallery-nav-next" type="button" aria-label="下一张" title="下一张" data-i18n-title="下一张">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
       </button>
     </div>
     <p id="galleryModelName" class="gallery-model-name" hidden></p>
     <div class="gallery-controls">
       <div class="gallery-leading">
-        <button id="deleteGalleryButton" class="gallery-delete" type="button" aria-label="删除这张图" title="删除这张图">
+        <button id="deleteGalleryButton" class="gallery-delete" type="button" aria-label="删除这张图" title="删除这张图" data-i18n-title="删除这张图">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 14h10l1-14M9 7V4h6v3"/></svg>
         </button>
         <div class="gallery-copy-wrap">
-          <button id="copyGalleryButton" class="gallery-copy" type="button" aria-label="复制" title="复制" aria-expanded="false" aria-haspopup="true">
+          <button id="copyGalleryButton" class="gallery-copy" type="button" aria-label="复制" title="复制" aria-expanded="false" aria-haspopup="true" data-i18n-title="复制">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
           <div id="galleryCopyMenu" class="gallery-copy-menu" hidden>
-            <button id="copyGalleryPrompt" type="button">复制标签</button>
-            <button id="copyGallerySeed" type="button">复制种子</button>
+            <button id="copyGalleryPrompt" type="button" data-i18n="复制标签">复制标签</button>
+            <button id="copyGallerySeed" type="button" data-i18n="复制种子">复制种子</button>
           </div>
         </div>
       </div>
       <span id="galleryCounter" class="gallery-counter" aria-live="polite">1/1</span>
       <div class="gallery-actions">
-        <button id="favoriteGalleryButton" class="gallery-favorite" type="button" aria-label="收藏这张图" title="收藏">
+        <button id="favoriteGalleryButton" class="gallery-favorite" type="button" aria-label="收藏这张图" title="收藏" data-i18n-title="收藏">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5C7 16.6 3.5 13.3 3.5 9.6 3.5 7 5.6 5 8.1 5c1.5 0 3 .8 3.9 2.1C12.9 5.8 14.4 5 15.9 5c2.5 0 4.6 2 4.6 4.6 0 3.7-3.5 7-8.5 10.9Z"/></svg>
         </button>
-        <button id="closeGalleryButton" class="gallery-close" type="button" aria-label="关闭图片预览" title="关闭">
+        <button id="closeGalleryButton" class="gallery-close" type="button" aria-label="关闭图片预览" title="关闭" data-i18n-title="关闭">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
         </button>
       </div>
     </div>
   </dialog>
 
-  <dialog id="presetTagDialog" class="sheet-dialog" aria-label="编辑标签">
+  <dialog id="presetTagDialog" class="sheet-dialog" aria-label="编辑标签" data-i18n-aria-label="编辑标签">
     <div class="sheet-handle"></div>
     <div class="dialog-head">
       <div>
-        <span id="presetTagEyebrow" class="eyebrow">标签</span>
-        <h2 id="presetTagTitle">编辑标签</h2>
+        <span id="presetTagEyebrow" class="eyebrow" data-i18n="标签">标签</span>
+        <h2 id="presetTagTitle" data-i18n="编辑标签">编辑标签</h2>
       </div>
-      <button id="closePresetTagButton" class="icon-button" type="button" aria-label="关闭">
+      <button id="closePresetTagButton" class="icon-button" type="button" aria-label="关闭" data-i18n-aria-label="关闭">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
     </div>
     <label class="field">
-      <span class="field-label">当前标签</span>
+      <span class="field-label" data-i18n="当前标签">当前标签</span>
       <input id="presetTagInput" type="text" autocomplete="off">
     </label>
     <div class="preset-editor-flags">
-      <button id="presetLockButton" type="button">锁定</button>
-      <button id="presetIgnoreButton" type="button">忽略</button>
+      <button id="presetLockButton" type="button" data-i18n="锁定">锁定</button>
+      <button id="presetIgnoreButton" type="button" data-i18n="忽略">忽略</button>
     </div>
     <div class="preset-pool-head">
-      <span>备选词库</span>
-      <button id="presetAddPoolButton" type="button">加入备选</button>
+      <span data-i18n="备选词库">备选词库</span>
+      <button id="presetAddPoolButton" type="button" data-i18n="加入备选">加入备选</button>
     </div>
     <div id="presetTagPool" class="preset-pool"></div>
     <div class="dialog-actions">
-      <button id="presetTagSaveButton" class="primary-button" type="button">确定</button>
+      <button id="presetTagSaveButton" class="primary-button" type="button" data-i18n="确定">确定</button>
     </div>
   </dialog>
 
-  <dialog id="modelPickerDialog" class="sheet-dialog" aria-label="选择模型">
+  <dialog id="modelPickerDialog" class="sheet-dialog" aria-label="选择模型" data-i18n-aria-label="选择模型">
     <div class="sheet-handle"></div>
     <div class="dialog-head">
       <div>
-        <span class="eyebrow">多模型</span>
-        <h2>选择模型</h2>
+        <span class="eyebrow" data-i18n="多模型">多模型</span>
+        <h2 data-i18n="选择模型">选择模型</h2>
         <span id="modelPickerCount" class="field-note">已选 0 个</span>
       </div>
-      <button id="closeModelPickerButton" class="icon-button" type="button" aria-label="关闭">
+      <button id="closeModelPickerButton" class="icon-button" type="button" aria-label="关闭" data-i18n-aria-label="关闭">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
       </button>
     </div>
     <label class="field">
-      <span class="field-label">搜索</span>
-      <input id="modelPickerSearch" type="search" autocomplete="off" placeholder="输入模型名">
+      <span class="field-label" data-i18n="搜索">搜索</span>
+      <input id="modelPickerSearch" type="search" autocomplete="off" placeholder="输入模型名" data-i18n-placeholder="输入模型名">
     </label>
     <div id="modelPickerList" class="model-picker-list"></div>
     <div class="dialog-actions">
-      <button id="modelPickerDoneButton" class="primary-button" type="button">确定</button>
+      <button id="modelPickerDoneButton" class="primary-button" type="button" data-i18n="确定">确定</button>
     </div>
   </dialog>
 

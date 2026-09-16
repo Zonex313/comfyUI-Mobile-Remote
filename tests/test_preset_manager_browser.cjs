@@ -187,6 +187,7 @@ function pageHtml(catalog) {
 
 function startFixtureServer(catalog) {
   const files = new Map([
+    ['/web/i18n.js', ['text/javascript; charset=utf-8', fs.readFileSync(path.join(ROOT, 'web', 'i18n.js'))]],
     ['/web/preset-manager.js', ['text/javascript; charset=utf-8', fs.readFileSync(path.join(ROOT, 'web', 'preset-manager.js'))]],
     ['/web/preset-store.js', ['text/javascript; charset=utf-8', fs.readFileSync(path.join(ROOT, 'web', 'preset-store.js'))]],
     ['/mobile/assets/preset-catalog.js', ['text/javascript; charset=utf-8', fs.readFileSync(path.join(ROOT, 'mobile', 'preset-catalog.js'))]],

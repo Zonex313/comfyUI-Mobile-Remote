@@ -116,6 +116,8 @@ class MobileGatewayTests(unittest.IsolatedAsyncioTestCase):
         boot = index_referenced_paths()
         self.assertIn("/mobile/assets/progress-sync.js", boot)
         self.assertEqual(index_script_paths(), [
+            # i18n.js 是手机页与电脑端面板共用的同一份运行时
+            "/mobile/assets/i18n.js",
             "/mobile/assets/preset-catalog.js",
             "/mobile/assets/preset-engine.js",
             "/mobile/assets/settings-sync.js",

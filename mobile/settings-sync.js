@@ -1,6 +1,11 @@
 /* Shared phone preferences: one deferred upload per minute, never on unload. */
 (function (root) {
   "use strict";
+  // 文案翻译：词典来自后端的 /mobile/api/i18n，拿不到就显示中文原文。
+  const t = (text, params) => {
+    const api = root.MobileI18n;
+    return api ? api.t(text, params) : text;
+  };
   const MINUTE = 60000;
   const CACHE = "comfy-mobile-remote.settings-cache";
   const ATTEMPT = "comfy-mobile-remote.settings-last-attempt";
@@ -61,8 +66,8 @@
       return own(this.pending, key) ? this.pending[key] : (this.base[key] ?? null);
     }
     setItem(key, value) {
-      if (!validKey(key)) throw new Error("不支持的手机设置");
-      if (value !== null && typeof value !== "string") throw new Error("设置值应为文本");
+      if (!validKey(key)) throw new Error(t("不支持的手机设置"));
+      if (value !== null && typeof value !== "string") throw new Error(t("设置值应为文本"));
       if (this.getItem(key) === value || this.disposed) return;
       const hadDirty = this.dirty;
       this.pending[key] = value;
@@ -129,7 +134,7 @@
       if (!object(body) || !Number.isSafeInteger(body.revision) || body.revision < 0 ||
           !Number.isFinite(body.saved_at) || typeof body.exists !== "boolean" || !object(body.values) ||
           Object.entries(body.values).some(([key, value]) => !validKey(key) || typeof value !== "string")) {
-        throw new Error("电脑返回的设置格式不完整");
+        throw new Error(t("电脑返回的设置格式不完整"));
       }
       return body;
     }
@@ -142,7 +147,7 @@
           signal: controller.signal, ...(payload ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) } : {}) });
         const body = await response.json();
         if (response.ok || response.status === 409 || response.status === 429) this._validate(body);
-        if (!response.ok && response.status !== 409 && response.status !== 429) throw new Error(body?.error || "电脑端设置暂未连接");
+        if (!response.ok && response.status !== 409 && response.status !== 429) throw new Error(body?.error || t("电脑端设置暂未连接"));
         return { status: response.status, body };
       } finally {
         this.clearTimeout(timer);
@@ -213,14 +218,14 @@
       this._loadCache();
       try {
         const { status, body } = await this._request();
-        if (status !== 200) throw new Error("读取电脑设置失败");
+        if (status !== 200) throw new Error(t("读取电脑设置失败"));
         this.serverResponseKnown = true;
         this.serverCatalogInvalid = false;
         this._consider(body);
         this._migration();
       } catch (error) {
         this.known = false;
-        this.error = error.message || "电脑暂未连接";
+        this.error = error.message || t("电脑暂未连接");
         if (!this.dirty && !this.serverCatalogInvalid) this._migration();
       }
       this.ready = true;
@@ -243,7 +248,7 @@
     }
     async _recover() {
       const { status, body } = await this._request();
-      if (status !== 200) throw new Error("读取电脑设置失败");
+      if (status !== 200) throw new Error(t("读取电脑设置失败"));
       this._consider(body);
       return true;
     }
@@ -269,12 +274,12 @@
           if (status === 409 || (status === 429 && body.revision !== baseRevision)) {
             this._consider(body);
             if (attempt === 0 && this.dirty) continue;
-            this.error = "等待下一次设置同步";
+            this.error = t("等待下一次设置同步");
             return;
           }
           if (status === 429) {
             this.retryUntil = Math.max(this.retryUntil, this.clock() + Math.max(MINUTE, Number(body.retry_after_ms) || 0));
-            this.error = "等待下一次设置同步";
+            this.error = t("等待下一次设置同步");
             return;
           }
           if (Catalog && typeof sent[Catalog.key] === "string" && typeof this.pending[Catalog.key] === "string"
@@ -298,7 +303,7 @@
         if (this.locks?.request) await this.locks.request("comfy-mobile-settings-upload", perform);
         else await perform();
       } catch (error) {
-        this.error = error.message || "同步未成功，稍后重试";
+        this.error = error.message || t("同步未成功，稍后重试");
         this.retryUntil = Math.max(this.retryUntil, this.clock() + MINUTE);
       } finally {
         this.sending = false;
@@ -323,7 +328,7 @@
           this._emit();
           return changed;
         } catch (error) {
-          this.error = error.message || "读取设置失败";
+          this.error = error.message || t("读取设置失败");
           this._emit();
           return false;
         } finally { this.reading = null; }
@@ -332,9 +337,9 @@
     }
     async resolveConflict(choice) {
       if (!this.conflict || this.sending || this.batchDepth) return;
-      if (!["server", "local"].includes(choice)) throw new Error("请选择设置版本");
+      if (!["server", "local"].includes(choice)) throw new Error(t("请选择设置版本"));
       const { status, body } = await this._request();
-      if (status !== 200) throw new Error("读取最新设置失败");
+      if (status !== 200) throw new Error(t("读取最新设置失败"));
       if (choice === "server") this.pending = {};
       this._consider(body);
       this.cachedKnown = true;
