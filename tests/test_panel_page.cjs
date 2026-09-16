@@ -117,8 +117,11 @@ function startFixture() {
     "/mobile/api/workflows": { ok: true, workflows: [
       { id: WORKFLOW_ID, name: "夹具工作流", source: "fixture.json", synced_at: 1, node_count: 2, field_count: 0, pinned: true },
     ] },
+    // 生成页需要有和面板同一格参数的字段，才能验证"高级改完回生成页看得见"。
     [`/mobile/api/workflows/${WORKFLOW_ID}`]: { ok: true, workflow: {
-      id: WORKFLOW_ID, name: "夹具工作流", fields: [], node_titles: { "1": "Checkpoint 加载器", "2": "K 采样器" },
+      id: WORKFLOW_ID, name: "夹具工作流",
+      fields: [{ id: "2::seed", node_id: "2", input: "seed", label: "种子", kind: "number", value: 12345 }],
+      node_titles: { "1": "Checkpoint 加载器", "2": "K 采样器" },
       graph: { nodes: [], groups: [] },
     } },
     [`/mobile/api/panel/workflow/${WORKFLOW_ID}`]: { ok: true, id: WORKFLOW_ID, name: "夹具工作流", workflow: NATIVE_WORKFLOW },
@@ -240,6 +243,37 @@ test("高级页跑参考项目的真实面板：渲染、连线、改值回写�
     assert.equal(seedCommand.workflow_id, WORKFLOW_ID);
     assert.equal(String(seedCommand.input), "seed");
     assert.equal(Number(seedCommand.value), 777);
+
+    // 3) 两边参数互通（出图仍走手机原来的路径）：
+    //    面板改的值要写进手机草稿，回生成页点「生成」用的就是它。
+    await page.click(".nav-button[data-target=generate]");
+    await page.waitForTimeout(500);
+    const generateValues = await page.evaluate(() => Array.from(document.querySelectorAll("#view-generate input"))
+      .map((input) => String(input.value)));
+    assert.equal(generateValues.includes("777"), true,
+      "面板里改的种子值要出现在生成页的控件里：" + JSON.stringify(generateValues));
+    await page.click(".nav-button[data-target=advanced]");
+    await frame.locator("#node-list-shell").waitFor({ timeout: 30000 });
+    await page.waitForTimeout(600);
+
+    //    反过来：手机（宿主）推值给面板，面板里的控件要跟着变。
+    const beforePush = posted.length;
+    await page.evaluate(() => {
+      const frame = document.querySelector("#view-advanced .panel-frame");
+      frame.contentWindow.postMessage({ type: "mtr-panel", action: "values", value: { "2::seed": 4242 } }, "*");
+    });
+    await frame.locator("#widget-row-2-0 input").first().waitFor({ timeout: 10000 });
+    await page.waitForTimeout(600);
+    assert.equal(
+      await frame.locator("#widget-row-2-0 input").first().inputValue(),
+      "4242",
+      "手机推过来的值要显示在面板控件里",
+    );
+    //    关键保证：手机这边推过去的值**不许**被面板当成"用户改了面板"回写电脑画布，
+    //    否则生成页调个种子就会悄悄改掉电脑上的节点。
+    await page.waitForTimeout(1200);
+    const pushedToDesktop = posted.slice(beforePush).filter((item) => Number(item?.value) === 4242);
+    assert.deepEqual(pushedToDesktop, [], "手机推的值不能回写电脑画布：" + JSON.stringify(posted.slice(beforePush)));
 
     assert.deepEqual(errors, [], "面板不应抛出未捕获异常");
     assert.deepEqual(failed.filter((item) => item.includes("/mobile/assets/panel.js")), [], "panel.js 必须加载成功");

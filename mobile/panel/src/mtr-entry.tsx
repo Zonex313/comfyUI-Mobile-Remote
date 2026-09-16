@@ -19,7 +19,7 @@ import { useWorkflowStore } from '@/hooks/useWorkflow'
 import { useWorkflowErrorsStore } from '@/hooks/useWorkflowErrors'
 import { ensureLocaleLoaded, useLocaleStore } from '@/i18n'
 import * as api from '@/api/client'
-import { getWidgetDefinitions } from '@/utils/widgetDefinitions'
+import { getInputWidgetDefinitions, getWidgetDefinitions } from '@/utils/widgetDefinitions'
 import type { Workflow, WorkflowNode } from '@/api/types'
 
 const LOG_PREFIX = '[Mobile Remote panel]'
@@ -32,6 +32,8 @@ type PanelOptions = { workflowId?: string; locale?: string }
 type PanelHandle = {
   setWorkflow: (workflowId: string) => Promise<void>
   setLocale: (locale: string) => void
+  /** 宿主（手机页）把参数值推过来：两边共用一份值。 */
+  setValues: (values: Record<string, unknown>) => void
   destroy: () => void
 }
 
@@ -70,18 +72,45 @@ function widgetsOf(node: WorkflowNode): unknown[] {
   return Array.isArray(node.widgets_values) ? node.widgets_values : []
 }
 
+/* 面板的控件清单：普通控件与下拉（COMBO）分成两个列表，这里合成"下标 → 输入名"。 */
+function widgetNameByIndex(node: WorkflowNode, nodeTypes: unknown): Map<number, string> {
+  const map = new Map<number, string>()
+  try {
+    const groups = [
+      getWidgetDefinitions(nodeTypes as never, node),
+      getInputWidgetDefinitions(nodeTypes as never, node),
+    ]
+    for (const list of groups) {
+      for (const def of list) {
+        if (def && typeof def.widgetIndex === 'number') {
+          map.set(def.widgetIndex, String(def.inputName ?? def.name ?? ''))
+        }
+      }
+    }
+  } catch (error) {
+    console.debug(LOG_PREFIX + ' 控件清单解析失败', error)
+  }
+  return map
+}
+
 /* 控件下标 → 提交用的输入名：优先 inputName（动态下拉的子项名），否则 name。 */
 function inputNameForWidget(node: WorkflowNode, index: number, nodeTypes: unknown): string {
+  return widgetNameByIndex(node, nodeTypes).get(index) ?? ''
+}
+
+/* 反向：手机给的输入名 → 面板里这一格的下标（-1 表示面板没有这一格）。 */
+function widgetIndexForInput(node: WorkflowNode, input: string, nodeTypes: unknown): number {
+  for (const [index, name] of widgetNameByIndex(node, nodeTypes)) {
+    if (name === input) return index
+  }
+  return -1
+}
+
+function notifyParent(payload: Record<string, unknown>): void {
   try {
-    const defs = getWidgetDefinitions(nodeTypes as never, node)
-    const hit = defs.find((def) => def.widgetIndex === index)
-    if (hit) return String(hit.inputName ?? hit.name ?? '')
-    const comboDefs = getWidgetDefinitions(nodeTypes as never, node)
-    const comboHit = comboDefs.find((def) => def.widgetIndex === index)
-    return comboHit ? String(comboHit.inputName ?? comboHit.name ?? '') : ''
+    ;(globalThis.parent ?? globalThis).postMessage({ type: 'mtr-panel', ...payload }, '*')
   } catch (error) {
-    console.debug(LOG_PREFIX + ' 控件名解析失败', error)
-    return ''
+    console.debug(LOG_PREFIX + ' 通知宿主失败', error)
   }
 }
 
@@ -136,6 +165,8 @@ function diffAndPush(
         const input = inputNameForWidget(node, index, nodeTypes)
         if (!input) continue
         postCommand({ workflow_id: workflowId, node_id: id, input, value: afterValues[index] })
+        // 同时告诉手机：草稿里也写一份，回生成页点「生成」用的就是它。
+        notifyParent({ action: 'value', nodeId: id, input, value: afterValues[index] })
       }
     }
   }
@@ -154,6 +185,56 @@ function mountPanel(container: HTMLElement, options: PanelOptions = {}): PanelHa
   let snapshot = new Map<string, NodeSnapshot>()
   let loading = false
   let unsubscribed = false
+  // 手机那边推过来的值正在写入面板 store：这期间既不回写桌面指令，也不回声给手机，
+  // 否则会变成自己改自己、并且把"只改手机"的值顺手推到电脑画布上。
+  let applyingParent = false
+
+  // 手机推过来的值写进面板 store：优先走它的 updateNodeWidget（保留它的归一化逻辑），
+  // 拿不到 itemKey 时直接改 widgets_values 再触发一次 store 更新。
+  const applyParentValues = (values: Record<string, unknown>) => {
+    const current = useWorkflowStore.getState()
+    const workflow = current.workflow
+    if (!workflow || !values) return
+    const nodes = (workflow.nodes ?? []) as WorkflowNode[]
+    const nodeTypes = current.nodeTypes
+    let touched = false
+    applyingParent = true
+    try {
+      for (const [key, value] of Object.entries(values)) {
+        const sep = key.indexOf('::')
+        if (sep <= 0) continue
+        const nodeId = key.slice(0, sep)
+        const input = key.slice(sep + 2)
+        const node = nodes.find((item) => String(item.id) === nodeId)
+        if (!node) continue
+        const index = widgetIndexForInput(node, input, nodeTypes)
+        if (index < 0) continue
+        if (JSON.stringify(widgetsOf(node)[index]) === JSON.stringify(value)) continue
+        const itemKey = String((node as unknown as { itemKey?: string }).itemKey ?? '')
+        const update = useWorkflowStore.getState().updateNodeWidget
+        if (itemKey && typeof update === 'function') {
+          update(itemKey as never, index, value, input)
+        } else {
+          const next = [...widgetsOf(node)]
+          next[index] = value
+          node.widgets_values = next
+        }
+        touched = true
+      }
+      if (touched && !useWorkflowStore.getState().workflow?.nodes?.length) {
+        // 兜底分支改的是同一个对象，这里推一次引用让 React 重渲染。
+        useWorkflowStore.setState({ workflow: { ...workflow } as never })
+      }
+    } catch (error) {
+      console.warn(LOG_PREFIX + ' 应用宿主参数失败', error)
+    } finally {
+      // 等这一轮渲染落定再放开，并刷新快照：这些是"手机推来的"，不该再回写桌面。
+      setTimeout(() => {
+        applyingParent = false
+        snapshot = snapshotNodes(useWorkflowStore.getState().workflow)
+      }, 0)
+    }
+  }
 
   const applyLocale = (locale?: string) => {
     const id = LOCALE_ALIASES[String(locale ?? '').toLowerCase()]
@@ -183,6 +264,8 @@ function mountPanel(container: HTMLElement, options: PanelOptions = {}): PanelHa
       useWorkflowStore.getState().loadWorkflow(body.workflow as Workflow, body.name || '', { replaceActive: true })
       snapshot = snapshotNodes(useWorkflowStore.getState().workflow)
       useWorkflowErrorsStore.getState().clearError?.()
+      // 工作流就位了：再报一次 ready，宿主收到后会把这边的值整批推过来。
+      notifyParent({ action: 'ready' })
     } catch (error) {
       console.error(LOG_PREFIX + ' 加载工作流失败', error)
     } finally {
@@ -192,7 +275,7 @@ function mountPanel(container: HTMLElement, options: PanelOptions = {}): PanelHa
 
   // 差分只在面板空闲（没在加载）时跑，避免把我们自己灌进去的数据当成用户改动。
   useWorkflowStore.subscribe((state) => {
-    if (unsubscribed || loading || !workflowId) return
+    if (unsubscribed || loading || applyingParent || !workflowId) return
     snapshot = diffAndPush(workflowId, snapshot, state.workflow)
   })
 
@@ -214,6 +297,9 @@ function mountPanel(container: HTMLElement, options: PanelOptions = {}): PanelHa
     setLocale: (locale: string) => {
       applyLocale(locale)
       void ensureLocaleLoaded(useLocaleStore.getState().locale)
+    },
+    setValues: (values: Record<string, unknown>) => {
+      applyParentValues(values)
     },
     destroy: () => {
       unsubscribed = true

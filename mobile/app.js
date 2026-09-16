@@ -219,6 +219,8 @@
       // 面板按需加载（1.4MB，不切过去就不下载）。
       setupAdvancedPage();
       syncPanelWorkflow();
+      // 手机这边调过的参数同步给面板（面板还没挂好时会先收到 ready 再推一次）。
+      pushAllValuesToPanel();
     }
     // 反向同步：高级页改过值，切回生成页时重绘控件（值取自草稿，改值时会存草稿）。
     if (target === "generate" && advancedEdited) {
@@ -244,6 +246,73 @@
     if (workflowId) params.set("workflow", String(workflowId));
     if (locale) params.set("locale", String(locale));
     return `/mobile/assets/panel.html?v=${encodeURIComponent(uiVersion())}&${params.toString()}`;
+  }
+
+  // ---- 「生成页」与「高级」的参数互通 --------------------------------------
+  // 高级面板跑在 iframe 里，有自己的 store，两边没法共用内存对象，所以用消息对齐：
+  //   面板改的值 → 写进手机草稿（回生成页点「生成」用的就是它）；
+  //   生成页改的值 → 推给面板显示。
+  // 只对齐「值」；旁路/隐藏/改名/颜色这类节点状态仍然只走面板 → 电脑端那条线。
+  const PANEL_PUSH_THROTTLE_MS = 300;
+  let panelPushTimer = 0;
+  let panelPendingValues = new Map();
+
+  // 值键就是 "<节点>::<输入名>"，和提交路径、服务端 graph.inputs 同一套形状。
+  function panelValueKeys() {
+    const out = {};
+    for (const [key, value] of Object.entries(state.values || {})) {
+      if (/^[A-Za-z0-9_.\-]+::.+/.test(key)) out[key] = value;
+    }
+    return out;
+  }
+
+  function pushValueToPanel(key, value) {
+    if (!panelFrame || !key) return;
+    panelPendingValues.set(String(key), value);
+    if (panelPushTimer) return;
+    panelPushTimer = window.setTimeout(() => {
+      panelPushTimer = 0;
+      const payload = {};
+      for (const [item, val] of panelPendingValues) payload[item] = val;
+      panelPendingValues = new Map();
+      sendToPanel("values", payload);
+    }, PANEL_PUSH_THROTTLE_MS);
+  }
+
+  function pushAllValuesToPanel() {
+    if (!panelFrame) return;
+    sendToPanel("values", panelValueKeys());
+  }
+
+  // 面板改的值写进手机这份：草稿一存，切回生成页重绘就用的是它，点「生成」自然带上。
+  function applyPanelValue(nodeId, input, value) {
+    const id = String(nodeId ?? "");
+    const name = String(input ?? "");
+    if (!id || !name) return;
+    const key = id + "::" + name;
+    state.values[key] = value;
+    const fields = state.workflow?.fields || [];
+    const field = fields.find((item) => item.id === key)
+      || fields.find((item) => String(item.node_id) === id && String(item.input) === name);
+    if (field && value !== null && typeof value !== "object") {
+      const control = state.fieldControls.get(field.id);
+      if (control && "value" in control) control.value = String(value);
+      if (field.input === "width" || field.input === "height") syncSizePresetSelection();
+    }
+    advancedEdited = true;
+    saveDraft();
+  }
+
+  function onPanelMessage(event) {
+    if (!panelFrame || event.source !== panelFrame.contentWindow) return;
+    const data = event.data;
+    if (!data || data.type !== "mtr-panel") return;
+    if (data.action === "ready") {
+      // 面板挂好（或刚重新载入工作流）：把手机这份值整批推过去。
+      pushAllValuesToPanel();
+      return;
+    }
+    if (data.action === "value") applyPanelValue(data.nodeId, data.input, data.value);
   }
 
   function sendToPanel(action, value) {
@@ -386,6 +455,8 @@
   function updateFieldValue(field, value) {
     state.values[field.id] = value;
     saveDraft();
+    // 生成页改的值也推给「高级」面板，两边显示保持一致（面板不会因此改电脑画布）。
+    pushValueToPanel(field.id, value);
     if (field.input === "width" || field.input === "height") syncSizePresetSelection();
   }
 
@@ -1137,7 +1208,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610127", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610128", { cache: "no-store" });
       if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];
@@ -4255,6 +4326,7 @@
       }
       bindEvents();
       bindPanelLocale();
+      window.addEventListener("message", onPanelMessage);
       applyPhonePreferences();
       connectWebSocket();
       await refreshAll();
