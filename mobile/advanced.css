@@ -65,6 +65,16 @@
   outline-offset: 2px;
 }
 
+/* 顶部图例：灰字说明方向按钮上的箭头怎么读。 */
+.advanced-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 6px 2px 0;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 .advanced-status {
   min-height: 16px;
   margin: 8px 2px 6px;
@@ -285,9 +295,11 @@
   min-height: 18px;
   margin-bottom: 4px;
   display: flex;
-  align-items: baseline;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
 
 .advanced-input-name {
@@ -397,14 +409,6 @@
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
 }
 
-/* 被连线接管的输入：只读芯片，点一下跳到源节点。 */
-.advanced-input-control > .advanced-input-link {
-  display: flex;
-  width: 100%;
-  min-height: 38px;
-  border-radius: 11px;
-}
-
 /* 类型不认识：只读回显 + 灰字提示。 */
 .advanced-input-readonly {
   display: flex;
@@ -450,46 +454,205 @@
 
 /* ------------------------------------------------------------------ 连线 */
 
-.advanced-node-links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 0 10px 10px;
-}
-
-.advanced-chip {
+/* 方向按钮：输入侧箭头指进（← 对端标题 · 插槽号），输出侧箭头指出
+ * （→ 对端标题 · 对端输入名）。点一下跳到对端节点。 */
+.advanced-link {
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   min-width: 0;
-  max-width: 100%;
-  min-height: 26px;
+  min-height: 30px;
   padding: 3px 9px;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 10px;
   color: var(--text-secondary);
   background: var(--surface);
+  font: inherit;
   font-size: 12px;
   line-height: 1.35;
   text-align: left;
-  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
-.advanced-chip.is-in {
-  border-color: rgba(126, 180, 212, 0.32);
-}
-
-.advanced-chip.is-out {
-  border-color: rgba(240, 180, 196, 0.3);
-}
-
-.advanced-chip:active {
+.advanced-link:active {
   background: var(--surface-raised);
 }
 
-.advanced-chip-text {
+.advanced-link.is-in {
+  border-color: rgba(126, 180, 212, 0.32);
+}
+
+.advanced-link.is-out {
+  border-color: rgba(240, 180, 196, 0.3);
+}
+
+.advanced-link-arrow {
+  flex: 0 0 auto;
+  font-weight: 700;
+}
+
+.advanced-link.is-in .advanced-link-arrow {
+  color: var(--info);
+}
+
+.advanced-link.is-out .advanced-link-arrow {
+  color: var(--accent-2);
+}
+
+/* 对端标题可能很长：宁可省略号，也不许把卡片撑破。 */
+.advanced-link-text {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 输入行里的方向按钮：和输入名/类型同一行，占满剩下的宽度。 */
+.advanced-input-head > .advanced-link {
+  flex: 1 1 auto;
+}
+
+/* 窄屏一行塞不下三个元素时：输入名 + 类型一行，方向按钮整行落到下面，
+ * 免得类型小字被挤到第三行去。 */
+@media (max-width: 359px) {
+  .advanced-input-head > .advanced-link {
+    flex: 1 1 100%;
+  }
+}
+
+/* 输出区 / 旧数据兜底行：一行一条连线。 */
+.advanced-link-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.advanced-link-row > .advanced-link {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 旧数据兜底行：连线名没有对应的输入行（节点只有 field_ids）。 */
+.advanced-link-row.is-orphan {
+  padding: 4px 0 5px;
+}
+
+.advanced-link-name {
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 590;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 同一个输出槽接了几个节点：给个数字，点按钮会弹菜单让用户选。 */
+.advanced-link-count {
+  flex: 0 0 auto;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  font-size: 11px;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+}
+
+/* -------------------------------------------------------------- 输出区 */
+
+/* 卡片底部的「→ 输出到」区：无出边时整块不渲染。 */
+.advanced-node-outputs {
+  margin-top: 2px;
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.advanced-outputs-title {
+  margin: 0 0 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.advanced-outputs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ---------------------------------------------------------- 跳转小菜单 */
+
+/* 就地浮层：position: fixed 挂在 body 上（卡片的 content-visibility 会裁掉卡内浮层）。 */
+.advanced-menu {
+  position: fixed;
+  z-index: 40;
+  min-width: 168px;
+  max-width: calc(100vw - 16px);
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  /* --surface 只有 5.5% 白，浮层必须自己带一层不透明底，否则字叠在卡片上看不清。 */
+  background: rgba(16, 19, 30, 0.94);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.advanced-menu-title {
+  margin: 2px 6px 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.advanced-menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.advanced-menu-item:active {
+  background: var(--surface-raised);
+}
+
+.advanced-menu-node {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.advanced-menu-slot {
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --------------------------------------------------------- 高亮 / 跳转态 */

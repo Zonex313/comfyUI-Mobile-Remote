@@ -8,7 +8,11 @@
  *     本模块不引用 app.js 里的任何变量，也不用生成页的 renderField。
  *  3. 控件 1:1 照着 graph.nodes[].inputs 自己渲染：画布上的节点有几个输入就是几个控件、
  *     什么类型就是什么类型；节点的 inputs 缺失（旧服务端）时退化成 field_ids 那套字段。
- *  4. 样式表由 mount() 自己挂 <link>，不改 mobile/styles.css。
+ *  4. 连线画在对应的输入/输出行上（照参考项目 CueForge 的做法）：输入行是「← 对端节点标题 ·
+ *     插槽号」方向按钮，卡片底部是「→ 输出到」区，逐条列「→ 对端节点标题 · 对端输入名」。
+ *     点方向按钮跳到对端节点（展开组与节点、滚到视野中间、高亮 1.2 秒）。
+ *  5. 一个输出槽接了多个节点时，点方向按钮先弹就地小菜单让用户选去哪一个；只有一条时直接跳。
+ *  6. 样式表由 mount() 自己挂 <link>，不改 mobile/styles.css。
  *
  * 数据来源：GET /mobile/api/workflows/<id> 返回的 workflow.graph（nodes/groups）。
  * 每个输入一个控件，值写进 state.values["<节点 id>::<输入名>"]（键的形状与 API prompt 的
@@ -21,13 +25,15 @@
 (() => {
   "use strict";
 
-  const VERSION = "202609307";
+  const VERSION = "202610121";
   const STYLE_ID = "mtr-advanced-styles";
   const DEFAULT_STYLE_HREF = "/mobile/assets/advanced.css?v=" + VERSION;
   // 组折叠状态：{ "<工作流 id>": { "<组 id>": true|false } }
   const STORAGE_KEY = "comfy-mobile-remote.advancedGroups";
   const UNGROUPED_ID = "__ungrouped__";
   const FLASH_MS = 1200;
+  // 小菜单刚弹出后这么久内的滚动不算「用户在滚」（上一次跳转的平滑滚动可能还在飞）。
+  const JUMP_MENU_GRACE_MS = 400;
   const SVG_NS = "http://www.w3.org/2000/svg";
   // 只读回显要限长：自定义节点可能把整个对象塞进一个不认识的输入。
   const MAX_READONLY_CHARS = 240;
@@ -56,7 +62,8 @@
 
   const els = {
     host: null, heading: null, eyebrow: null, title: null, expandButton: null,
-    toolbar: null, search: null, status: null, list: null, empty: null, emptyTitle: null,
+    toolbar: null, search: null, legendIn: null, legendOut: null,
+    status: null, list: null, empty: null, emptyTitle: null,
   };
 
   // 本模块自己的控件表（生成页那份 state.fieldControls 一律不碰），键 = 值键 "<节点>::<输入名>"。
@@ -72,6 +79,10 @@
   let mounted = false;
   let model = null;
   let flashTimer = 0;
+  // 就地弹出的「选择要跳转的节点」小菜单（同一时刻最多一个）。
+  let jumpMenu = null;
+  let jumpMenuAnchor = null;
+  let jumpMenuOpenedAt = 0;
 
   function t(text, params) {
     let value = text;
@@ -186,6 +197,12 @@
     return Array.isArray(input && input.options) ? input.options : [];
   }
 
+  // 连线里的槽位号：服务端给的是数字，旧数据可能是字符串，缺了就按 0 算。
+  function normalizeSlot(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : 0;
+  }
+
   // 画布上的控件类型 → 本模块的控件种类。
   function kindForType(type, multiline, options) {
     if (type === "BOOLEAN" || type === "BOOL") return "toggle";
@@ -288,20 +305,6 @@
       orderIndex.set(id, index);
     });
 
-    // 出边＝把入边反过来；同一对节点之间多条连线只算一次。
-    const outgoing = new Map();
-    for (const node of nodes) {
-      const target = String(node.id);
-      const links = Array.isArray(node.links) ? node.links : [];
-      for (const link of links) {
-        const source = link && link.node !== undefined && link.node !== null ? String(link.node) : "";
-        if (!source || source === target || !byId.has(source)) continue;
-        if (!outgoing.has(source)) outgoing.set(source, []);
-        const list = outgoing.get(source);
-        if (!list.includes(target)) list.push(target);
-      }
-    }
-
     // 分组以「节点自己的 group 标题」为准（服务端已按最内层组算好），
     // graph.groups 只提供顺序和颜色；组里没有节点就不显示。
     const buckets = new Map();
@@ -344,22 +347,65 @@
     for (const bucket of visible) groupOf.set(bucket.id, bucket.id);
 
     // 每个节点的输入 → 控件条目（顺序照抄服务端给的 inputs）。
+    // 入边以 inputs[].link 为准（服务端已算好）；节点的 inputs 缺失（旧服务端）时退回
+    // node.links，至少让连线还看得见。出边反过来推：遍历每个节点的 inputs[].link，
+    // 指向本节点的那些就是本节点的出边（同一个输出槽可以接好几个节点）。
     const entriesByNode = new Map();
+    const orphanLinks = new Map();
+    const outgoing = new Map();
     const index = new Map();
     let editableCount = 0;
     for (const node of nodes) {
       const id = String(node.id);
       const list = buildInputEntries(node, fieldById);
       entriesByNode.set(id, list);
+
+      const linked = new Map();
+      for (const entry of list) {
+        if (entry.link) linked.set(entry.name, entry.link);
+      }
+      const rawLinks = Array.isArray(node.links) ? node.links : [];
+      for (const link of rawLinks) {
+        const name = link && link.name !== undefined && link.name !== null ? String(link.name) : "";
+        const source = link && link.node !== undefined && link.node !== null ? String(link.node) : "";
+        if (!name || !source || source === id || !byId.has(source)) continue;
+        if (!linked.has(name)) linked.set(name, { node: source, slot: link.slot });
+      }
+
+      const attached = new Set();
       for (const entry of list) {
         if (!index.has(entry.key)) index.set(entry.key, entry);
+        // 连线住哪个输入，哪个输入就只读（applyEdit / syncValue 都看 entry.link）。
+        const link = linked.get(entry.name);
+        if (link) {
+          const source = String(link.node);
+          entry.link = { node: source, slot: normalizeSlot(link.slot) };
+          attached.add(entry.name);
+          if (byId.has(source)) {
+            if (!outgoing.has(source)) outgoing.set(source, []);
+            outgoing.get(source).push({ node: id, input: entry.name, slot: entry.link.slot });
+          }
+        }
         if (entry.kind !== "readonly" && !entry.link) editableCount += 1;
       }
+
+      // 连线名在输入行里找不到对应行（旧服务端只有 field_ids）：单独列出来，别把连线丢了。
+      const orphans = [];
+      for (const [name, link] of linked) {
+        if (attached.has(name)) continue;
+        const source = String(link.node);
+        if (!byId.has(source)) continue;
+        const slot = normalizeSlot(link.slot);
+        orphans.push({ name, node: source, slot });
+        if (!outgoing.has(source)) outgoing.set(source, []);
+        outgoing.get(source).push({ node: id, input: name, slot });
+      }
+      if (orphans.length) orphanLinks.set(id, orphans);
     }
     entryIndex = index;
 
     return {
-      workflow, graph, fields, fieldById, nodes, byId, orderIndex, outgoing,
+      workflow, graph, fields, fieldById, nodes, byId, orderIndex, outgoing, orphanLinks,
       groups: visible, groupOf, entriesByNode, editableCount,
     };
   }
@@ -537,7 +583,10 @@
     input.spellcheck = false;
     input.placeholder = t("搜索节点名、类型或编号");
     field.append(icon("search", "advanced-search-icon"), input);
-    wrap.append(field);
+    // 图例：连线按钮上的箭头读作什么（灰字，随语言走）。
+    const legend = el("p", "advanced-legend");
+    legend.append(el("span", "advanced-legend-in"), el("span", "advanced-legend-out"));
+    wrap.append(field, legend);
     return wrap;
   }
 
@@ -586,6 +635,8 @@
     els.title = els.heading.querySelector("h2");
     els.expandButton = els.heading.querySelector("#advancedExpandButton");
     els.search = els.toolbar.querySelector("#advancedSearch");
+    els.legendIn = els.toolbar.querySelector(".advanced-legend-in");
+    els.legendOut = els.toolbar.querySelector(".advanced-legend-out");
     els.emptyTitle = els.empty.querySelector("h3");
     if (els.expandButton && !els.expandButton.querySelector("svg")) els.expandButton.append(icon("expand"));
     if (els.search && !els.search.classList.contains("advanced-search-input")) els.search.classList.add("advanced-search-input");
@@ -668,8 +719,9 @@
     card.append(toggle);
 
     if (open) card.append(renderBody(node));
-    const links = renderLinks(node);
-    if (links) card.append(links);
+    // 出边区（卡片底部）：没有出边时整块不渲染。
+    const outputs = renderOutputs(node);
+    if (outputs) card.append(outputs);
 
     cards.set(id, card);
     return card;
@@ -687,14 +739,20 @@
     const body = el("div", "advanced-node-body");
     const list = nodeInputs(node);
     if (!list.length) {
+      // 一个输入都没有（含旧服务端的脏数据）：灰字提示，不能让卡片空白。
       body.append(el("p", "advanced-node-empty", t("无可调参数")));
       return body;
     }
+    // 旧数据兜底：连线名在输入行里找不到对应行时，单独列在控件前面，只读。
+    const orphans = (model && model.orphanLinks.get(String(node.id))) || [];
+    for (const link of orphans) body.append(renderOrphanLink(link));
     for (const entry of list) body.append(renderInput(entry));
     return body;
   }
 
-  // 一个输入一行：上行是输入名（不翻译，必须与画布/API 一致）+ 类型小字，下行是控件。
+  // 一个输入一行：行内是输入名（不翻译，必须与画布/API 一致）+ 类型小字。
+  // 被连线接管的输入，行内直接画「← 对端节点标题 · 插槽号」方向按钮，这一行不再渲染
+  // 可编辑控件（画布上它本来也改不动）；没被连线的照旧在下面渲染可编辑控件。
   function renderInput(entry) {
     const wrap = el("div", "advanced-input");
     wrap.dataset.valueKey = entry.key;
@@ -702,19 +760,21 @@
     if (entry.type) wrap.dataset.inputType = entry.type;
     const head = el("div", "advanced-input-head");
     head.append(el("span", "advanced-input-name", entry.name));
+    if (entry.link) {
+      wrap.dataset.inputLinked = "1";
+      head.append(connectionButton("in", { node: entry.link.node, slot: entry.link.slot }, [entry.link]));
+    }
     if (entry.type) head.append(el("span", "advanced-input-type", entry.type));
+    wrap.append(head);
+    inputRows.set(entry.key, wrap);
+    if (entry.link) return wrap;
+
     const slot = el("div", "advanced-input-control");
     if (entry.frontend) {
       wrap.dataset.inputFrontend = "1";
       slot.classList.add("is-frontend");
     }
-    wrap.append(head, slot);
-    inputRows.set(entry.key, wrap);
-
-    if (entry.link) {
-      slot.append(linkChip(entry));
-      return wrap;
-    }
+    wrap.append(slot);
     const control = buildControl(entry);
     if (control) slot.append(control);
     // 前端专有控件（种子模式之类）只影响手机端，旁边灰字说明一句。
@@ -723,17 +783,46 @@
     return wrap;
   }
 
-  // 被连线接管的输入：只读芯片，点一下仍然跳到源节点。
-  function linkChip(entry) {
-    const source = model && entry.link ? model.byId.get(String(entry.link.node)) : null;
-    const nodeId = String(entry.link ? entry.link.node : "");
-    const name = source ? nodeTitle(source) : "#" + nodeId;
-    const button = el("button", "advanced-chip is-in advanced-input-link");
+  // 对端节点标题：节点不在图里（脏数据）就退回 #编号。
+  function peerTitle(nodeId) {
+    const node = model && model.byId.get(String(nodeId));
+    return node ? nodeTitle(node) : "#" + String(nodeId);
+  }
+
+  // 连接点上的方向按钮：输入侧箭头指进（← 对端标题 · 插槽号），
+  // 输出侧箭头指出（→ 对端标题 · 对端输入名）。点一下就跳到对端节点。
+  // peers 是这个连接点上的全部对端：多于一条时点按钮先弹就地菜单让用户选去哪一个。
+  function connectionButton(direction, self, peers) {
+    const name = peerTitle(self.node);
+    const text = direction === "in"
+      ? name + " · " + String(normalizeSlot(self.slot))
+      : name + " · " + String(self.input || "");
+    const label = direction === "in" ? t("来自 {name}", { name }) : t("被 {name} 使用", { name });
+    const button = el("button", "advanced-link is-" + direction);
     button.type = "button";
-    button.dataset.jump = nodeId;
-    button.title = "#" + nodeId;
-    button.append(el("span", "advanced-chip-text", t("已连接：来自 {name}", { name })));
+    button.dataset.jump = String(self.node);
+    button.dataset.slot = String(normalizeSlot(self.slot));
+    if (direction === "out" && self.input) button.dataset.input = String(self.input);
+    button.title = label;
+    button.setAttribute("aria-label",
+      direction === "in" ? t("已连接：来自 {name}", { name }) : label);
+    const arrow = el("span", "advanced-link-arrow", direction === "in" ? "←" : "→");
+    arrow.setAttribute("aria-hidden", "true");
+    button.append(arrow, el("span", "advanced-link-text", text));
+    if (peers.length > 1) {
+      button.dataset.multi = "1";
+      button.mtrPeers = peers;   // 菜单要的对端清单，见 openJumpMenu
+    }
     return button;
+  }
+
+  // 旧数据兜底行：连线名没有对应的输入行（节点只有 field_ids），只画方向按钮。
+  function renderOrphanLink(link) {
+    const row = el("div", "advanced-link-row is-in is-orphan");
+    row.dataset.linkName = link.name;
+    row.append(el("span", "advanced-link-name", link.name));
+    row.append(connectionButton("in", { node: link.node, slot: link.slot }, [link]));
+    return row;
   }
 
   function numericAttr(value) {
@@ -983,10 +1072,16 @@
     const target = event.target;
     if (!target || typeof target.closest !== "function") return;
     if (event.type === "click") {
-      const chip = target.closest("[data-jump]");
-      if (chip) {
+      const link = target.closest("[data-jump]");
+      if (link) {
         event.preventDefault();
-        openNode(chip.dataset.jump);
+        // 一个连接点连着好几个节点：先弹就地菜单让用户选去哪一个。
+        if (link.dataset.multi === "1" && Array.isArray(link.mtrPeers) && link.mtrPeers.length > 1) {
+          openJumpMenu(link, link.mtrPeers);
+          return;
+        }
+        closeJumpMenu();
+        openNode(link.dataset.jump);
         return;
       }
       const row = target.closest("[data-value-key]");
@@ -1003,36 +1098,32 @@
     if (event.type === "input" && tag === "TEXTAREA") growArea(target);
   }
 
-  function renderLinks(node) {
-    const doc = deps.doc;
-    const incoming = [];
-    const links = Array.isArray(node.links) ? node.links : [];
-    for (const link of links) {
-      const source = link && link.node !== undefined && link.node !== null ? String(link.node) : "";
-      if (!source || !model.byId.has(source) || incoming.includes(source)) continue;
-      incoming.push(source);
-    }
-    const outgoing = (model.outgoing.get(String(node.id)) || [])
+  // 卡片底部「→ 输出到」区：逐条列出这条出边去了哪个节点的哪个输入。
+  // 无出边时整块不渲染；同一个输出槽接了多个节点时，每条都标上条数，点按钮先弹菜单。
+  function renderOutputs(node) {
+    const edges = (model.outgoing.get(String(node.id)) || [])
       .slice()
-      .sort((a, b) => (model.orderIndex.get(a) || 0) - (model.orderIndex.get(b) || 0));
-    if (!incoming.length && !outgoing.length) return null;
+      .sort((a, b) => (model.orderIndex.get(String(a.node)) || 0) - (model.orderIndex.get(String(b.node)) || 0));
+    if (!edges.length) return null;
 
-    const wrap = el("div", "advanced-node-links");
-    const chip = (kind, targetId, text) => {
-      const button = el("button", "advanced-chip is-" + kind);
-      button.type = "button";
-      button.dataset.jump = targetId;
-      button.title = "#" + targetId;
-      button.append(el("span", "advanced-chip-text", text));
-      return button;
-    };
-    for (const id of incoming) {
-      wrap.append(chip("in", id, t("来自 {name}", { name: nodeTitle(model.byId.get(id)) })));
+    const section = el("div", "advanced-node-outputs");
+    section.append(el("p", "advanced-outputs-title", t("→ 输出到")));
+    const list = el("div", "advanced-outputs-list");
+    for (const edge of edges) {
+      const slot = normalizeSlot(edge.slot);
+      const peers = edges.filter((other) => normalizeSlot(other.slot) === slot);
+      const row = el("div", "advanced-link-row is-out");
+      row.append(connectionButton("out", edge, peers));
+      if (peers.length > 1) {
+        const count = el("span", "advanced-link-count", String(peers.length));
+        count.title = t("选择要跳转的节点");
+        count.setAttribute("aria-hidden", "true");
+        row.append(count);
+      }
+      list.append(row);
     }
-    for (const id of outgoing) {
-      wrap.append(chip("out", id, t("被 {name} 使用", { name: nodeTitle(model.byId.get(id)) })));
-    }
-    return wrap;
+    section.append(list);
+    return section;
   }
 
   /* -------------------------------------------------------------- 交互 */
@@ -1082,6 +1173,104 @@
     return card;
   }
 
+  /* ---------------------------------------------------------- 跳转小菜单 */
+
+  // 一个连接点连着好几个节点时，就地弹一个小浮层让用户选去哪一个
+  // （菜单项 = 对端节点标题 + 插槽名）。浮层挂在 body 上用 position: fixed：
+  // 卡片的 content-visibility 会把卡内的浮层裁掉。点空白、滚动、Esc、重渲染都关掉。
+
+  function closeJumpMenu() {
+    const doc = deps.doc;
+    if (doc) {
+      doc.removeEventListener("mousedown", onJumpMenuOutside, true);
+      doc.removeEventListener("scroll", onJumpMenuScroll, true);
+      doc.removeEventListener("keydown", onJumpMenuKey, true);
+    }
+    const view = win();
+    if (view && typeof view.removeEventListener === "function") view.removeEventListener("resize", onJumpMenuResize);
+    if (jumpMenu && jumpMenu.parentNode) jumpMenu.parentNode.removeChild(jumpMenu);
+    jumpMenu = null;
+    jumpMenuAnchor = null;
+  }
+
+  function onJumpMenuOutside(event) {
+    if (!jumpMenu) return;
+    const target = event.target;
+    if (target && typeof target.closest === "function" && target.closest(".advanced-menu")) return;
+    if (jumpMenuAnchor && typeof jumpMenuAnchor.contains === "function" && jumpMenuAnchor.contains(target)) return;
+    closeJumpMenu();
+  }
+
+  function onJumpMenuScroll() {
+    if (Date.now() - jumpMenuOpenedAt < JUMP_MENU_GRACE_MS) return;
+    closeJumpMenu();
+  }
+
+  function onJumpMenuKey(event) {
+    if (!jumpMenu || event.key !== "Escape") return;
+    event.preventDefault();
+    const anchor = jumpMenuAnchor;
+    closeJumpMenu();
+    if (anchor && typeof anchor.focus === "function") {
+      try { anchor.focus({ preventScroll: true }); } catch (error) { /* 老浏览器不认这个参数 */ }
+    }
+  }
+
+  function onJumpMenuResize() {
+    if (jumpMenu && jumpMenuAnchor) positionJumpMenu(jumpMenu, jumpMenuAnchor);
+  }
+
+  function positionJumpMenu(menu, anchor) {
+    const view = win();
+    const rect = anchor.getBoundingClientRect();
+    const width = menu.offsetWidth || 220;
+    const height = menu.offsetHeight || 0;
+    const maxLeft = Math.max(8, (view.innerWidth || 0) - width - 8);
+    const left = Math.max(8, Math.min(rect.left, maxLeft));
+    let top = rect.bottom + 6;
+    // 下面放不下就翻到按钮上面，别顶出屏幕。
+    if (height && top + height > (view.innerHeight || 0) - 8) top = Math.max(8, rect.top - height - 6);
+    menu.style.left = Math.round(left) + "px";
+    menu.style.top = Math.round(top) + "px";
+  }
+
+  function openJumpMenu(anchor, peers) {
+    const doc = deps.doc;
+    if (!doc) return null;
+    closeJumpMenu();
+    const menu = el("div", "advanced-menu");
+    menu.setAttribute("role", "menu");
+    const title = t("选择要跳转的节点");
+    menu.setAttribute("aria-label", title);
+    menu.append(el("p", "advanced-menu-title", title));
+    for (const peer of peers) {
+      const item = el("button", "advanced-menu-item");
+      item.type = "button";
+      item.setAttribute("role", "menuitem");
+      item.dataset.jump = String(peer.node);
+      item.append(el("span", "advanced-menu-node", peerTitle(peer.node)));
+      item.append(el("span", "advanced-menu-slot",
+        peer.input ? String(peer.input) : "#" + String(normalizeSlot(peer.slot))));
+      item.addEventListener("click", () => {
+        const target = String(peer.node);
+        closeJumpMenu();
+        openNode(target);
+      });
+      menu.append(item);
+    }
+    (doc.body || doc.documentElement).append(menu);
+    positionJumpMenu(menu, anchor);
+    jumpMenu = menu;
+    jumpMenuAnchor = anchor;
+    jumpMenuOpenedAt = Date.now();
+    doc.addEventListener("mousedown", onJumpMenuOutside, true);
+    doc.addEventListener("scroll", onJumpMenuScroll, true);
+    doc.addEventListener("keydown", onJumpMenuKey, true);
+    const view = win();
+    if (view && typeof view.addEventListener === "function") view.addEventListener("resize", onJumpMenuResize);
+    return menu;
+  }
+
   /* -------------------------------------------------------------- 渲染 */
 
   function paintChrome() {
@@ -1093,6 +1282,8 @@
       if (els.search.placeholder !== placeholder) els.search.placeholder = placeholder;
       els.search.setAttribute("aria-label", placeholder);
     }
+    if (els.legendIn) els.legendIn.textContent = t("← 输入来自");
+    if (els.legendOut) els.legendOut.textContent = t("→ 输出到");
     if (els.expandButton) {
       const label = expanded ? t("全部收起") : t("全部展开");
       els.expandButton.classList.toggle("active", expanded);
@@ -1145,6 +1336,8 @@
 
   function render() {
     if (!mounted) return api;
+    // 整块重渲染会把菜单的锚点（那一行按钮）换掉，先关掉旧菜单。
+    closeJumpMenu();
     if (groupScope !== scopeId()) loadGroupState();
     model = collectModel();
     const tokens = tokenize(query);
@@ -1248,6 +1441,7 @@
   }
 
   function destroy() {
+    closeJumpMenu();
     if (flashTimer) win().clearTimeout(flashTimer);
     flashTimer = 0;
     for (const node of [els.heading, els.toolbar, els.status, els.list, els.empty]) {

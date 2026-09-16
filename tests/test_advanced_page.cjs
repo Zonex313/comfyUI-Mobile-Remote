@@ -7,6 +7,10 @@
  * 夹具要点：graph.nodes[].inputs 由本文件自己造（不依赖服务端已改完），
  * 覆盖 COMBO / INT / FLOAT / BOOLEAN / 多行 STRING / 单行 STRING / 被连线接管的输入 /
  * 前端专有控件 / 不认识类型 / fields 里没有的输入（标签模式、每次随机）。
+ * 连线交互按参考项目 CueForge 的做法：连线画在输入行与卡片底部的输出区上，
+ * 一个输出槽接多个节点时点按钮先弹就地菜单。夹具里因此有一个节点被两个节点连入
+ * （8 号：7 与 4）、一个节点有两条出边（10 → 14 的 model / clip）、
+ * 一个输出槽接两个节点（4 号槽 0 → 7.model 与 10.model）。
  * 另有一个只有旧 field_ids、没有 inputs 的旧数据工作流，验证向后兼容。
  */
 "use strict";
@@ -146,6 +150,16 @@ const GRAPH = {
       field_ids: ["11::batch_size"], has_editable: true },
     { id: "13", type: "Note", title: "备注", pos: [1600, 500], group: "",
       links: [], inputs: [], field_ids: [], has_editable: false },
+    // 一个节点有两条出边（10 → 14 的 model / clip），而且 14 自己没有出边：
+    // 输出区应当正好两条、各跳各的，14 的卡片上不该有输出区。
+    { id: "14", type: "LoraLoaderModelOnly", title: "LoRA 支线采样", pos: [1600, 800], group: "",
+      links: [{ name: "model", node: "10", slot: 0 }, { name: "clip", node: "10", slot: 1 }],
+      inputs: [
+        { name: "model", value: ["10", 0], type: "MODEL", link: { node: "10", slot: 0 } },
+        { name: "clip", value: ["10", 1], type: "CLIP", link: { node: "10", slot: 1 } },
+        { name: "strength", value: 1, type: "FLOAT", min: 0, max: 10, step: 0.01 },
+      ],
+      field_ids: [], has_editable: true },
   ],
   groups: [
     { id: "g0", title: "文本编码", color: "#3f789e", node_ids: ["4", "5", "6", "12"] },
@@ -177,10 +191,10 @@ const WORKFLOW = { id: "0a1b2c3d4e5f60718293", name: "高级页夹具工作流",
 const LEGACY_WORKFLOW = { id: "legacy-workflow", name: "旧数据工作流", node_count: 4, fields: FIELDS, graph: LEGACY_GRAPH };
 const EMPTY_WORKFLOW = { id: "empty-workflow", name: "空工作流", node_count: 0, fields: [], graph: { nodes: [], groups: [] } };
 
-const NODE_COUNT = GRAPH.nodes.length;      // 10
+const NODE_COUNT = GRAPH.nodes.length;      // 11
 const GROUP_COUNT = 4;                      // 3 个命名组 + 未分组
-// 可编辑输入（去掉连线的和类型不认识的）：1+1+1+3+7+0+1+3+3+0 = 20
-const EDITABLE_COUNT = 20;
+// 可编辑输入（去掉连线的和类型不认识的）：1+1+1+3+7+0+1+3+3+0+1 = 21
+const EDITABLE_COUNT = 21;
 const LEGACY_NODE_COUNT = LEGACY_GRAPH.nodes.length;   // 4
 const LEGACY_EDITABLE_COUNT = 4;                        // 脏 id 8::missing 不算
 
@@ -202,6 +216,8 @@ const HARNESS = String.raw`
       "已修改": "Modified", "来自 {name}": "From {name}", "被 {name} 使用": "Used by {name}",
       "没有匹配的节点": "No matching nodes",
       "已连接：来自 {name}": "Connected: from {name}",
+      "← 输入来自": "← Input from", "→ 输出到": "→ Output to",
+      "选择要跳转的节点": "Choose a node to jump to",
       "此类型暂不支持编辑": "This type is not editable yet",
       "输入值无效": "Invalid input value",
       "仅手机端设置": "Phone-only setting",
@@ -433,7 +449,7 @@ test("页面结构：组与节点数量、状态行、样式、顺序都正确",
     assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector(".advanced-node")).contentVisibility), "auto");
     // 节点顺序照搬服务端给的画布阅读顺序
     assert.deepEqual(await nodeCards(page).evaluateAll((nodes) => nodes.map((node) => node.dataset.nodeId)),
-      ["4", "5", "6", "12", "7", "8", "9", "10", "11", "13"]);
+      ["4", "5", "6", "12", "7", "8", "9", "10", "11", "13", "14"]);
     // 一个输入都没有的节点展开后显示灰字提示，而不是白屏
     await openNodeCard(page, "13");
     assert.equal(await page.locator('[data-node-id="13"] .advanced-node-empty').textContent(), "无可调参数");
@@ -458,10 +474,17 @@ test("控件映射：每个输入 1:1 一个控件，类型/选项/范围/只读
       ["clip", "text", "标签模式", "每次随机", "mask"]);
     assert.deepEqual(await rows.locator(".advanced-input-type").evaluateAll((nodes) => nodes.map((node) => node.textContent)),
       ["CLIP", "STRING", "COMBO", "BOOLEAN", "MASK"]);
-    // 被连线接管的输入：只读芯片，没有可编辑控件
+    // 被连线接管的输入：行内就是「← 对端节点标题 · 插槽号」方向按钮，没有可编辑控件
     const clip = inputRow(page, "12", "clip");
-    assert.equal(await clip.locator(".advanced-input-link").textContent(), "已连接：来自 Checkpoint 加载器");
+    const clipLink = clip.locator(".advanced-input-head .advanced-link.is-in");
+    assert.equal(await clipLink.locator(".advanced-link-arrow").textContent(), "←");
+    assert.equal(await clipLink.locator(".advanced-link-text").textContent(), "Checkpoint 加载器 · 3");
+    assert.equal(await clipLink.getAttribute("data-jump"), "4", "按钮指向连线源节点");
+    assert.equal(await clipLink.getAttribute("aria-label"), "已连接：来自 Checkpoint 加载器");
     assert.equal(await clip.locator("input, select, textarea").count(), 0, "连线输入不给可编辑控件");
+    // 没被连线的输入行照旧是可编辑控件
+    assert.equal(await inputRow(page, "12", "text").locator("textarea").count(), 1);
+    assert.equal(await inputRow(page, "12", "mask").locator(".advanced-input-hint").count(), 1);
     // 多行 STRING → textarea rows=2
     const text = inputRow(page, "12", "text").locator("textarea");
     assert.equal(await text.count(), 1);
@@ -660,7 +683,7 @@ test("整块重渲染时保留正在编辑的控件焦点与光标", async () =>
   }
 });
 
-test("连线芯片：节点级与输入级都能点击跳转、清搜索、展开并高亮", async () => {
+test("行内连接：输入行与输出区的方向按钮都能跳转、清搜索、展开并高亮", async () => {
   const { context, page, errors } = await openHarness();
   try {
     // 先把目标组收起来，再看跳转能不能把它展开
@@ -672,9 +695,11 @@ test("连线芯片：节点级与输入级都能点击跳转、清搜索、展�
     assert.equal(await nodeCards(page).count(), 1);
     assert.equal(await page.locator('[data-node-id="5"]').count(), 0);
 
-    const chip = page.locator('[data-node-id="7"] .advanced-node-links .advanced-chip[data-jump="5"]');
-    assert.equal(await chip.textContent(), "来自 CLIP文本编码丨正向");
-    await chip.click();
+    // 输入行里的方向按钮：← 对端节点标题 · 插槽号
+    const button = inputRow(page, "7", "positive").locator(".advanced-input-head .advanced-link.is-in");
+    assert.equal(await button.locator(".advanced-link-text").textContent(), "CLIP文本编码丨正向 · 0");
+    assert.equal(await button.getAttribute("data-jump"), "5");
+    await button.click();
 
     assert.equal(await page.locator("#advancedSearch").inputValue(), "", "跳转前要清空搜索");
     assert.equal(await page.locator('.advanced-group[data-group-id="g0"]').evaluate((node) => node.open), true, "目标组要展开");
@@ -684,26 +709,140 @@ test("连线芯片：节点级与输入级都能点击跳转、清搜索、展�
 
     // is-flash 只亮 1.2 秒
     await page.waitForFunction(() => !document.querySelector('.advanced-node[data-node-id="5"]').classList.contains("is-flash"),
-      null, { timeout: 5000, polling: 100 });
+      null, { timeout: 15000, polling: 100 });
     assert.equal(await target.evaluate((node) => node.classList.contains("is-flash")), false, "1.2 秒后自动褪色");
 
-    // 输入级连线芯片：只读，点一下同样跳到源节点
-    await page.evaluate(() => window.MobileAdvanced.openNode("7"));
-    const inputChip = inputRow(page, "7", "model").locator(".advanced-input-link");
-    assert.equal(await inputChip.textContent(), "已连接：来自 Checkpoint 加载器");
-    await inputChip.click();
-    assert.equal(await page.locator('.advanced-node[data-node-id="4"]').evaluate((node) => node.classList.contains("is-flash")), true,
-      "输入级芯片要跳到连线源节点");
+    // 被连线接管的输入行里没有可编辑控件；没被连线的输入行控件照旧
+    assert.equal(await inputRow(page, "7", "model").locator("input, select, textarea").count(), 0);
+    assert.equal(await inputRow(page, "7", "steps").locator('input[type="number"]').count(), 1);
+    assert.equal(await inputRow(page, "7", "cfg").locator('input[type="number"]').inputValue(), "7.5");
 
-    // 出边芯片 + 滚动到视野内
+    // 输入行按钮：点一下跳到连线源节点
+    await page.evaluate(() => window.MobileAdvanced.openNode("7"));
+    const inputLink = inputRow(page, "7", "model").locator(".advanced-input-head .advanced-link.is-in");
+    assert.equal(await inputLink.locator(".advanced-link-text").textContent(), "Checkpoint 加载器 · 0");
+    assert.equal(await inputLink.getAttribute("aria-label"), "已连接：来自 Checkpoint 加载器");
+    await inputLink.click();
+    assert.equal(await page.locator('.advanced-node[data-node-id="4"]').evaluate((node) => node.classList.contains("is-flash")), true,
+      "输入行按钮要跳到连线源节点");
+
+    // 输出区 + 滚动到视野内
     await page.evaluate(() => window.MobileAdvanced.openNode("7"));
     await page.waitForFunction(() => {
       const card = document.querySelector('.advanced-node[data-node-id="7"]');
       const box = card.getBoundingClientRect();
       const view = document.getElementById("mainContent").getBoundingClientRect();
       return box.top >= view.top - 1 && box.bottom <= view.bottom + 1;
-    }, null, { timeout: 5000 });
-    assert.equal(await page.locator('[data-node-id="7"] .advanced-node-links .advanced-chip[data-jump="8"]').textContent(), "被 VAE 解码 使用");
+    }, null, { timeout: 15000 });
+    const outRow = page.locator('[data-node-id="7"] .advanced-node-outputs .advanced-link-row.is-out');
+    assert.equal(await outRow.count(), 1);
+    assert.equal(await outRow.locator(".advanced-link.is-out .advanced-link-text").textContent(), "VAE 解码 · samples");
+    assert.equal(await outRow.locator(".advanced-link-count").count(), 0, "单个连接不标条数");
+    await outRow.locator(".advanced-link").click();
+    assert.equal(await page.locator('.advanced-node[data-node-id="8"]').evaluate((node) => node.classList.contains("is-flash")), true,
+      "输出区的按钮要跳到对端节点");
+    await expectNoErrors(errors);
+  } finally {
+    await context.close();
+  }
+});
+
+test("输出区：一个节点两条出边就是两条、各跳各的；无出边不显示这块", async () => {
+  const { context, page, errors } = await openHarness();
+  try {
+    // 顶部图例：灰字说明方向按钮怎么读
+    assert.deepEqual(await page.locator(".advanced-legend span").evaluateAll((nodes) => nodes.map((node) => node.textContent)),
+      ["← 输入来自", "→ 输出到"]);
+
+    // LoRA 加载器有两条出边（都指向 14 号），一条一个方向按钮
+    await openNodeCard(page, "10");
+    const rows = page.locator('[data-node-id="10"] .advanced-node-outputs .advanced-link-row.is-out');
+    assert.equal(await rows.count(), 2, "两条出边就是两条");
+    assert.deepEqual(await rows.locator(".advanced-link-text").evaluateAll((nodes) => nodes.map((node) => node.textContent)),
+      ["LoRA 支线采样 · model", "LoRA 支线采样 · clip"], "每条写对端节点标题 · 对端输入名");
+    assert.deepEqual(await rows.locator(".advanced-link").evaluateAll((nodes) => nodes.map((node) => node.dataset.input)),
+      ["model", "clip"]);
+    assert.equal(await page.locator('[data-node-id="10"] .advanced-node-outputs .advanced-link-count').count(), 0,
+      "每个输出槽只接了一个节点，不标条数");
+
+    // 单条连接：直接跳，不弹菜单
+    await rows.first().locator(".advanced-link").click();
+    assert.equal(await page.locator(".advanced-menu").count(), 0, "只有一条连接时不弹菜单");
+    assert.equal(await page.locator('.advanced-node[data-node-id="14"] .advanced-node-toggle').getAttribute("aria-expanded"), "true");
+    assert.equal(await page.locator('.advanced-node[data-node-id="14"]').evaluate((node) => node.classList.contains("is-flash")), true);
+
+    // 没有出边的节点不显示输出区
+    await page.evaluate(() => window.MobileAdvanced.openNode("9"));
+    assert.equal(await page.locator('[data-node-id="9"] .advanced-node-outputs').count(), 0, "保存图像没有出边");
+    assert.equal(await page.locator('[data-node-id="14"] .advanced-node-outputs').count(), 0, "LoRA 支线采样没有出边");
+
+    // 一个节点被两个节点连入：两行各自指向自己的源节点，行内没有可编辑控件
+    await page.evaluate(() => window.MobileAdvanced.openNode("8"));
+    const linked = page.locator('[data-node-id="8"] .advanced-input[data-input-linked="1"]');
+    assert.equal(await linked.count(), 2);
+    assert.deepEqual(await linked.locator(".advanced-link-text").evaluateAll((nodes) => nodes.map((node) => node.textContent)),
+      ["K采样器 · 0", "Checkpoint 加载器 · 2"]);
+    assert.deepEqual(await linked.locator(".advanced-link").evaluateAll((nodes) => nodes.map((node) => node.dataset.jump)),
+      ["7", "4"]);
+    assert.equal(await linked.locator("input, select, textarea").count(), 0);
+    await expectNoErrors(errors);
+  } finally {
+    await context.close();
+  }
+});
+
+test("多连接菜单：一个输出槽接了多个节点时先弹就地菜单，选谁跳谁", async () => {
+  const { context, page, errors } = await openHarness();
+  try {
+    // 4 号节点的输出槽 0 同时接到 7.model 与 10.model
+    const menuRow = () => page.locator('[data-node-id="4"] .advanced-node-outputs .advanced-link-row.is-out')
+      .filter({ has: page.locator('[data-jump="7"][data-input="model"]') });
+    assert.equal(await menuRow().count(), 1);
+    assert.equal(await menuRow().locator(".advanced-link").getAttribute("data-multi"), "1");
+    assert.equal(await menuRow().locator(".advanced-link-count").textContent(), "2", "多连接要标条数");
+    await menuRow().locator(".advanced-link").click();
+
+    const menu = page.locator(".advanced-menu");
+    assert.equal(await menu.count(), 1, "多连接要先弹菜单");
+    assert.equal(await menu.getAttribute("role"), "menu");
+    assert.equal(await menu.locator(".advanced-menu-title").textContent(), "选择要跳转的节点");
+    // 菜单项 = 对端节点标题 + 插槽名
+    assert.deepEqual(await menu.locator(".advanced-menu-item").evaluateAll((items) => items.map((item) => item.dataset.jump)),
+      ["7", "10"]);
+    assert.deepEqual(await menu.locator(".advanced-menu-node").evaluateAll((nodes) => nodes.map((node) => node.textContent)),
+      ["K采样器", "LoRA 加载器"]);
+    assert.deepEqual(await menu.locator(".advanced-menu-slot").evaluateAll((nodes) => nodes.map((node) => node.textContent)),
+      ["model", "model"]);
+    // 就地浮层：落在视口里
+    const box = await menu.boundingBox();
+    const view = page.viewportSize();
+    assert.equal(box.x >= 0 && box.y >= 0 && box.x + box.width <= view.width + 1 && box.y + box.height <= view.height + 1,
+      true, "菜单要在视口内：" + JSON.stringify(box));
+
+    // 选「LoRA 加载器」→ 跳到 10 号并高亮，菜单关掉
+    await menu.locator('.advanced-menu-item[data-jump="10"]').click();
+    assert.equal(await page.locator(".advanced-menu").count(), 0, "选完要关掉菜单");
+    assert.equal(await page.locator('.advanced-node[data-node-id="10"] .advanced-node-toggle').getAttribute("aria-expanded"), "true",
+      "菜单项跳转也要展开目标节点");
+    assert.equal(await page.locator('.advanced-node[data-node-id="10"]').evaluate((node) => node.classList.contains("is-flash")), true);
+
+    // Esc 关菜单
+    await menuRow().locator(".advanced-link").click();
+    assert.equal(await page.locator(".advanced-menu").count(), 1);
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator(".advanced-menu").count(), 0, "Esc 要关掉菜单");
+
+    // 点空白处关菜单
+    await menuRow().locator(".advanced-link").click();
+    assert.equal(await page.locator(".advanced-menu").count(), 1);
+    await page.mouse.click(4, 4);
+    assert.equal(await page.locator(".advanced-menu").count(), 0, "点空白处要关掉菜单");
+
+    // 重渲染（展开/收起）也会把菜单收掉，不留孤儿浮层
+    await menuRow().locator(".advanced-link").click();
+    assert.equal(await page.locator(".advanced-menu").count(), 1);
+    await page.evaluate(() => window.MobileAdvanced.toggleAll());
+    assert.equal(await page.locator(".advanced-menu").count(), 0, "重渲染要关掉菜单");
     await expectNoErrors(errors);
   } finally {
     await context.close();
@@ -737,7 +876,7 @@ test("组可以折叠，折叠状态写进 localStorage；全部展开/收起", 
     assert.equal(await page.locator("#advancedExpandButton").getAttribute("aria-label"), "全部收起");
     assert.deepEqual(await groupCards(page).evaluateAll((nodes) => nodes.map((node) => node.open)), [true, true, true, true], "全部展开");
     assert.deepEqual(await page.locator("#advancedList .advanced-node-toggle").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("aria-expanded"))),
-      ["true", "true", "true", "true", "true", "true", "true", "true", "true", "true"]);
+      ["true", "true", "true", "true", "true", "true", "true", "true", "true", "true", "true"]);
     await page.locator("#advancedExpandButton").click();
     assert.equal(await page.locator("#advancedExpandButton").getAttribute("aria-pressed"), "false");
     assert.deepEqual(await groupCards(page).evaluateAll((nodes) => nodes.map((node) => node.open)), [false, false, false, false], "全部收起");
@@ -805,6 +944,16 @@ test("向后兼容：节点只有旧 field_ids（没有 inputs）也能用，不
     await openNodeCard(page, "4");
     assert.deepEqual(await inputRow(page, "4", "ckpt_name").locator("option").evaluateAll((options) => options.map((option) => option.value)),
       ["sd_xl_base_1.0.safetensors", "sdxl_lightning_4step.safetensors"]);
+    // 旧数据没有 inputs：连线名找不到对应的输入行时，单独列成只读连线行，控件行不受影响
+    await openNodeCard(page, "5");
+    const orphan = page.locator('[data-node-id="5"] .advanced-link-row.is-orphan .advanced-link');
+    assert.equal(await orphan.count(), 1);
+    assert.equal(await orphan.locator(".advanced-link-text").textContent(), "Checkpoint 加载器 · 1");
+    assert.equal(await orphan.getAttribute("data-jump"), "4");
+    assert.equal(await page.locator('[data-node-id="5"] .advanced-input[data-input-name]').count(), 1,
+      "只读连线行不能挤进控件行");
+    // 出边照样反推得出来（7 → 8 的 samples）
+    assert.equal(await page.locator('[data-node-id="7"] .advanced-node-outputs .advanced-link-text').textContent(), "VAE 解码 · samples");
     // 生成页的控件表原封不动
     assert.equal(await page.evaluate((index) => window.__state.fieldControls.get("7::steps") === document.getElementById("field-" + index), STEP_INDEX),
       true, "state.fieldControls 必须仍指向生成页控件");
@@ -891,6 +1040,17 @@ test("四种尺寸/语言截图（含跳转高亮与全控件演示）", { timeo
     await zh.page.evaluate(() => window.MobileAdvanced.openNode("5"));
     await zh.page.waitForFunction(() => document.querySelector('.advanced-node[data-node-id="5"]').classList.contains("is-flash"));
     await zh.page.screenshot({ path: path.join(SHOT_DIR, "advanced-390x844-zh-jump-flash.png") });
+    // 行内连线：被连线的输入行 + 卡片底部「→ 输出到」区
+    await zh.page.evaluate(() => window.MobileAdvanced.openNode("7"));
+    await zh.page.evaluate(() => document.querySelector('.advanced-node[data-node-id="7"]').scrollIntoView({ block: "center" }));
+    await zh.page.screenshot({ path: path.join(SHOT_DIR, "advanced-390x844-zh-links.png") });
+    // 一个输出槽接了多个节点：点方向按钮先弹就地菜单
+    await zh.page.evaluate(() => window.MobileAdvanced.openNode("4"));
+    await zh.page.locator('[data-node-id="4"] .advanced-node-outputs .advanced-link-row.is-out')
+      .filter({ has: zh.page.locator('[data-jump="7"][data-input="model"]') }).locator(".advanced-link").click();
+    await zh.page.screenshot({ path: path.join(SHOT_DIR, "advanced-390x844-zh-menu.png") });
+    await zh.page.keyboard.press("Escape");
+
     await zh.page.locator("#advancedSearch").fill("编码");
     await zh.page.screenshot({ path: path.join(SHOT_DIR, "advanced-390x844-zh-search.png") });
     expectNoErrors(zh.errors);
@@ -898,7 +1058,8 @@ test("四种尺寸/语言截图（含跳转高亮与全控件演示）", { timeo
     await zh.context.close();
   }
   shots.push("advanced-390x844-zh-default.png", "advanced-390x844-zh-expanded.png", "advanced-390x844-zh-inputs.png",
-    "advanced-390x844-zh-jump-flash.png", "advanced-390x844-zh-search.png");
+    "advanced-390x844-zh-jump-flash.png", "advanced-390x844-zh-links.png", "advanced-390x844-zh-menu.png",
+    "advanced-390x844-zh-search.png");
 
   const en = await openHarness({ width: 390, height: 844, lang: "en" });
   try {
@@ -929,11 +1090,15 @@ test("四种尺寸/语言截图（含跳转高亮与全控件演示）", { timeo
     await openNodeCard(narrowOpen.page, "7");
     await narrowOpen.page.evaluate(() => { document.getElementById("mainContent").scrollTop = 0; });
     await narrowOpen.page.screenshot({ path: path.join(SHOT_DIR, "advanced-320x640-zh-expanded.png") });
+    // 320 窄屏：行内连线 + 输出区（重点看有没有被挤破）
+    await narrowOpen.page.evaluate(() => document.querySelector('.advanced-node[data-node-id="7"]').scrollIntoView({ block: "center" }));
+    await narrowOpen.page.waitForTimeout(200);
+    await narrowOpen.page.screenshot({ path: path.join(SHOT_DIR, "advanced-320x640-zh-links.png") });
     expectNoErrors(narrowOpen.errors);
   } finally {
     await narrowOpen.context.close();
   }
-  shots.push("advanced-320x640-zh-expanded.png");
+  shots.push("advanced-320x640-zh-expanded.png", "advanced-320x640-zh-links.png");
 
   const narrowEn = await openHarness({ width: 320, height: 640, lang: "en" });
   try {

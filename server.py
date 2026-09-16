@@ -1443,6 +1443,239 @@ def _apply_submitted_input(prompt: dict[str, Any], key: str, value: Any) -> tupl
     return True, converted
 
 
+# ---- 手机 → 电脑端指令通道 ----------------------------------------------
+# 手机端拿到的是电脑端同步过来的**快照**（API prompt + 原生 workflow）：在「高级」页改一个
+# 值只改得动手机本地的 state.values，电脑画布上的节点毫无变化——自制节点的面板由电脑端
+# 自己的代码画（例如「标签模式」开关要 node 自己的 widget.callback 去 setVisible），
+# 所以现象就是「点了没反应」。这类改动必须写成一条指令排进待办，由电脑端 web/sync.js 在
+# 它自己的画布上照做，再把它自己的新状态同步回手机。
+DESKTOP_COMMANDS_PATH = PLUGIN_ROOT / ".runtime" / "desktop_commands.json"
+DESKTOP_COMMANDS_MAX = 50        # 只留最近这么多条：电脑端一直不开也不会无限堆积
+DESKTOP_COMMAND_ACK_MAX = 200    # 一次 ack 最多删这么多条
+DESKTOP_COMMAND_KEY_MAX_LENGTH = 200
+DESKTOP_COMMAND_ID_MAX_LENGTH = 64
+DESKTOP_COMMAND_VALUE_MAX_LENGTH = SUBMIT_TEXT_MAX_LENGTH   # 字符串 200000，和提交路径同一条线
+DESKTOP_COMMAND_FIELDS = frozenset({"workflow_id", "node_id", "input", "value"})
+# 指令的身份是「节点id::输入名」，形状沿用提交路径那套约束（节点号只允许 ComfyUI 真会
+# 出现的字符、输入名不许带冒号、两段各自封顶），只多容忍一个单冒号写法。
+DESKTOP_COMMAND_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,64}::?[^:]{1,128}$")
+
+_DESKTOP_COMMANDS_LOCK = threading.RLock()
+_DESKTOP_COMMANDS: list[dict[str, Any]] | None = None   # None = 还没从磁盘读过
+
+
+def _desktop_command_key(node_id: Any, input_name: Any) -> str | None:
+    """把 (节点id, 输入名) 拼成去重用的键；形状不合法（空、太长、字符不对）返回 None。"""
+    node_id = "" if node_id is None else str(node_id)
+    input_name = "" if input_name is None else str(input_name)
+    if not node_id or not input_name:
+        return None
+    if len(node_id) > 64 or len(input_name) > 128:
+        return None
+    if re.search(r"[\x00-\x1f]", node_id) or re.search(r"[\x00-\x1f]", input_name):
+        return None
+    key = f"{node_id}::{input_name}"
+    if len(key) > DESKTOP_COMMAND_KEY_MAX_LENGTH:
+        return None
+    if DESKTOP_COMMAND_KEY_PATTERN.fullmatch(key) is None:
+        return None
+    return key
+
+
+def _desktop_command_value(value: Any) -> tuple[bool, Any]:
+    """指令的值只收标量（布尔/整数/浮点/字符串/空）；字符串封顶，数组和对象一律拒。
+
+    这些都是控件的真实值形态：开关是布尔、数字框是数字、文本框是字符串。放数组和对象进来
+    等于让手机端凭一条指令往画布控件里塞任意结构，没必要也不安全。
+    """
+    if value is None or isinstance(value, (bool, int)):
+        return True, value
+    if isinstance(value, float):
+        return (True, value) if math.isfinite(value) else (False, None)
+    if isinstance(value, str):
+        return (True, value) if len(value) <= DESKTOP_COMMAND_VALUE_MAX_LENGTH else (False, None)
+    return False, None
+
+
+def _desktop_command_from_payload(record: Any, payload: Any) -> tuple[dict[str, Any] | None, str, str]:
+    """校验一条手机端指令，返回 (指令内容, 错误文案, 原因)。
+
+    安全底线和提交路径一致：只认列出的四个字段，节点必须真实存在于该工作流的 prompt 里，
+    输入名必须是这个节点 inputs 里已有的键——绝不允许凭指令内容造出新节点或新输入。
+    原因（payload/node/input/value）是给手机端调试看的机器可读标记，提示语本身走词典。
+    """
+    if not isinstance(payload, dict):
+        return None, "参数格式错误", "payload"
+    if set(payload) - DESKTOP_COMMAND_FIELDS:
+        return None, "参数格式错误", "payload"
+    node_id = payload.get("node_id")
+    if isinstance(node_id, bool) or not isinstance(node_id, (str, int)):
+        return None, "参数格式错误", "payload"
+    input_name = payload.get("input")
+    if not isinstance(input_name, str):
+        return None, "参数格式错误", "payload"
+    if _desktop_command_key(node_id, input_name) is None:
+        return None, "参数格式错误", "payload"
+    if "value" not in payload:
+        return None, "参数格式错误", "payload"
+    valid, value = _desktop_command_value(payload.get("value"))
+    if not valid:
+        return None, "参数格式错误", "value"
+    prompt = record.get("prompt") if isinstance(record, dict) else None
+    if not isinstance(prompt, dict):
+        return None, "工作流不存在", "workflow"
+    node = prompt.get(str(node_id))
+    if not isinstance(node, dict):
+        return None, "没有匹配的节点", "node"
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict) or input_name not in inputs:
+        return None, "此类型暂不支持编辑", "input"
+    # 被连线接管的输入在画布上是插槽不是控件，写值等于把线剪断——和提交路径同一条底线。
+    if _is_link(inputs[input_name], prompt):
+        return None, "此类型暂不支持编辑", "input"
+    return {"node_id": str(node_id), "input": input_name, "value": value}, "", ""
+
+
+def _desktop_command_stored_ok(item: Any) -> bool:
+    """磁盘上的旧条目也要过一遍形状校验：坏数据宁可丢掉，也不能喂给电脑端去改画布。"""
+    if not isinstance(item, dict):
+        return False
+    if not isinstance(item.get("workflow_id"), str) or not item["workflow_id"]:
+        return False
+    command_id = item.get("id")
+    if not isinstance(command_id, str) or not command_id or len(command_id) > DESKTOP_COMMAND_ID_MAX_LENGTH:
+        return False
+    if _desktop_command_key(item.get("node_id"), item.get("input")) is None:
+        return False
+    return _desktop_command_value(item.get("value"))[0]
+
+
+def _desktop_commands_read_disk() -> list[dict[str, Any]]:
+    """从 .runtime/desktop_commands.json 读队列；文件没有/坏了都当空队列。调用方持锁。"""
+    try:
+        data = _read_json(DESKTOP_COMMANDS_PATH)
+    except (OSError, ValueError):
+        return []
+    items = data.get("commands")
+    if not isinstance(items, list):
+        return []
+    return [dict(item) for item in items if _desktop_command_stored_ok(item)][-DESKTOP_COMMANDS_MAX:]
+
+
+def _desktop_commands_unlocked() -> list[dict[str, Any]]:
+    """取内存里的队列；第一次访问时从磁盘读回来（服务重启后待办不丢）。调用方持锁。"""
+    global _DESKTOP_COMMANDS
+    if _DESKTOP_COMMANDS is None:
+        _DESKTOP_COMMANDS = _desktop_commands_read_disk()
+    return _DESKTOP_COMMANDS
+
+
+def _desktop_commands_persist(commands: list[dict[str, Any]]) -> None:
+    """落盘。写失败只记日志：队列本体在内存里，电脑端照样领得到，不能因此把接口打回去。"""
+    try:
+        _write_json_atomic(DESKTOP_COMMANDS_PATH, {"schema": 1, "commands": commands})
+    except OSError:
+        LOG.warning("[Mobile Remote] desktop command queue not persisted", exc_info=True)
+
+
+def _desktop_commands_count() -> int:
+    with _DESKTOP_COMMANDS_LOCK:
+        return len(_desktop_commands_unlocked())
+
+
+def _desktop_commands_pending(workflow_id: str) -> list[dict[str, Any]]:
+    """某个工作流还没被电脑端执行的指令。领了**不删**：等电脑端 ack 说它真落到画布上了。"""
+    with _DESKTOP_COMMANDS_LOCK:
+        return [
+            {"id": item["id"], "node_id": item["node_id"], "input": item["input"], "value": item["value"]}
+            for item in _desktop_commands_unlocked()
+            if item.get("workflow_id") == workflow_id
+        ]
+
+
+def _desktop_command_enqueue(command: dict[str, Any]) -> int:
+    """追加一条待办；同 工作流+节点+输入 只留最新一条，总数封顶。返回队列长度。
+
+    「只留最新」是必须的：手机上把开关拨来拨去会产生一串互相矛盾的旧值，
+    电脑端照单全收的话最终状态取决于到达顺序——只留最后一条才是用户的真实意图。
+    """
+    global _DESKTOP_COMMANDS
+    key = (command["workflow_id"], _desktop_command_key(command["node_id"], command["input"]))
+    with _DESKTOP_COMMANDS_LOCK:
+        commands = [
+            item for item in _desktop_commands_unlocked()
+            if (item.get("workflow_id"), _desktop_command_key(item.get("node_id"), item.get("input"))) != key
+        ]
+        commands.append(dict(command))
+        del commands[:-DESKTOP_COMMANDS_MAX]
+        _DESKTOP_COMMANDS = commands
+        _desktop_commands_persist(commands)
+        return len(commands)
+
+
+def _desktop_commands_ack(ids: list[str]) -> int:
+    """删掉电脑端确认执行过的指令，返回删掉的条数。"""
+    global _DESKTOP_COMMANDS
+    wanted = {str(item) for item in ids}
+    if not wanted:
+        return 0
+    with _DESKTOP_COMMANDS_LOCK:
+        commands = _desktop_commands_unlocked()
+        kept = [item for item in commands if item.get("id") not in wanted]
+        removed = len(commands) - len(kept)
+        if removed:
+            _DESKTOP_COMMANDS = kept
+            _desktop_commands_persist(kept)
+        return removed
+
+
+def _desktop_command_submit(payload: Any) -> tuple[dict[str, Any] | None, str, int, str]:
+    """手机端提交一条指令：校验 → 入队。返回 (指令, 错误文案, HTTP 状态, 原因)。"""
+    if not isinstance(payload, dict):
+        return None, "参数格式错误", 400, "payload"
+    workflow_id = str(payload.get("workflow_id", ""))
+    try:
+        record = _load_record(workflow_id)
+    except ValueError:
+        return None, "工作流编号无效", 400, "workflow"
+    except FileNotFoundError:
+        return None, "工作流不存在", 404, "workflow"
+    command, error, reason = _desktop_command_from_payload(record, payload)
+    if command is None:
+        return None, error, 400, reason
+    command.update({"id": uuid.uuid4().hex, "workflow_id": workflow_id, "at": int(time.time() * 1000)})
+    _desktop_command_enqueue(command)
+    return command, "", 200, ""
+
+
+def _desktop_commands_pending_payload(workflow_id: Any) -> tuple[dict[str, Any] | None, str]:
+    """电脑端领取待办的响应体。
+
+    工作流编号只校验形状，不要求记录还在：记录被删掉时不该让整轮轮询变成 404 噪音。
+    """
+    workflow_id = str(workflow_id or "")
+    try:
+        _record_path(workflow_id)
+    except ValueError:
+        return None, "工作流编号无效"
+    return {"ok": True, "commands": _desktop_commands_pending(workflow_id)}, ""
+
+
+def _desktop_commands_ack_payload(payload: Any) -> tuple[dict[str, Any] | None, str]:
+    """电脑端确认执行的响应体：删指令、回报剩余条数。"""
+    if not isinstance(payload, dict) or set(payload) - {"ids"}:
+        return None, "参数格式错误"
+    raw = payload.get("ids")
+    if not isinstance(raw, list) or len(raw) > DESKTOP_COMMAND_ACK_MAX:
+        return None, "参数格式错误"
+    ids: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item or len(item) > DESKTOP_COMMAND_ID_MAX_LENGTH:
+            return None, "参数格式错误"
+        ids.append(item)
+    return {"ok": True, "removed": _desktop_commands_ack(ids), "pending": _desktop_commands_count()}, ""
+
+
 async def _enqueue_prompt(
     prompt: dict[str, Any],
     client_id: str,
@@ -3281,6 +3514,45 @@ def register_routes() -> None:
         except OSError as exc:
             return _json_error("记录当前工作流失败", 500, str(exc))
         return web.json_response({"ok": True, "sources": sources})
+
+    @routes.post("/mobile/api/desktop/commands")
+    async def mobile_submit_desktop_command(request: web.Request) -> web.Response:
+        """手机端「高级」页改了值：排一条指令，等电脑端在它自己的画布上照做。
+
+        服务端只负责排队和校验，绝不自己去碰画布；真正的应用永远发生在用户自己那台电脑上。
+        """
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, web.HTTPBadRequest):
+            payload = None
+        command, error, status, reason = _desktop_command_submit(payload)
+        if command is None:
+            return _json_error(error, status, {"reason": reason})
+        LOG.info(
+            "[Mobile Remote] desktop command queued: node %s %s",
+            command["node_id"], command["input"],
+        )
+        return web.json_response({"ok": True, "pending": _desktop_commands_count()}, headers=NO_CACHE)
+
+    @routes.get("/mobile/api/desktop/commands")
+    async def mobile_pending_desktop_commands(request: web.Request) -> web.Response:
+        """电脑端扩展领取待办（约 1 秒一次）。返回未执行的指令，领了不删。"""
+        body, error = _desktop_commands_pending_payload(request.query.get("workflow_id", ""))
+        if body is None:
+            return _json_error(error)
+        return web.json_response(body, headers=NO_CACHE)
+
+    @routes.post("/mobile/api/desktop/commands/ack")
+    async def mobile_ack_desktop_commands(request: web.Request) -> web.Response:
+        """电脑端确认这些指令已经落到画布上（或确认画布上找不到对应节点），可以删了。"""
+        try:
+            payload = await request.json()
+        except (json.JSONDecodeError, web.HTTPBadRequest):
+            payload = None
+        body, error = _desktop_commands_ack_payload(payload)
+        if body is None:
+            return _json_error(error)
+        return web.json_response(body, headers=NO_CACHE)
 
     @routes.post("/mobile/api/workflows/sync")
     async def mobile_sync_workflow(request: web.Request) -> web.Response:

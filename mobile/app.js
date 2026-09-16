@@ -241,7 +241,12 @@
         state,
         renderField,
         updateFieldValue,
-        onEdit: () => { advancedEdited = true; },
+        onEdit: (field, value) => {
+          advancedEdited = true;
+          // 「高级」页改的值必须送回电脑端：那边的自制节点要靠自己的回调重画面板，
+          // 光改手机这份快照是改不动它的。
+          if (field) pushDesktopCommand(field.node_id, field.input, value);
+        },
         view: "view-advanced",
       });
     } catch (error) {
@@ -325,6 +330,62 @@
     state.values[field.id] = value;
     saveDraft();
     if (field.input === "width" || field.input === "height") syncSizePresetSelection();
+  }
+
+  // ---- 手机 → 电脑端：把「高级」页的改动送回电脑端画布 --------------------
+  // 手机端拿到的是电脑端同步过来的**快照**：改值只写进 state.values，电脑画布上的节点毫无变化
+  // （自制节点的面板由电脑端自己画，开关不送回去就永远没反应）。所以这里把改动写成一条指令
+  // 发给服务端排队，由电脑端 web/sync.js 在它自己的画布上照做，再把它那边的新状态同步回来。
+  const DESKTOP_COMMAND_THROTTLE_MS = 1000;
+  const desktopCommands = new Map();   // "节点::输入名" → 最后一次改动（同一格的中间值直接覆盖）
+  let desktopCommandTimer = 0;
+
+  // 只有服务端认得下的输入才值得发。graph 是服务端按当前 prompt 建的，和服务端
+  // _desktop_command_from_payload 的校验同源：前端专有控件（种子模式那种）不在 prompt 里，
+  // 发了也会被拒。拿不到 graph 就不拦，交给服务端判断。
+  function desktopInputExists(nodeId, input) {
+    const nodes = state.workflow?.graph?.nodes;
+    if (!Array.isArray(nodes)) return true;
+    const node = nodes.find((item) => String(item?.id) === String(nodeId));
+    if (!node) return false;
+    const inputs = Array.isArray(node.inputs) ? node.inputs : [];
+    // 被连线接管的输入是插槽不是控件，送过去也会被服务端拒。
+    return inputs.some((entry) => String(entry?.name) === String(input) && !entry.frontend && !entry.link);
+  }
+
+  function flushDesktopCommands() {
+    desktopCommandTimer = 0;
+    if (!desktopCommands.size) return;
+    const queued = [...desktopCommands.values()];
+    desktopCommands.clear();
+    for (const command of queued) {
+      requestJson("/mobile/api/desktop/commands", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(command),
+      }).then((body) => {
+        // 电脑端会自己领取并应用，然后把它那边的新状态同步回来。
+        console.debug("[Mobile Remote] desktop command queued", command.node_id, command.input, body?.pending ?? 0);
+      }).catch((error) => {
+        // 电脑端没开着、工作流没同步过、或走公网隧道被挡：静默处理，绝不打扰用户。
+        console.debug("[Mobile Remote] desktop command skipped", command.node_id, command.input, error?.message || error);
+      });
+    }
+  }
+
+  // 高级页改一个值就调这里：同一 (节点, 输入) 1 秒内只发最后一次。
+  function pushDesktopCommand(nodeId, input, value) {
+    const workflowId = state.workflow?.id;
+    const id = String(nodeId ?? "");
+    const name = String(input ?? "");
+    if (!workflowId || !id || !name) return;
+    if (!desktopInputExists(id, name)) {
+      console.debug("[Mobile Remote] desktop command skipped: 工作流里没有这个输入", id, name);
+      return;
+    }
+    desktopCommands.set(id + "::" + name, { workflow_id: workflowId, node_id: id, input: name, value });
+    if (desktopCommandTimer) return;
+    desktopCommandTimer = window.setTimeout(flushDesktopCommands, DESKTOP_COMMAND_THROTTLE_MS);
   }
 
   function autoGrow(area) {
@@ -1008,7 +1069,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609307", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610121", { cache: "no-store" });
       if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];

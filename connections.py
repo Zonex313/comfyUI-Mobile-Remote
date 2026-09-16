@@ -62,6 +62,9 @@ GET_PATHS = (
 )
 POST_PATHS = (
     r"/mobile/api/(?:settings|jobs|favorites/toggle|outputs/delete)",
+    # 手机把节点设置改动送回电脑端（自制节点的开关要靠它才能真正生效）。
+    # 末尾的 (?!/) 是关键：ack 只能由电脑端本地调用，绝不能被公网隧道放行。
+    r"/mobile/api/desktop/commands(?!/)",
     r"/mobile/api/jobs/[A-Za-z0-9_-]{1,128}/(?:cancel|retry)", r"/upload/image",
 )
 VIEW_TYPES = {"input", "output", "temp"}

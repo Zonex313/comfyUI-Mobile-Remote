@@ -47,6 +47,17 @@ class MobileAssetTests(unittest.TestCase):
         missing = [name for name in sorted(set(server._MOBILE_ASSET_FILES)) if not compiled.search("/mobile/assets/" + name)]
         self.assertEqual(missing, [], f"这些资源过不了公网隧道白名单：{missing}")
 
+    def test_desktop_command_route_is_tunnel_safe(self):
+        """手机改节点设置要能过公网隧道，但确认接口(ack)绝不能暴露。"""
+        import re as _re
+        text = (ROOT / "connections.py").read_text(encoding="utf-8")
+        match = _re.search(r"POST_PATHS = \((.*?)\n\)", text, _re.S)
+        self.assertIsNotNone(match, "connections.py 里找不到 POST_PATHS")
+        pattern = "|".join(_re.findall(r'"(.*?)"', match.group(1)))
+        compiled = _re.compile(pattern)
+        self.assertTrue(compiled.match("/mobile/api/desktop/commands"), "桌面指令接口没放行，隧道用户改不动节点")
+        self.assertFalse(compiled.match("/mobile/api/desktop/commands/ack"), "ack 接口被暴露到公网了")
+
     def test_advanced_page_assets_are_served(self):
         # 「高级」页依赖这两个文件，漏一个就是整页空白
         self.assertIn("advanced.js", server._MOBILE_ASSET_FILES)
