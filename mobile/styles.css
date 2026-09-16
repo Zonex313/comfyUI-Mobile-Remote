@@ -1085,18 +1085,22 @@ svg {
   overflow: visible;
 }
 
+/* 右上一排：左边是「停止全部」按钮，右边是「运行 / 排队」两行数字。 */
 .topbar-aside {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: center;
-  gap: 1px;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
   text-align: right;
   flex: 0 0 auto;
   min-width: 0;
 }
 
+/* 两行：第一行「运行 N」，第二行「排队 M」。 */
 .meta-counts {
+  display: grid;
+  gap: 1px;
   color: var(--text-muted);
   font-size: 10px;
   line-height: 1.25;
@@ -1176,26 +1180,6 @@ svg {
   }
 }
 
-.settings-sync-label {
-  flex: 0 0 auto;
-  color: var(--text-secondary);
-  font-size: 10px;
-  line-height: 1.25;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  text-align: right;
-}
-
-.settings-sync-label[data-state="pending"],
-.settings-sync-label[data-state="saving"] {
-  color: var(--warning);
-}
-
-.settings-sync-label[data-state="conflict"],
-.settings-sync-label[data-state="offline"] {
-  color: var(--danger);
-}
-
 .settings-sync-note {
   margin: 10px 0 0;
   color: var(--text-secondary);
@@ -1217,9 +1201,21 @@ svg {
 }
 
 .topbar .stop-button {
+  width: 30px;
+  height: 30px;
   border: 1px solid rgba(255, 125, 138, 0.34);
+  border-radius: 9px;
   color: #ff9da6;
   background: var(--danger-surface);
+}
+
+.topbar .stop-button svg {
+  width: 15px;
+  height: 15px;
+}
+
+.topbar .stop-button:disabled {
+  opacity: 0.4;
 }
 
 .topbar .live-preview {
@@ -1229,6 +1225,13 @@ svg {
   margin: 0;
   border-radius: 8px;
   object-fit: cover;
+}
+
+#view-advanced h2 {
+  margin: 10px 0 6px;
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 690;
 }
 
 .section-heading {
@@ -1305,17 +1308,6 @@ svg {
   font-weight: 680;
   line-height: 1.15;
   white-space: nowrap;
-}
-
-.section-meta {
-  min-width: 0;
-  flex: 0 1 auto;
-  margin-right: auto;
-  color: var(--text-muted);
-  font-size: 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .section-heading .icon-button {
@@ -1942,221 +1934,6 @@ select:focus {
   line-height: 1.55;
 }
 
-.job-list {
-  padding: 2px 0 12px;
-}
-
-/* 队列卡片：两行信息（模型名 + 提示词），其余挤在右列，尽量压低高度。 */
-.job-card {
-  margin-bottom: 6px;
-  padding: 7px 9px;
-  display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  border-radius: 12px;
-  background: rgba(16, 19, 34, 0.75);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  transition: border-color 200ms ease, box-shadow 200ms ease, transform 140ms ease;
-}
-
-.job-card.is-in_progress {
-  border-color: rgba(126, 180, 212, 0.42);
-  background: linear-gradient(135deg, rgba(22, 28, 42, 0.88), rgba(16, 19, 34, 0.82));
-  animation: queue-card-breathe 2.8s ease-in-out infinite;
-}
-
-@keyframes queue-card-breathe {
-  0%, 100% {
-    box-shadow: 0 0 16px rgba(126, 180, 212, 0.14), 0 6px 20px rgba(0, 0, 0, 0.32);
-  }
-  50% {
-    box-shadow: 0 0 24px rgba(126, 180, 212, 0.24), 0 7px 22px rgba(0, 0, 0, 0.38);
-  }
-}
-
-.job-card.is-in_progress .job-thumb {
-  border-color: rgba(126, 180, 212, 0.38);
-  box-shadow: 0 0 12px rgba(126, 180, 212, 0.18);
-}
-
-
-.job-thumb {
-  position: relative;
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.035);
-}
-
-.job-thumb img,
-.job-thumb video {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: center;
-}
-
-.job-thumb svg {
-  width: 18px;
-  height: 18px;
-}
-
-.job-copy {
-  min-width: 0;
-  display: grid;
-  gap: 1px;
-}
-
-.job-sub {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-}
-
-/* 两行都用省略号收尾：模型名一行、提示词一行（时间跟在提示词后面）。 */
-.job-model {
-  min-width: 0;
-  font-size: 12.5px;
-  font-weight: 650;
-  color: #f1f3fa;
-  letter-spacing: 0.01em;
-  line-height: 1.35;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.job-prompt {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: block;
-  color: #8c93ad;
-  font-size: 11.5px;
-  line-height: 1.35;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.job-prompt[hidden] {
-  display: none;
-}
-
-.job-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.job-time {
-  flex: 0 0 auto;
-  color: var(--text-muted);
-  font-size: 10px;
-  white-space: nowrap;
-}
-
-.job-actions .job-cancel {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-}
-
-.job-actions .job-cancel svg {
-  width: 14px;
-  height: 14px;
-}
-
-.job-progress-wrap {
-  margin-top: 4px;
-  width: 100%;
-}
-
-.job-progress-bar {
-  width: 100%;
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  overflow: hidden;
-}
-
-.job-progress-fill {
-  width: 0;
-  height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #7eb4d4 0%, #f0b4c4 55%, #f0c090 100%);
-  transition: width 180ms linear;
-}
-
-.job-progress-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 2px;
-  font-size: 9.5px;
-  color: #94a3b8;
-  font-weight: 650;
-}
-
-.job-progress-percent {
-  font-family: "CyberDigits", monospace, sans-serif;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: #e2e8f0;
-}
-
-
-
-.job-status {
-  min-width: 0;
-  max-width: 100%;
-  padding: 2px 6px;
-  border-radius: 6px;
-  color: #cbd5e1;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  font-size: 10px;
-  font-weight: 650;
-  text-align: center;
-}
-
-.job-status.in_progress {
-  color: #7eb4d4;
-  background: rgba(126, 180, 212, 0.12);
-  border-color: rgba(126, 180, 212, 0.35);
-  box-shadow: 0 0 10px rgba(126, 180, 212, 0.2);
-}
-
-.job-status.pending {
-  color: #f0b4c4;
-  background: rgba(240, 180, 196, 0.12);
-  border-color: rgba(240, 180, 196, 0.32);
-}
-
-.job-status.completed {
-  color: #c8d8e8;
-  background: rgba(126, 180, 212, 0.1);
-  border-color: rgba(126, 180, 212, 0.28);
-}
-
-.job-status.failed,
-.job-status.cancelled {
-  color: var(--danger);
-  background: var(--danger-surface);
-}
-
 .history-grid {
   padding: 0 0 12px;
   display: grid;
@@ -2483,33 +2260,14 @@ select:focus {
   border-radius: 12px;
 }
 
-/* 数字角标与连发数字必须排成一行：按钮上的 overflow-wrap 会继承下来，
-   「10」「99+」原本会在两个字符之间断开。 */
-.nav-badge,
+/* 连发数字必须排成一行：按钮上的 overflow-wrap 会继承下来，
+   「10」原本会在两个字符之间断开。 */
 .count-badge,
 .repeat-center-num,
 .repeat-bubble-num,
-.repeat-tick,
-.job-progress-percent {
+.repeat-tick {
   white-space: nowrap;
   overflow-wrap: normal;
-}
-
-.nav-badge {
-  position: absolute;
-  top: 3px;
-  left: calc(50% + 8px);
-  min-width: 18px;
-  height: 18px;
-  padding: 0 3px;
-  display: grid;
-  place-items: center;
-  border: 2px solid #10121e;
-  border-radius: 9px;
-  color: #1a1030;
-  background: var(--btn-grad);
-  font-size: 10px;
-  line-height: 1;
 }
 
 .sheet-dialog {

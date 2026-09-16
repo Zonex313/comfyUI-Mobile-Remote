@@ -46,6 +46,7 @@
     dialogJob: null,
     workflowLoadToken: 0,
     fieldControls: new Map(),
+    advancedControls: new Map(),
     galleryItems: [],
     galleryIndex: 0,
     galleryJobId: "",
@@ -96,16 +97,10 @@
     const time = saved ? localeTime(saved) : "";
     const labels = { loading: t("读取设置"), pending: t("待同步"), saving: t("同步中"), offline: t("未同步"), conflict: t("设置冲突") };
     const label = status.state === "synced" ? (time ? t("{time}已同步", { time: time }) : t("尚未同步")) : (labels[status.state] || t("待同步"));
-    const element = $("settingsSyncLabel");
-    if (element) {
-      element.textContent = label;
-      element.dataset.state = status.state;
-      element.title = status.error || (time ? t("最近保存于 {time}；新修改满一分钟后合并上传", { time: time }) : t("新修改满一分钟后合并上传"));
-    }
+    // 同步状态只在设置页那一行显示，顶栏不再重复。
     setText("settingsSyncDetail", label);
     $("settingsSyncConflict")?.classList.toggle("hidden", status.state !== "conflict");
     if (status.catalogInvalid) {
-      if (element) element.title = t("电脑上的标签目录损坏，其它设置仍会同步；未上传的标签改动会留在本机");
       if (!catalogInvalidNotified) {
         catalogInvalidNotified = true;
         toast(t("电脑标签目录损坏，其它设置仍会同步"), "error");
@@ -129,11 +124,9 @@
     image: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>',
     video: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m16 13 5 3V8l-5 3"/><rect x="3" y="5" width="13" height="14" rx="2"/></svg>',
     audio: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
-    queue: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>',
     check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20 6-11 11-5-5"/></svg>',
     alert: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>',
     upload: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-4-8 4-4 4 4M5 21h14"/></svg>',
-    stop: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>',
   };
 
   function setText(id, value) {
@@ -221,7 +214,32 @@
       button.setAttribute("aria-current", active ? "page" : "false");
     });
     window.scrollTo({ top: 0, behavior: "auto" });
-    if (target === "queue" || target === "history") loadJobs().catch(() => {});
+    // 高级页按 state.values 整块重渲染：生成页/草稿里的改动切过去就能看见。
+    if (target === "advanced") advancedPage?.show();
+    if (target === "history") loadJobs().catch(() => {});
+  }
+
+  // 「高级」页（按组/节点浏览并编辑参数）实现全部在 mobile/advanced.js 里，
+  // 这里只注入依赖：它不认识 app.js 的内部变量，也不需要认识。
+  let advancedPage = null;
+  function setupAdvancedPage() {
+    if (advancedPage) return advancedPage;
+    const api = globalThis.MobileAdvanced;
+    if (!api || typeof api.mount !== "function") return null;
+    try {
+      advancedPage = api.mount({
+        document,
+        t,
+        $,
+        state,
+        renderField,
+        updateFieldValue,
+        view: "view-advanced",
+      });
+    } catch (error) {
+      console.warn("[Mobile Remote] advanced page failed to mount", error);
+    }
+    return advancedPage;
   }
 
   function uiVersion() {
@@ -245,10 +263,7 @@
     setText("currentAddress", `${location.origin}/mobile`);
     setText("tailscaleAddress", status?.mobile_urls?.[0] || t("未检测到"));
 
-    const activeCount = Number(status?.running || 0) + Number(status?.pending || 0);
-    const badge = $("queueBadge");
-    badge.textContent = activeCount > 99 ? "99+" : String(activeCount);
-    badge.classList.toggle("hidden", activeCount === 0);
+    paintStopAllButton(stoppingAllJobs);
   }
 
   async function loadStatus() {
@@ -773,7 +788,8 @@
     return container;
   }
 
-  function renderField(field, index, compact = false) {
+  // controls：控件表，默认是生成页那份；高级页会传自己的一份（同一个字段两处控件互不覆盖）。
+  function renderField(field, index, compact = false, controls = state.fieldControls) {
     const wrapper = document.createElement("div");
     wrapper.className = compact ? "field compact-field" : "field";
     wrapper.dataset.input = field.input;
@@ -789,7 +805,7 @@
     else if (field.kind === "image") control = makeImageInput(field, index);
     else control = makeTextInput(field, index);
     wrapper.append(control);
-    state.fieldControls.set(field.id, control);
+    controls.set(field.id, control);
     if (isPositiveField(field) && field.kind === "textarea") {
       attachPresetPanel(wrapper, field, control);
     }
@@ -984,7 +1000,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609305", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609306", { cache: "no-store" });
       if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];
@@ -1610,6 +1626,7 @@
         state.presetTextarea = null;
         state.presetPanel = null;
         renderWorkflow(body.workflow);
+        advancedPage?.refresh();
       } finally {
         hydratingSettings -= 1;
       }
@@ -1803,17 +1820,40 @@
     return STATUS_LABELS[status] || status || t("未知");
   }
 
-  async function cancelJob(jobId) {
+  // 顶栏「停止全部」：清空排队任务并中断正在执行的那一个。
+  // 请求没回来之前按钮一直禁用，连点只会发一次。
+  let stoppingAllJobs = false;
+
+  function paintStopAllButton(busy) {
+    const button = $("stopAllButton");
+    if (!button) return;
+    const activeCount = Number(state.status?.running || 0) + Number(state.status?.pending || 0);
+    button.classList.toggle("hidden", activeCount === 0);
+    button.disabled = Boolean(busy);
+    button.setAttribute("aria-busy", String(Boolean(busy)));
+    button.setAttribute("aria-label", t("停止全部"));
+    button.title = t("停止全部");
+  }
+
+  async function stopAllJobs() {
+    if (stoppingAllJobs) return;
+    stoppingAllJobs = true;
+    paintStopAllButton(true);
     try {
-      await requestJson(`/mobile/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
-      toast(t("任务已停止"), "success");
-      state.progress.delete(jobId);
-      await Promise.all([loadStatus(), loadJobs()]);
+      await requestJson("/mobile/api/jobs/stop-all", { method: "POST" });
+      toast(t("所有任务已停止"), "success");
+      // 服务器已经不认这些任务了，乐观条目留着只会在顶栏显示幽灵任务。
+      state.optimisticJobs.clear();
+      await Promise.all([loadStatus(), loadJobs(true), loadProgress(true)]);
     } catch (error) {
       toast(error.message, "error");
+    } finally {
+      stoppingAllJobs = false;
+      paintStopAllButton(false);
     }
   }
 
+  // 顶栏的「当前任务/进度环」要的就绪列表：运行中的排最前，其次是排队中的。
   function visibleQueueJobs() {
     const activeId = state.progress.activeId;
     const jobs = state.jobs.filter((job) =>
@@ -1833,132 +1873,6 @@
       : progress?.displayId && progress.displayId !== "sampling" ? nodeDisplayName(progress.displayId)
       : t("正在处理");
     return { percent, text: percent == null ? "—" : `${Math.round(percent)}%`, label };
-  }
-
-  function paintQueueProgress(card, jobId) {
-    const display = progressDisplay({ id: jobId, status: "in_progress" });
-    const fill = card.querySelector(".job-progress-fill");
-    const label = card.querySelector(".job-progress-label");
-    const percent = card.querySelector(".job-progress-percent");
-    const bar = card.querySelector(".job-progress-bar");
-    if (!fill) return;
-    fill.style.width = `${display.percent ?? 0}%`;
-    if (label) label.textContent = display.label;
-    if (percent) percent.textContent = display.text;
-    if (bar) {
-      bar.setAttribute("role", "progressbar");
-      bar.setAttribute("aria-label", display.label);
-      bar.setAttribute("aria-valuemin", "0");
-      bar.setAttribute("aria-valuemax", "100");
-      if (display.percent == null) bar.removeAttribute("aria-valuenow");
-      else bar.setAttribute("aria-valuenow", String(Math.round(display.percent)));
-    }
-  }
-
-  // 队列任务基本都是今天的：时间只显示时分，把宽度留给模型名和提示词。
-  function queueTimeLabel(value) {
-    const timestamp = Number(value || 0);
-    if (!timestamp) return "";
-    const date = new Date(timestamp);
-    const now = new Date();
-    const sameDay = date.getFullYear() === now.getFullYear()
-      && date.getMonth() === now.getMonth()
-      && date.getDate() === now.getDate();
-    return sameDay ? localeTime(date) : localeDateTime(date);
-  }
-
-  // 队列卡片第一行显示模型名（只取文件名），拿不到再退回工作流名。
-  function queueModelName(job) {
-    const raw = String(job.model_name || "").trim();
-    return raw ? raw.split(/[/\\]/).pop() : "";
-  }
-
-  function updateQueueCard(card, job) {
-    card.dataset.jobId = String(job.id);
-    card.className = `job-card is-${job.status}`;
-    const thumb = card.querySelector(".job-thumb");
-    const model = card.querySelector(".job-model");
-    const prompt = card.querySelector(".job-prompt");
-    const time = card.querySelector(".job-time");
-    const status = card.querySelector(".job-status");
-    if (thumb) thumb.innerHTML = job.status === "in_progress" ? ICONS.image : ICONS.queue;
-    const modelName = queueModelName(job);
-    if (model) model.textContent = modelName || job.workflow_name || t("电脑端任务");
-    if (prompt) {
-      // 第二行是提示词；提示词为空时退回工作流名，两行都放不下就用省略号。
-      const text = String(job.positive_prompt || "").trim()
-        || (modelName ? String(job.workflow_name || "").trim() : "");
-      prompt.textContent = text;
-      prompt.hidden = !text;
-    }
-    if (time) time.textContent = queueTimeLabel(job.create_time);
-    if (status) {
-      status.className = `job-status ${job.status}`;
-      status.textContent = jobStatusLabel(job.status);
-    }
-    let progressWrap = card.querySelector(".job-progress-wrap");
-    if (job.status === "in_progress") {
-      if (!progressWrap) {
-        progressWrap = document.createElement("div");
-        progressWrap.className = "job-progress-wrap";
-        progressWrap.innerHTML = t('<div class="job-progress-bar"><div class="job-progress-fill"></div></div><div class="job-progress-meta"><span class="job-progress-label">正在执行</span><span class="job-progress-percent">0%</span></div>');
-        card.querySelector(".job-copy")?.append(progressWrap);
-      }
-      paintQueueProgress(card, job.id);
-    } else {
-      progressWrap?.remove();
-    }
-  }
-
-  function buildQueueCard(job) {
-    const card = document.createElement("article");
-    const thumb = document.createElement("div");
-    thumb.className = "job-thumb";
-    const copy = document.createElement("div");
-    copy.className = "job-copy";
-    // 第一行：模型名（占满整行）；第二行：提示词 + 时间。两行都是单行省略号。
-    const model = document.createElement("strong");
-    model.className = "job-model";
-    const sub = document.createElement("div");
-    sub.className = "job-sub";
-    const prompt = document.createElement("span");
-    prompt.className = "job-prompt";
-    const time = document.createElement("span");
-    time.className = "job-time";
-    sub.append(prompt, time);
-    copy.append(model, sub);
-    const actions = document.createElement("div");
-    actions.className = "job-actions";
-    const status = document.createElement("span");
-    status.className = "job-status";
-    const cancel = document.createElement("button");
-    cancel.type = "button";
-    cancel.className = "icon-button job-cancel";
-    cancel.setAttribute("aria-label", t("停止任务"));
-    cancel.title = t("停止任务");
-    cancel.innerHTML = ICONS.stop;
-    cancel.addEventListener("click", () => cancelJob(job.id));
-    actions.append(status, cancel);
-    card.append(thumb, copy, actions);
-    updateQueueCard(card, job);
-    return card;
-  }
-
-  function renderQueue() {
-    const jobs = visibleQueueJobs();
-    setText("queueTotal", t("{length} 个任务", { length: jobs.length, n: jobs.length }));
-    $("queueEmpty").classList.toggle("hidden", jobs.length !== 0);
-    const list = $("queueList");
-    const current = new Map([...list.querySelectorAll(".job-card")].map((card) => [card.dataset.jobId, card]));
-    const wanted = new Set();
-    jobs.forEach((job, index) => {
-      const id = String(job.id);
-      wanted.add(id);
-      const card = current.get(id) || buildQueueCard(job);
-      if (current.has(id)) updateQueueCard(card, job);
-      if (list.children[index] !== card) list.insertBefore(card, list.children[index] || null);
-    });
-    current.forEach((card, id) => { if (!wanted.has(id)) card.remove(); });
   }
 
   function jobGallery(job) {
@@ -2711,7 +2625,6 @@
 
   function applyJobPages() {
     mergeJobPages();
-    renderQueue();
     renderHistory();
     updateActiveJob();
   }
@@ -2856,7 +2769,6 @@
     const previousId = state.progress.activeId;
     if (state.progress.applySnapshot(body, revision)) {
       updateActiveJob();
-      renderQueue();
       if (previousId !== state.progress.activeId) loadJobs(true).catch(() => {});
     }
   }
@@ -2973,7 +2885,7 @@
       state.currentJobId = body.prompt_id;
       $("jobDialog").close();
       toast(t("已重新加入队列"), "success");
-      showView("queue");
+      showView("generate");
       await Promise.all([loadStatus(), loadJobs()]);
     } catch (error) {
       toast(error.message, "error");
@@ -3434,7 +3346,6 @@
         };
         state.optimisticJobs.set(promptId, optimistic);
         if (!state.jobs.some((job) => String(job.id) === promptId)) state.jobs.unshift(optimistic);
-        renderQueue();
         updateActiveJob();
       }
       toast(submitted > 1 ? t("已加入 {submitted} 个任务", { submitted, n: submitted }) : t("任务已加入队列"), "success");
@@ -3490,8 +3401,6 @@
           displayId: String(data.display_node || data.node),
         });
         updateActiveJob();
-        const card = [...document.querySelectorAll(".job-card")].find((item) => item.dataset.jobId === promptId);
-        if (card) paintQueueProgress(card, promptId);
       }
     } else if (type === "progress" && promptId) {
       const max = Number(data.max);
@@ -3504,14 +3413,10 @@
           nodeId: data.node ? String(data.node) : "",
         });
         updateActiveJob();
-        const card = [...document.querySelectorAll(".job-card")].find((item) => item.dataset.jobId === promptId);
-        if (card) paintQueueProgress(card, promptId);
       }
     } else if (type === "progress_state" && promptId) {
       if (state.progress.acceptProgressState(data)) {
         updateActiveJob();
-        const card = [...document.querySelectorAll(".job-card")].find((item) => item.dataset.jobId === promptId);
-        if (card) paintQueueProgress(card, promptId);
       }
     } else if (["execution_success", "execution_error", "execution_interrupted"].includes(type)) {
       if (type === "execution_success") toast(t("生成完成"), "success");
@@ -3645,7 +3550,6 @@
     paintModelTools();
     paintGenerateButton();
     paintHistoryMore();
-    renderQueue();
     renderHistory();
     renderPresetPanel();
     if (state.workflow) renderWorkflow(state.workflow);
@@ -3678,6 +3582,7 @@
     $("modelPickerSearch")?.addEventListener("input", renderModelPickerList);
     $("generationForm").addEventListener("submit", submitGeneration);
     bindGenerateSwipe();
+    $("stopAllButton")?.addEventListener("click", () => { void stopAllJobs(); });
     $("closeDialogButton").addEventListener("click", () => $("jobDialog").close());
     $("retryJobButton").addEventListener("click", retryDialogJob);
     $("jobDialog").addEventListener("click", (event) => {
@@ -4212,6 +4117,7 @@
         toast(error.message || t("标签目录读取失败"), "error");
       }
       bindEvents();
+      setupAdvancedPage();
       applyPhonePreferences();
       connectWebSocket();
       await refreshAll();

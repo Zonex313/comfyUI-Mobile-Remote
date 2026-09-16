@@ -17,3 +17,4 @@ __pycache__/
 
 # ---- 大文件（52MB，超托管限制；代码会自动从 GitHub 下载）----
 /bin/cloudflared.exe
+tests/screenshots/

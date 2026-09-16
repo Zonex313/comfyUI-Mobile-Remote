@@ -1,0 +1,369 @@
+/* ComfyUI 手机端「高级」页（节点/组控制）样式。
+ * 由 mobile/advanced.js 在 mount() 时以 <link id="mtr-advanced-styles"> 注入，
+ * 不改 mobile/styles.css：颜色、圆角、模糊全部取 styles.css :root 里的变量。 */
+
+.advanced-page {
+  padding-bottom: 6px;
+}
+
+/* ------------------------------------------------------------------ 顶部 */
+
+.advanced-page .page-heading {
+  padding-top: 10px;
+}
+
+/* ------------------------------------------------------------------ 搜索 */
+
+.advanced-toolbar {
+  padding: 6px 0 0;
+}
+
+.advanced-search {
+  position: relative;
+  display: block;
+}
+
+.advanced-search-icon {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  width: 16px;
+  height: 16px;
+  margin-top: -8px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.advanced-search-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  height: 42px;
+  padding: 0 12px 0 36px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  background: var(--surface);
+  font-size: 14px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.advanced-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.advanced-search-input:focus {
+  border-color: var(--accent);
+  background: var(--surface-raised);
+  outline: none;
+}
+
+.advanced-search-input:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+.advanced-status {
+  min-height: 16px;
+  margin: 8px 2px 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* -------------------------------------------------------------------- 组 */
+
+.advanced-group {
+  margin: 0 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.advanced-group-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 12px;
+  list-style: none;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.advanced-group-summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced-group-summary:active {
+  background: var(--surface-soft);
+}
+
+.advanced-group-dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.advanced-group-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 640;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.advanced-group-count {
+  flex: 0 0 auto;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  font-size: 11px;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+}
+
+.advanced-group-chevron {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  transition: transform 180ms ease;
+}
+
+.advanced-group[open] > .advanced-group-summary .advanced-group-chevron {
+  transform: rotate(180deg);
+}
+
+.advanced-group-nodes {
+  padding: 0 8px 4px;
+}
+
+/* ------------------------------------------------------------------ 节点 */
+
+/* 节点多时列表要跟手：屏幕外的卡片不参与布局/绘制（历史页同款做法）。 */
+.advanced-node {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-soft);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 54px;
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 200ms ease;
+}
+
+.advanced-node.is-open {
+  background: var(--surface);
+}
+
+.advanced-node.is-modified {
+  border-color: rgba(240, 180, 196, 0.34);
+}
+
+.advanced-node-toggle {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 12px;
+  color: inherit;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.advanced-node-toggle:active {
+  background: var(--surface-soft);
+}
+
+.advanced-node-chevron {
+  grid-column: 1;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  transition: transform 180ms ease;
+}
+
+.advanced-node.is-open > .advanced-node-toggle .advanced-node-chevron {
+  transform: rotate(180deg);
+}
+
+.advanced-node-head {
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.advanced-node-title {
+  min-width: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 620;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.advanced-node-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 类型名（CLIPTextEncode 之类）比标题长得多，宁可换行也不许横向撑破。 */
+.advanced-node-type {
+  max-width: 100%;
+  padding: 1px 6px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--surface-raised);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.advanced-node-id {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.advanced-node-modified {
+  grid-column: 3;
+  color: var(--accent-2);
+  font-size: 13px;
+  line-height: 1;
+  text-shadow: 0 0 8px rgba(240, 180, 196, 0.5);
+}
+
+.advanced-node-body {
+  display: grid;
+  gap: 2px;
+  padding: 0 10px 6px;
+}
+
+.advanced-node-empty {
+  margin: 0;
+  padding: 2px 0 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ 连线 */
+
+.advanced-node-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 10px 10px;
+}
+
+.advanced-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 26px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.advanced-chip.is-in {
+  border-color: rgba(126, 180, 212, 0.32);
+}
+
+.advanced-chip.is-out {
+  border-color: rgba(240, 180, 196, 0.3);
+}
+
+.advanced-chip:active {
+  background: var(--surface-raised);
+}
+
+.advanced-chip-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------- 高亮 / 跳转态 */
+
+.advanced-page mark {
+  padding: 0 1px;
+  border-radius: 3px;
+  color: var(--text);
+  background: rgba(240, 180, 196, 0.34);
+}
+
+.advanced-node.is-flash {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft), 0 0 20px rgba(126, 180, 212, 0.45);
+  animation: advanced-flash 1.2s ease-out;
+}
+
+@keyframes advanced-flash {
+  0% { background: var(--accent-soft); }
+  100% { background: var(--surface); }
+}
+
+.advanced-nomatch {
+  margin: 14px 2px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------ 宽屏两列 */
+
+@media (min-width: 620px) {
+  .advanced-group-nodes {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 8px;
+    align-items: start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .advanced-node,
+  .advanced-group-chevron,
+  .advanced-node-chevron {
+    transition: none;
+  }
+
+  .advanced-node.is-flash {
+    animation: none;
+  }
+}

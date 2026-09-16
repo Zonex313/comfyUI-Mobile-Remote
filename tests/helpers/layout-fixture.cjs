@@ -30,11 +30,12 @@ const workflow = { id: "0a1b2c3d4e5f60718293", name: "Landscape workflow for lay
   ] };
 const output = { filename: "layout.png", subfolder: "", type: "output", kind: "image" };
 const output2 = { filename: "layout-2.png", subfolder: "", type: "output", kind: "image" };
-// 10 个排队任务 = 连发 10 次之后的真实状态：底部导航角标会显示两位数。
+// 10 个排队任务 = 连发 10 次之后的真实状态：历史页要能忽略未完成任务，
+// 顶栏的「运行 / 排队」计数与「停止全部」按钮也靠它撑出真实数字。
 const pendingJobs = Array.from({ length: 10 }, (_, index) => ({
   id: `layout-pending-${index}`,
   status: "pending",
-  create_time: Date.now(),   // 刚入队：队列卡片只显示时分
+  create_time: Date.now(),   // 刚入队：和真实排队任务一样是最新的时间戳
   workflow_name: workflow.name,
   model_name: index % 2 ? "landscape-v2.safetensors" : "landscape.safetensors",
   positive_prompt: `a landscape with mountains and a river, variation ${index}, highly detailed`,

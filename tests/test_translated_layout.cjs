@@ -38,10 +38,10 @@ function chromePath() {
 const ELLIPSIS_CONTROLS = [
   "preset-chip", "preset-row-label", "history-title-button", "history-media-button",
   "mtr-chip", "mtr-row-label", "icon-button", "generate-fab", "gallery-nav",
-  "stepper-button", "preset-pool-chip", "mtr-pool-chip", "nav-badge",
+  "stepper-button", "preset-pool-chip", "mtr-pool-chip",
 ];
 
-/* 只量「文字」本身：绝对定位的角标（例如队列数量气泡）不算文字溢出。 */
+/* 只量「文字」本身：绝对定位的角标不算文字溢出。 */
 const OFFENDERS = `(() => {
   const ignore = ${JSON.stringify(ELLIPSIS_CONTROLS)};
   const out = [];
@@ -140,7 +140,7 @@ test("手机端四种语言的按钮都不被译文撑破", { timeout: 600000 },
         await page.goto(`${base}/mobile`);
         await page.waitForFunction(() => document.querySelector("#pluginVersion")?.textContent?.includes("0.3.0"), null, { timeout: 30000 });
         await page.waitForFunction(() => !document.querySelector("#generationForm")?.classList.contains("hidden"), null, { timeout: 30000 });
-        // 连发 10 个任务后：底部导航角标与 FAB 上的连发数字都必须是单行。
+        // 连发 10 个任务后：FAB 上的连发数字必须是单行。
         const counters = await page.evaluate(() => {
           const fab = document.querySelector("#generateButton");
           if (fab && !fab.classList.contains("has-repeat")) {
@@ -156,11 +156,8 @@ test("手机端四种语言的按钮都不被译文撑破", { timeout: 600000 },
             return { text: el.textContent.trim(), height: Math.round(el.getBoundingClientRect().height),
               lines: [...new Set(rects.map((rect) => Math.round(rect.top)))].length };
           };
-          return { badge: measure("#queueBadge"), repeat: measure("#repeatCenterNum") };
+          return { repeat: measure("#repeatCenterNum") };
         });
-        if (!counters.badge || counters.badge.text !== "10" || counters.badge.lines !== 1 || counters.badge.height !== 18) {
-          failures.push(`${where} 队列角标不是单行的「10」：${JSON.stringify(counters.badge)}`);
-        }
         if (!counters.repeat || counters.repeat.text !== "10" || counters.repeat.lines !== 1) {
           failures.push(`${where} 连发数字不是单行的「10」：${JSON.stringify(counters.repeat)}`);
         }
@@ -172,7 +169,7 @@ test("手机端四种语言的按钮都不被译文撑破", { timeout: 600000 },
         });
         await page.waitForTimeout(200);
         offenders.push(...await page.evaluate(OFFENDERS));
-        for (const view of ["queue", "history", "settings", "generate"]) {
+        for (const view of ["advanced", "history", "settings", "generate"]) {
           await page.click(`.nav-button[data-target=${view}]`);
           await page.waitForTimeout(150);
           offenders.push(...tag(`${where} ${view}`, await page.evaluate(OFFENDERS)));
@@ -571,58 +568,6 @@ test("设置页长文本换行合理，电脑端语言菜单不越界", { timeou
     await stopServer(server);
   }
   assert.equal(failures.length, 0, `设置页/语言菜单排版不对：\n${failures.join("\n")}`);
-});
-
-/* 队列卡片：一行模型名、一行提示词，信息各不相同，且尽量矮。 */
-test("队列卡片显示模型名与提示词，且高度紧凑", { timeout: 300000 }, async () => {
-  const { chromium } = resolvePlaywright();
-  const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
-  const { server, base } = await startServer();
-  const failures = [];
-  try {
-    const context = await browser.newContext({ locale: "zh-CN", viewport: { width: 320, height: 700 } });
-    const page = await context.newPage();
-    page.on("pageerror", (error) => failures.push(`页面异常：${error.message}`));
-    await page.goto(`${base}/mobile`);
-    await page.waitForFunction(() => !document.querySelector("#generationForm")?.classList.contains("hidden"), null, { timeout: 30000 });
-    await page.click(".nav-button[data-target=queue]");
-    await page.waitForFunction(() => document.querySelectorAll("#queueList .job-card").length >= 10, null, { timeout: 30000 });
-    const cards = await page.evaluate(() => [...document.querySelectorAll("#queueList .job-card")].map((card) => {
-      const model = card.querySelector(".job-model");
-      const prompt = card.querySelector(".job-prompt");
-      const cardBox = card.getBoundingClientRect();
-      const styleOf = (node) => { const style = getComputedStyle(node); return { ellipsis: style.textOverflow, nowrap: style.whiteSpace }; };
-      return {
-        height: Math.round(cardBox.height),
-        model: model ? model.textContent.trim() : null,
-        prompt: prompt ? prompt.textContent.trim() : null,
-        modelStyle: model ? styleOf(model) : null,
-        promptStyle: prompt ? styleOf(prompt) : null,
-        modelInside: model ? model.getBoundingClientRect().right <= cardBox.right + 1 : false,
-        promptInside: prompt ? prompt.getBoundingClientRect().right <= cardBox.right + 1 : false,
-      };
-    }));
-    if (cards.length < 10) failures.push(`队列卡片数量不对：${cards.length}`);
-    for (const card of cards) {
-      if (card.model === null) failures.push("卡片缺少模型名那一行");
-      else if (!card.model) failures.push("模型名是空的");
-      if (card.prompt === null) failures.push("卡片缺少提示词那一行");
-      else if (!card.prompt) failures.push("提示词是空的");
-      if (card.modelStyle && (card.modelStyle.ellipsis !== "ellipsis" || card.modelStyle.nowrap !== "nowrap")) failures.push(`模型名没有单行省略号：${JSON.stringify(card.modelStyle)}`);
-      if (card.promptStyle && (card.promptStyle.ellipsis !== "ellipsis" || card.promptStyle.nowrap !== "nowrap")) failures.push(`提示词没有单行省略号：${JSON.stringify(card.promptStyle)}`);
-      if (!card.modelInside || !card.promptInside) failures.push("文字溢出了卡片");
-      if (card.height > 58) failures.push(`卡片还是太高：${card.height}px`);
-    }
-    const models = new Set(cards.map((card) => card.model));
-    if (models.size < 2) failures.push(`所有卡片标题仍然一样：${[...models].join(" / ")}`);
-    const prompts = new Set(cards.map((card) => card.prompt));
-    if (prompts.size < 2) failures.push(`所有卡片提示词都一样：${[...prompts][0]}`);
-    await context.close();
-  } finally {
-    await browser.close();
-    await stopServer(server);
-  }
-  assert.equal(failures.length, 0, `队列卡片排版不对：\n${failures.slice(0, 12).join("\n")}`);
 });
 
 /* 大图翻页：相邻图片还在下载时不能显示，否则会先露出上面一小条/半张图。 */

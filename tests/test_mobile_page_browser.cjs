@@ -99,7 +99,7 @@ test("手机端页面跟系统语言启动，并能手动切换语言", { timeou
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(url);
     await page.waitForFunction(() => document.querySelector("#pluginVersion")?.textContent?.includes("0.3.0"), null, { timeout: 20000 });
-    assert.deepEqual(await navLabels(page), ["生成", "队列", "历史", "设置"]);
+    assert.deepEqual(await navLabels(page), ["生成", "高级", "历史", "设置"]);
     assert.equal(await page.evaluate(() => document.documentElement.lang), "zh-CN");
     assert.match(await page.textContent("#currentAddress"), /^http:\/\//);
 
@@ -110,7 +110,7 @@ test("手机端页面跟系统语言启动，并能手动切换语言", { timeou
       ["中文", "English", "日本語", "한국어"]);
     await page.click(".language-option:nth-child(2)");
     await page.waitForFunction(() => document.documentElement.lang === "en", null, { timeout: 10000 });
-    assert.deepEqual(await navLabels(page), ["Generate", "Queue", "History", "Settings"]);
+    assert.deepEqual(await navLabels(page), ["Generate", "Advanced", "History", "Settings"]);
     assert.equal(await page.evaluate(() => localStorage.getItem("comfy-mobile-remote.ui-locale")), "en");
     assert.deepEqual(errors, [], "页面不应抛出未捕获异常");
     await zh.close();
@@ -123,7 +123,7 @@ test("手机端页面跟系统语言启动，并能手动切换语言", { timeou
     await jaPage.goto(url);
     await jaPage.waitForFunction(() => document.querySelector("#pluginVersion")?.textContent?.includes("0.3.0"), null, { timeout: 20000 });
     assert.equal(await jaPage.evaluate(() => document.documentElement.lang), "ja");
-    assert.deepEqual(await navLabels(jaPage), ["生成", "キュー", "履歴", "設定"]);
+    assert.deepEqual(await navLabels(jaPage), ["生成", "詳細", "履歴", "設定"]);
     assert.deepEqual(jaErrors, [], "日文页面不应抛出未捕获异常");
     await ja.close();
   } finally {

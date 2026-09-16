@@ -11,13 +11,14 @@
   <title>Comfy Remote</title>
   <link rel="manifest" href="/mobile/manifest.webmanifest">
   <link rel="icon" href="/mobile/assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202609305">
-  <script type="module" src="/mobile/assets/i18n.js?v=202609305"></script>
-  <script src="/mobile/assets/preset-catalog.js?v=202609305" defer></script>
-  <script src="/mobile/assets/preset-engine.js?v=202609305" defer></script>
-  <script src="/mobile/assets/settings-sync.js?v=202609305" defer></script>
-  <script src="/mobile/assets/progress-sync.js?v=202609305" defer></script>
-  <script src="/mobile/assets/app.js?v=202609305" defer></script>
+  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202609306">
+  <script type="module" src="/mobile/assets/i18n.js?v=202609306"></script>
+  <script src="/mobile/assets/preset-catalog.js?v=202609306" defer></script>
+  <script src="/mobile/assets/preset-engine.js?v=202609306" defer></script>
+  <script src="/mobile/assets/settings-sync.js?v=202609306" defer></script>
+  <script src="/mobile/assets/progress-sync.js?v=202609306" defer></script>
+  <script src="/mobile/assets/advanced.js?v=202609306" defer></script>
+  <script src="/mobile/assets/app.js?v=202609306" defer></script>
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -37,8 +38,13 @@
       </div>
       <img id="livePreview" class="live-preview hidden" alt="生成预览" data-i18n-alt="生成预览">
       <div class="topbar-aside">
-        <span id="settingsSyncLabel" class="settings-sync-label" role="status" aria-live="polite">读取设置</span>
-        <span class="meta-counts"><span data-i18n="运行">运行</span> <b id="runningCount">0</b><span class="meta-sep">·</span><span data-i18n="排队">排队</span> <b id="pendingCount">0</b></span>
+        <button id="stopAllButton" class="icon-button stop-button hidden" type="button" aria-label="停止全部" title="停止全部" data-i18n-aria-label="停止全部" data-i18n-title="停止全部">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+        </button>
+        <span class="meta-counts">
+          <span class="meta-count"><span data-i18n="运行">运行</span> <b id="runningCount">0</b></span>
+          <span class="meta-count"><span data-i18n="排队">排队</span> <b id="pendingCount">0</b></span>
+        </span>
       </div>
     </header>
 
@@ -119,21 +125,8 @@
         </form>
       </section>
 
-      <section id="view-queue" class="view" data-view="queue" aria-labelledby="queueTitle">
-        <div class="section-heading page-heading">
-          <div>
-            <span class="eyebrow" data-i18n="任务">任务</span>
-            <h2 id="queueTitle" data-i18n="队列">队列</h2>
-          </div>
-          <span id="queueTotal" class="section-meta"></span>
-        </div>
-        <div id="queueList" class="job-list"></div>
-        <div id="queueEmpty" class="empty-state hidden">
-          <span class="empty-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
-          </span>
-          <h3 data-i18n="队列为空">队列为空</h3>
-        </div>
+      <section id="view-advanced" class="view" data-view="advanced">
+        <!-- 标题、工具条与节点列表由 mobile/advanced.js 挂载时创建 -->
       </section>
 
       <section id="view-history" class="view" data-view="history" aria-label="历史" data-i18n-aria-label="历史">
@@ -214,10 +207,9 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 3 14 9-14 9V3Z"/></svg>
         <span data-i18n="生成">生成</span>
       </button>
-      <button class="nav-button" type="button" data-target="queue" aria-label="队列" data-i18n-aria-label="队列">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
-        <span data-i18n="队列">队列</span>
-        <b id="queueBadge" class="nav-badge hidden">0</b>
+      <button class="nav-button" type="button" data-target="advanced" aria-label="高级" data-i18n-aria-label="高级">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><path d="M10 6.5h4a3.5 3.5 0 0 1 3.5 3.5v4"/><path d="M14 17.5h-4A3.5 3.5 0 0 1 6.5 14v-4"/></svg>
+        <span data-i18n="高级">高级</span>
       </button>
       <div class="nav-dock">
         <div id="repeatBubble" class="repeat-bubble" hidden aria-hidden="true">

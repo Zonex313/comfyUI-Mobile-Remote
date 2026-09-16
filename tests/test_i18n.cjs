@@ -13,6 +13,7 @@ const LOCALES = ["en", "ja", "ko"];
 const JS_SOURCES = [
   "mobile/app.js",
   "mobile/settings-sync.js",
+  "mobile/advanced.js",
   "mobile/progress-sync.js",
   "mobile/index.html",
   "web/remote.js",

@@ -662,6 +662,147 @@ def _record_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None
     return record, ""
 
 
+def _stop_all_jobs(queue: Any) -> tuple[int, bool]:
+    """先清空排队中的任务，再中断正在执行的那一个，返回（清掉几条, 是否中断成功）。
+
+    顺序绝不能反：先中断的话，队列里的下一条会立刻开始执行，
+    紧接着的清队列就会把它一起清掉——用户点一次按钮本意是「全部停下」。
+    """
+    running, pending = queue.get_current_queue_volatile()
+    removed = len(pending)
+    if removed:
+        queue.delete_queue_item(lambda item: True)
+    interrupted = False
+    for item in running:
+        if queue.interrupt_if_running(item[1]):
+            interrupted = True
+            break
+    return removed, interrupted
+
+
+def _node_center(node: dict[str, Any]) -> tuple[float, float]:
+    """原生图里节点的中心点：有 size 用 size，没有就按 ComfyUI 默认节点尺寸估。"""
+    pos = node.get("pos")
+    if not isinstance(pos, (list, tuple)) or len(pos) < 2:
+        return (0.0, 0.0)
+    try:
+        x = float(pos[0])
+        y = float(pos[1])
+    except (TypeError, ValueError):
+        return (0.0, 0.0)
+    size = node.get("size")
+    width, height = 210.0, 100.0
+    if isinstance(size, (list, tuple)) and len(size) >= 2:
+        try:
+            width = float(size[0])
+            height = float(size[1])
+        except (TypeError, ValueError):
+            pass
+    return (x + width / 2, y + height / 2)
+
+
+def _inside_bounding(center: tuple[float, float], bounding: Any) -> float:
+    """点在组框内时返回框面积，否则返回 0（面积用来挑最内层组）。"""
+    if not isinstance(bounding, (list, tuple)) or len(bounding) < 4:
+        return 0.0
+    try:
+        x, y, width, height = (float(value) for value in bounding[:4])
+    except (TypeError, ValueError):
+        return 0.0
+    if width <= 0 or height <= 0:
+        return 0.0
+    if x <= center[0] <= x + width and y <= center[1] <= y + height:
+        return width * height
+    return 0.0
+
+
+def _workflow_graph(prompt: Any, workflow: Any, fields: list[dict[str, Any]]) -> dict[str, Any]:
+    """给手机端「高级」页用的节点图：节点顺序、分组、连线关系。
+
+    节点来自 API 格式的 prompt（class_type + inputs，连线就是 [节点, 槽位]），
+    分组与画布坐标来自原生图的 groups/nodes：按节点中心是否落在组框内判断，
+    落在多个组里时取面积最小的那个（也就是最内层），和电脑端看到的一致。
+    可编辑输入不在这里重复传值——fields 里已经有了，这里只给结构。
+    """
+    if not isinstance(prompt, dict):
+        prompt = {}
+    editable = {str(field.get("id", "")): field for field in fields if field.get("id")}
+    native_nodes: dict[str, dict[str, Any]] = {}
+    native_groups: list[dict[str, Any]] = []
+    if isinstance(workflow, dict):
+        nodes = workflow.get("nodes")
+        if isinstance(nodes, list):
+            for node in nodes:
+                if isinstance(node, dict) and node.get("id") is not None:
+                    native_nodes[str(node["id"])] = node
+        groups = workflow.get("groups")
+        if isinstance(groups, list):
+            native_groups = [group for group in groups if isinstance(group, dict)]
+
+    group_of: dict[str, str] = {}
+    group_list: list[dict[str, Any]] = []
+    for index, group in enumerate(native_groups):
+        # 兜底标题用英文：中文写进 f-string 会被 i18n 抽取器当成待翻译 key，
+        # 而插值后的这条字符串运行时永远不会被查表（users 看到的是「组 1」这种）。
+        title = str(group.get("title") or group.get("name") or "").strip() or f"Group {index + 1}"
+        bounding = group.get("bounding")
+        members: list[str] = []
+        for node_id in prompt.keys():
+            native = native_nodes.get(str(node_id))
+            if native is None:
+                continue
+            area = _inside_bounding(_node_center(native), bounding)
+            if area <= 0:
+                continue
+            current = group_of.get(str(node_id))
+            if current is None or area < current[1]:
+                group_of[str(node_id)] = (title, area)  # type: ignore[assignment]
+            members.append(str(node_id))
+        group_list.append({
+            "id": f"g{index}",
+            "title": title,
+            "color": str(group.get("color") or ""),
+            "node_ids": members,
+        })
+    # 上面按「面积最小」记录，最后统一取标题
+    resolved_group: dict[str, str] = {}
+    for node_id, value in group_of.items():
+        resolved_group[node_id] = value[0] if isinstance(value, tuple) else str(value)
+
+    nodes_out: list[dict[str, Any]] = []
+    for node_id, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        key = str(node_id)
+        native = native_nodes.get(key, {})
+        pos = native.get("pos") if isinstance(native.get("pos"), list) else None
+        meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        links = []
+        for name, value in inputs.items():
+            if isinstance(value, (list, tuple)) and len(value) == 2 and isinstance(value[0], (str, int)):
+                links.append({"name": str(name), "node": str(value[0]), "slot": int(value[1]) if str(value[1]).isdigit() else 0})
+        nodes_out.append({
+            "id": key,
+            "type": str(node.get("class_type") or ""),
+            "title": str(meta.get("title") or node.get("class_type") or key),
+            "pos": [int(pos[0]), int(pos[1])] if isinstance(pos, list) and len(pos) >= 2 else None,
+            "group": resolved_group.get(key, ""),
+            "links": links,
+            "field_ids": [field_id for field_id in editable if editable[field_id].get("node_id") == key],
+            "has_editable": any(editable[field_id].get("node_id") == key for field_id in editable),
+        })
+    # 画布阅读顺序：先上后下、同一行内先左后右；没有坐标的排在最后（按 id）。
+    def sort_key(node: dict[str, Any]) -> tuple:
+        pos = node.get("pos")
+        if not isinstance(pos, list) or len(pos) < 2:
+            return (1, 0, 0, str(node["id"]))
+        return (0, round(pos[1] / 40), pos[0], str(node["id"]))
+
+    nodes_out.sort(key=sort_key)
+    return {"nodes": nodes_out, "groups": group_list}
+
+
 def _tailscale_ips() -> list[str]:
     global TAILSCALE_CACHE
     with _TAILSCALE_LOCK:
@@ -2920,6 +3061,7 @@ def register_routes() -> None:
                 meta = node.get("_meta")
                 title = meta.get("title") if isinstance(meta, dict) else None
                 node_titles[str(node_id)] = str(title or node.get("class_type") or node_id)
+        fields = _infer_fields(prompt)
         return web.json_response(
             {
                 "ok": True,
@@ -2929,8 +3071,10 @@ def register_routes() -> None:
                     "source": record.get("source", ""),
                     "synced_at": record.get("synced_at", 0),
                     "node_count": len(prompt) if isinstance(prompt, dict) else 0,
-                    "fields": _infer_fields(prompt),
+                    "fields": fields,
                     "node_titles": node_titles,
+                    # 「高级」页用：节点顺序、分组、连线关系
+                    "graph": _workflow_graph(prompt, record.get("workflow"), fields),
                 },
             },
             headers=NO_CACHE,
@@ -3137,6 +3281,23 @@ def register_routes() -> None:
             dequeue=lambda prompt_id: queue.delete_queue_item(lambda item: item[1] == prompt_id),
         )
         return web.json_response({"ok": True, "result": result}, headers=NO_CACHE)
+
+    @routes.post("/mobile/api/jobs/stop-all")
+    async def mobile_stop_all_jobs(request: web.Request) -> web.Response:
+        """先清空排队中的任务，再中断正在执行的那一个。
+
+        顺序不能反：先中断当前任务的话，队列里的下一条会立刻开始跑，
+        紧接着的清队列就会把它一起清掉——用户点一次按钮本意是"全部停下"。
+        两个动作都在队列锁内完成，中途不会有新任务插进来。
+        """
+        from server import PromptServer
+
+        removed, interrupted = _stop_all_jobs(PromptServer.instance.prompt_queue)
+        return web.json_response({
+            "ok": True,
+            "removed": removed,
+            "interrupted": interrupted,
+        }, headers=NO_CACHE)
 
     @routes.post("/mobile/api/jobs/{job_id}/retry")
     async def mobile_retry_job(request: web.Request) -> web.Response:
