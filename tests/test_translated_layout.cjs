@@ -237,6 +237,68 @@ test("电脑端四种语言的按钮都不被译文撑破，复制成功不再�
         if (copied.feedbackHidden || !copied.feedback) failures.push(`${where} 复制成功提示没有显示在反馈行`);
         if (copied.caption !== "") failures.push(`${where} 成功文案仍塞在图标按钮里：「${copied.caption}」`);
         if (copied.height > 33) failures.push(`${where} 复制按钮被文字撑高到 ${copied.height}px`);
+        // 右上角三个按钮：同高 28px、字号各小两号、图标与文字四方向居中。
+        // 图标与文字是并排的，所以横向要看「左右留白相等」，纵向看各自是否居中。
+        const header = await page.evaluate(() => {
+          const rows = [];
+          for (const button of document.querySelectorAll(".mobile-remote-header-actions button")) {
+            const box = button.getBoundingClientRect();
+            if (box.width < 1) continue;
+            const contentLeft = box.left + button.clientLeft;
+            const contentRight = contentLeft + button.clientWidth;
+            const contentCenterY = box.top + button.clientTop + button.clientHeight / 2;
+            const icon = button.querySelector(".mobile-remote-icon");
+            const label = button.querySelector(".mobile-remote-button-label");
+            const hasText = Boolean(label && label.textContent.trim());
+            const first = icon || label;
+            const last = hasText ? label : icon;
+            rows.push({
+              cls: String(button.className || ""),
+              text: hasText ? label.textContent.trim() : "",
+              width: Math.round(box.width),
+              height: Math.round(box.height),
+              fontSize: parseFloat(getComputedStyle(hasText ? label : button).fontSize),
+              hasIcon: Boolean(icon),
+              leftGap: first ? +(first.getBoundingClientRect().left - contentLeft).toFixed(2) : null,
+              rightGap: last ? +(contentRight - last.getBoundingClientRect().right).toFixed(2) : null,
+              centerX: +(box.left + box.width / 2).toFixed(2),
+              iconDy: icon ? +(icon.getBoundingClientRect().top + icon.getBoundingClientRect().height / 2 - contentCenterY).toFixed(2) : null,
+              labelDy: hasText ? +(label.getBoundingClientRect().top + label.getBoundingClientRect().height / 2 - contentCenterY).toFixed(2) : null,
+              labelDx: hasText ? +(label.getBoundingClientRect().left + label.getBoundingClientRect().width / 2 - (contentLeft + contentRight) / 2).toFixed(2) : null,
+              iconDx: icon ? +(icon.getBoundingClientRect().left + icon.getBoundingClientRect().width / 2 - (contentLeft + contentRight) / 2).toFixed(2) : null,
+            });
+          }
+          return rows;
+        });
+        if (header.length < 3) failures.push(`${where} 右上角按钮数量不对：${header.length}`);
+        for (const row of header) {
+          const name = row.text || "图标按钮";
+          if (row.height !== 28) failures.push(`${where} 右上角「${name}」高度不是 28px（${row.height}px）`);
+          if (row.iconDy !== null && Math.abs(row.iconDy) > 0.5) {
+            failures.push(`${where} 右上角「${name}」的图标纵向没居中：dy=${row.iconDy}`);
+          }
+          if (row.labelDy !== null && Math.abs(row.labelDy) > 0.5) {
+            failures.push(`${where} 右上角「${name}」的文字纵向没居中：dy=${row.labelDy}`);
+          }
+          if (row.hasIcon && row.text) {
+            if (Math.abs(row.leftGap - row.rightGap) > 0.5) {
+              failures.push(`${where} 右上角「${name}」左右留白不等：左 ${row.leftGap} / 右 ${row.rightGap}`);
+            }
+          } else if (row.hasIcon && Math.abs(row.iconDx) > 0.5) {
+            failures.push(`${where} 右上角图标按钮横向没居中：dx=${row.iconDx}`);
+          } else if (!row.hasIcon && Math.abs(row.labelDx) > 0.5) {
+            failures.push(`${where} 右上角「${name}」横向没居中：dx=${row.labelDx}`);
+          }
+          if (row.cls.includes("mobile-remote-icon-button") && row.width !== 28) {
+            failures.push(`${where} 右上角图标按钮不是正方形（${row.width}x${row.height}）`);
+          }
+          if (row.cls.includes("mobile-remote-tags-entry") && row.fontSize !== 10) {
+            failures.push(`${where} 右上角「${name}」字号不是 10px（${row.fontSize}px）`);
+          }
+          if (row.cls.includes("mobile-remote-update") && row.fontSize !== 11) {
+            failures.push(`${where} 右上角「${name}」字号不是 11px（${row.fontSize}px）`);
+          }
+        }
         await page.evaluate(() => document.querySelectorAll(".mobile-remote-header-actions > .mobile-remote-button")[0]?.click());
         await page.waitForTimeout(350);
         offenders.push(...tag(`${where} 标签管理`, await page.evaluate(OFFENDERS)));

@@ -947,7 +947,7 @@ app.registerExtension({
       const stylesheet = document.createElement("link");
       stylesheet.id = "mobile-remote-styles";
       stylesheet.rel = "stylesheet";
-      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609302`;
+      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609303`;
       document.head.append(stylesheet);
     }
     app.extensionManager.registerSidebarTab({

@@ -79,14 +79,56 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  /* 右上角三个按钮：字号小两号、一起缩到 28px 高；图标与文字四方向居中。 */
   min-width: 0;
   max-width: 100%;
   margin-left: auto;
 }
 
-.mobile-remote-tags-entry {
+/* 权重必须压过下面通用的 .mobile-remote-panel .mobile-remote-button，
+   否则 padding / 字号 / min-height 会被它盖回去。 */
+.mobile-remote-panel .mobile-remote-header-actions .mobile-remote-button {
+  gap: 4px;
+  height: 28px;
+  min-height: 28px;
   padding: 0 8px;
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1;
+  justify-content: center;
+}
+
+/* 图标按钮与文字按钮同高同宽，避免整排高度差 2px 看起来没对齐。 */
+.mobile-remote-panel .mobile-remote-header-actions .mobile-remote-icon-button {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+
+/* 图标用自己的 14px 方格居中：字号 -2，行高 1，四方向都对正。 */
+.mobile-remote-panel .mobile-remote-header-actions .mobile-remote-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
   font-size: 12px;
+  line-height: 1;
+}
+
+.mobile-remote-panel .mobile-remote-header-actions .mobile-remote-button-label {
+  line-height: 1;
+}
+
+.mobile-remote-panel .mobile-remote-header-actions .mobile-remote-tags-entry {
+  padding: 0 8px;
+  font-size: 10px;
+}
+
+.mobile-remote-panel .mobile-remote-update {
+  font-size: 11px;
 }
 
 .mobile-remote-panel .mobile-remote-heading {
