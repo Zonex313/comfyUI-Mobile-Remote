@@ -36,6 +36,37 @@ function htmlDecode(value) {
     .replace(/&amp;/g, "&");
 }
 
+/* Python 源码里的字符串字面量：跳过注释与三引号文档串。 */
+function pythonLiterals(text) {
+  const out = [];
+  let index = 0;
+  while (index < text.length) {
+    const triple = text.slice(index, index + 3);
+    if (text[index] === "#") { while (index < text.length && text[index] !== "\n") index += 1; continue; }
+    if (triple === '"""' || triple === "'''") {
+      index += 3;
+      while (index < text.length && text.slice(index, index + 3) !== triple) index += 1;
+      index += 3;
+      continue;
+    }
+    if (text[index] === '"' || text[index] === "'") {
+      const quote = text[index];
+      index += 1;
+      let value = "";
+      while (index < text.length) {
+        if (text[index] === "\\") { value += text[index] + (text[index + 1] || ""); index += 2; continue; }
+        if (text[index] === quote) { index += 1; break; }
+        value += text[index];
+        index += 1;
+      }
+      out.push(value);
+      continue;
+    }
+    index += 1;
+  }
+  return out;
+}
+
 /* 与源码同源的键提取：t("…") / _t("…") / data-i18n* 属性。 */
 function collectSourceKeys() {
   const keys = new Set();
@@ -51,31 +82,15 @@ function collectSourceKeys() {
     let match;
     while ((match = re.exec(text))) keys.add(unescapeJs(match[2]));
   }
-  /* 服务端进词典的路径有两类：显式翻译点（_t / _json_error 的入参）一律算；
-   * 结果字典的 error/message 字段与异常文案只挑中文的——像 "action"、
-   * "Invalid workflow id" 这类是内部标记，不是给人看的文案。 */
-  const PY_EXPLICIT = [
-    /(^|[^\w$.])_t\("((?:[^"\\]|\\.)*)"/g,
-    /(^|[^\w$.])_json_error\("((?:[^"\\]|\\.)*)"/g,
-  ];
-  const PY_CHINESE_ONLY = [
-    /"error":\s*f?"((?:[^"\\]|\\.)*)"/g,
-    /"message":\s*f?"((?:[^"\\]|\\.)*)"/g,
-    /raise\s+(?:ValueError|RuntimeError)\("((?:[^"\\]|\\.)*)"/g,
-  ];
+  /* 服务端取「全部中文字面量」而不是逐个调用形态去匹配：之前正是漏了
+   * message="..." 这类写法，12 条连接状态提示没进词典，界面上就露了中文。
+   * 只有下面这几个是内部标识，不给人看。 */
+  const PY_INTERNAL_ONLY = new Set(["反向", "负面", "正向", "每次随机"]);
   const hasChinese = (value) => /[\u3000-\u303f\u3040-\u30ff\u4e00-\u9fff\uff00-\uffef]/.test(value);
   for (const file of PY_SOURCES) {
-    const text = fs.readFileSync(path.join(ROOT, file), "utf8");
-    for (const re of PY_EXPLICIT) {
-      let match;
-      while ((match = re.exec(text))) keys.add(unescapeJs(match[2] ?? match[1]));
-    }
-    for (const re of PY_CHINESE_ONLY) {
-      let match;
-      while ((match = re.exec(text))) {
-        const value = unescapeJs(match[1]);
-        if (hasChinese(value)) keys.add(value);
-      }
+    for (const value of pythonLiterals(fs.readFileSync(path.join(ROOT, file), "utf8"))) {
+      if (!hasChinese(value) || PY_INTERNAL_ONLY.has(value)) continue;
+      keys.add(value);
     }
   }
   return keys;

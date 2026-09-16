@@ -289,7 +289,7 @@
     row.className = "field-label-row";
     const label = document.createElement("span");
     label.className = "field-label";
-    label.textContent = field.label;
+    label.textContent = t(field.label);
     const node = document.createElement("span");
     node.className = "field-node";
     node.textContent = field.node_title;
@@ -729,7 +729,7 @@
 
     const preview = document.createElement("img");
     preview.className = "image-field-preview hidden";
-    preview.alt = field.label;
+    preview.alt = t(field.label);
     const paintPreview = () => {
       const url = inputImageUrl(input.value);
       if (url) {
