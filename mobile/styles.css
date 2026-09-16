@@ -2459,13 +2459,25 @@ select:focus {
   border-radius: 12px;
 }
 
+/* 数字角标与连发数字必须排成一行：按钮上的 overflow-wrap 会继承下来，
+   「10」「99+」原本会在两个字符之间断开。 */
+.nav-badge,
+.count-badge,
+.repeat-center-num,
+.repeat-bubble-num,
+.repeat-tick,
+.job-progress-percent {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
 .nav-badge {
   position: absolute;
   top: 3px;
   left: calc(50% + 8px);
   min-width: 18px;
   height: 18px;
-  padding: 0 5px;
+  padding: 0 3px;
   display: grid;
   place-items: center;
   border: 2px solid #10121e;

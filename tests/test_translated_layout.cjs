@@ -140,6 +140,30 @@ test("手机端四种语言的按钮都不被译文撑破", { timeout: 600000 },
         await page.goto(`${base}/mobile`);
         await page.waitForFunction(() => document.querySelector("#pluginVersion")?.textContent?.includes("0.3.0"), null, { timeout: 30000 });
         await page.waitForFunction(() => !document.querySelector("#generationForm")?.classList.contains("hidden"), null, { timeout: 30000 });
+        // 连发 10 个任务后：底部导航角标与 FAB 上的连发数字都必须是单行。
+        const counters = await page.evaluate(() => {
+          const fab = document.querySelector("#generateButton");
+          if (fab && !fab.classList.contains("has-repeat")) {
+            fab.classList.add("has-repeat");
+            document.querySelector("#repeatCenterNum").textContent = "10";
+          }
+          const measure = (selector) => {
+            const el = document.querySelector(selector);
+            if (!el) return null;
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            const rects = [...range.getClientRects()];
+            return { text: el.textContent.trim(), height: Math.round(el.getBoundingClientRect().height),
+              lines: [...new Set(rects.map((rect) => Math.round(rect.top)))].length };
+          };
+          return { badge: measure("#queueBadge"), repeat: measure("#repeatCenterNum") };
+        });
+        if (!counters.badge || counters.badge.text !== "10" || counters.badge.lines !== 1 || counters.badge.height !== 18) {
+          failures.push(`${where} 队列角标不是单行的「10」：${JSON.stringify(counters.badge)}`);
+        }
+        if (!counters.repeat || counters.repeat.text !== "10" || counters.repeat.lines !== 1) {
+          failures.push(`${where} 连发数字不是单行的「10」：${JSON.stringify(counters.repeat)}`);
+        }
         const offenders = await page.evaluate(OFFENDERS);
         await page.evaluate(() => {
           document.querySelector("#advancedSection")?.setAttribute("open", "");

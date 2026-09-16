@@ -29,9 +29,13 @@ const workflow = { id: "0a1b2c3d4e5f60718293", name: "Landscape workflow for lay
     field("image", "图像", "image", ""),
   ] };
 const output = { filename: "layout.png", subfolder: "", type: "output", kind: "image" };
+// 10 个排队任务 = 连发 10 次之后的真实状态：底部导航角标会显示两位数。
+const pendingJobs = Array.from({ length: 10 }, (_, index) => ({
+  id: `layout-pending-${index}`, status: "pending", create_time: 1700000000000, workflow_name: workflow.name,
+}));
 const jobs = [
   { id: "layout-completed", status: "completed", create_time: 1700000000000, workflow_name: workflow.name, workflow_id: workflow.id, gallery: [output], preview_output: output, seed: 123, positive_prompt: "A landscape" },
-  { id: "layout-pending", status: "pending", create_time: 1700000000000, workflow_name: workflow.name },
+  ...pendingJobs,
 ];
 const EMPTY_CATALOG = { custom: {}, removed: {}, removedCustom: {}, skipped: {}, mutex: [], singletons: [], skipCategories: [] };
 
@@ -72,7 +76,7 @@ function createFixture() {
       if (method === "POST") { Object.assign(settings.values, JSON.parse(body || "{}").changes || {}); settings.revision++; }
       return json(settings);
     }
-    if (pathname === "/mobile/api/status") return json({ ok: true, online: true, running: 0, pending: 1, version: "0.3.0", gpu: { name: "Layout test GPU", total: 1024, free: 512, used: 512 }, tailscale_ips: [], mobile_urls: [] });
+    if (pathname === "/mobile/api/status") return json({ ok: true, online: true, running: 0, pending: 10, version: "0.3.0", gpu: { name: "Layout test GPU", total: 1024, free: 512, used: 512 }, tailscale_ips: [], mobile_urls: [] });
     if (pathname === "/mobile/api/update") return json({ ok: true, has_update: false });
     if (pathname === "/mobile/api/connections") return json({ ok: true, tunnel: { state: "connected", url: "https://layout.example/mobile", message: "", autostart: true, enabled: true, binary_present: true }, tailscale: { state: "unconfigured", urls: [], message: "" } });
     if (pathname === "/mobile/api/workflows") return json({ ok: true, workflows: [workflow] });
