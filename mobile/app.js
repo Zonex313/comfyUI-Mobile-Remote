@@ -984,7 +984,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609302", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609304", { cache: "no-store" });
       if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];
@@ -3824,13 +3824,21 @@
       el.style.transform = x === 0 ? "" : `translateX(${x}px)`;
     };
 
+    // 翻页时相邻两张图会作为图层滑进来。新生成的图还没下载完，
+    // 浏览器会先画已解码的那部分（常见是上面一小条或半张），
+    // 松手后又立刻被"加载中"盖住，看起来就是闪一下半张图。
+    // 所以图层加载完成前一律不显示，加载好了再露出来。
     const galleryMakeGhost = (src) => {
       const ghost = document.createElement("img");
-      ghost.src = src;
       ghost.alt = "";
-      ghost.className = "gallery-ghost";
+      ghost.className = "gallery-ghost is-pending";
       ghost.draggable = false;
+      const reveal = () => ghost.classList.remove("is-pending");
+      ghost.addEventListener("load", reveal, { once: true });
       galleryStage.append(ghost);
+      ghost.src = src;
+      // 命中缓存时 load 可能已经错过，直接按当前状态补齐。
+      if (ghost.complete && ghost.naturalWidth > 0) reveal();
       return ghost;
     };
 

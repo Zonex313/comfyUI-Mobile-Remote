@@ -1,4 +1,4 @@
-import { t } from "./i18n.js?v=202609302";
+import { t } from "./i18n.js?v=202609304";
 import { app } from "../../scripts/app.js";
 
 const LOG_PREFIX = "[Mobile Remote]";

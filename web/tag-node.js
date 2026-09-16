@@ -1,4 +1,4 @@
-import { ready as i18nReady, t } from "./i18n.js?v=202609302";
+import { ready as i18nReady, t } from "./i18n.js?v=202609304";
 
 // 词典到位后再注册界面，否则侧边栏标题会先渲染成中文原文。
 await i18nReady;
@@ -17,7 +17,7 @@ function textSpan(className, text) {
 }
 
 const NODE_TYPE = "MobileTagCLIPTextEncode";
-const VERSION = "202609302";
+const VERSION = "202609304";
 const PANEL_HEIGHT = 202;
 
 let libraryPromise = null;

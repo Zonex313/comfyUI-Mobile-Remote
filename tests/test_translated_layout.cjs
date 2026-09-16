@@ -623,5 +623,107 @@ test("队列卡片显示模型名与提示词，且高度紧凑", { timeout: 300
   assert.equal(failures.length, 0, `队列卡片排版不对：\n${failures.slice(0, 12).join("\n")}`);
 });
 
+/* 大图翻页：相邻图片还在下载时不能显示，否则会先露出上面一小条/半张图。 */
+test("大图翻页不会先露出半张没下载完的图", { timeout: 300000 }, async () => {
+  const { chromium } = resolvePlaywright();
+  const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
+  const { server, base } = await startServer();
+  const failures = [];
+  try {
+    const context = await browser.newContext({ locale: "zh-CN", viewport: { width: 390, height: 800 }, hasTouch: true });
+    const page = await context.newPage();
+    page.on("pageerror", (error) => failures.push(`页面异常：${error.message}`));
+    // 第二张图卡住不返回：模拟"新生成的图还在下载"，这样才能稳定复现。
+    let releaseSecond = () => {};
+    const gate = new Promise((resolve) => { releaseSecond = resolve; });
+    let gatedRequests = 0;
+    await page.route("**/view?*", async (route) => {
+      if (route.request().url().includes("layout-2.png")) {
+        gatedRequests += 1;
+        await gate;
+      }
+      await route.continue();
+    });
+    await page.goto(`${base}/mobile`);
+    await page.waitForFunction(() => !document.querySelector("#generationForm")?.classList.contains("hidden"), null, { timeout: 30000 });
+    await page.click(".nav-button[data-target=history]");
+    await page.waitForSelector("#historyGrid .history-media-button", { timeout: 30000 });
+    await page.click("#historyGrid .history-media-button");
+    await page.waitForFunction(() => document.querySelector("#galleryDialog")?.open, null, { timeout: 30000 });
+    await page.waitForFunction(() => document.querySelector("#galleryImage")?.classList.contains("is-ready"), null, { timeout: 30000 });
+    const pending = await page.evaluate(() => {
+      const stage = document.querySelector("#galleryStage");
+      const box = stage.getBoundingClientRect();
+      const y = box.top + box.height / 2;
+      const send = (type, x) => {
+        const touch = new Touch({ identifier: 7, target: stage, clientX: x, clientY: y });
+        stage.dispatchEvent(new TouchEvent(type, {
+          touches: type === "touchend" ? [] : [touch],
+          targetTouches: type === "touchend" ? [] : [touch],
+          changedTouches: [touch], bubbles: true, cancelable: true,
+        }));
+      };
+      send("touchstart", box.left + box.width - 20);
+      // 拖动必须超过半个屏幕：合成出来的两次事件可能落在同一毫秒，
+      // 速度会算成 0，只能靠距离判定翻页。
+      send("touchmove", box.left + 20);
+      const ghosts = [...stage.querySelectorAll("img.gallery-ghost")];
+      const ghost = ghosts[ghosts.length - 1];
+      if (!ghost) return { found: false };
+      const rect = ghost.getBoundingClientRect();
+      return {
+        found: true,
+        src: ghost.getAttribute("src") || "",
+        complete: ghost.complete,
+        opacity: getComputedStyle(ghost).opacity,
+        exposed: Math.round(Math.min(rect.right, box.right) - Math.max(rect.left, box.left)),
+      };
+    });
+    if (!pending.found) failures.push("滑动时没有生成相邻图片图层");
+    else {
+      if (!pending.src.includes("layout-2.png")) failures.push(`相邻图层取的不是下一张图：${pending.src}`);
+      if (pending.complete) failures.push("第二张图没有被挂住，测试前提不成立");
+      if (pending.exposed > 0 && pending.opacity !== "0") {
+        failures.push(`图片还没下载完就已经露出来了：opacity=${pending.opacity}，露出 ${pending.exposed}px`);
+      }
+      if (pending.opacity !== "0") failures.push(`未加载完的图层没有隐藏：opacity=${pending.opacity}`);
+    }
+    if (gatedRequests === 0) failures.push("没有拦到第二张图的请求");
+    releaseSecond();
+    // 下载完成后图层要自己显示出来
+    const revealed = await page.waitForFunction(() => {
+      const stage = document.querySelector("#galleryStage");
+      const ghosts = [...stage.querySelectorAll("img.gallery-ghost")];
+      const ghost = ghosts[ghosts.length - 1];
+      return Boolean(ghost) && ghost.complete && ghost.naturalWidth > 0 && getComputedStyle(ghost).opacity === "1";
+    }, null, { timeout: 15000 }).then(() => true).catch(() => false);
+    if (!revealed) failures.push("图片下载完了，图层却没有显示出来");
+    // 松手翻到下一张，等它稳定显示
+    await page.evaluate(() => {
+      const stage = document.querySelector("#galleryStage");
+      const box = stage.getBoundingClientRect();
+      const y = box.top + box.height / 2;
+      const touch = new Touch({ identifier: 7, target: stage, clientX: box.left + 20, clientY: y });
+      stage.dispatchEvent(new TouchEvent("touchend", { touches: [], targetTouches: [], changedTouches: [touch], bubbles: true, cancelable: true }));
+    });
+    await page.waitForTimeout(700);
+    const settled = await page.evaluate(() => {
+      const image = document.querySelector("#galleryImage");
+      return { ready: image.classList.contains("is-ready"), src: image.getAttribute("src") || "",
+        counter: document.querySelector("#galleryCounter")?.textContent || "",
+        ghosts: document.querySelectorAll("#galleryStage img.gallery-ghost").length };
+    });
+    if (!settled.src.includes("layout-2.png")) failures.push(`松手后没有翻到第二张：${settled.src}`);
+    if (!settled.ready) failures.push("翻页后大图没有进入已显示状态");
+    if (settled.ghosts !== 0) failures.push(`翻页后还残留 ${settled.ghosts} 个图层`);
+    await context.close();
+  } finally {
+    await browser.close();
+    await stopServer(server);
+  }
+  assert.equal(failures.length, 0, `大图翻页有问题：\n${failures.join("\n")}`);
+});
+
+
 
 

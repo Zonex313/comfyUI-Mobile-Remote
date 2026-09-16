@@ -2905,6 +2905,11 @@ dialog:not([open]) {
 .gallery-stage img.gallery-ghost {
   opacity: 1;
 }
+
+/* 翻页图层：还没加载完就不显示，别把渐进解码出的半张图露出来。 */
+.gallery-stage img.gallery-ghost.is-pending {
+  opacity: 0;
+}
 #galleryImage {
   position: relative;
   z-index: 2;
