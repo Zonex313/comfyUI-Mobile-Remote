@@ -14,6 +14,9 @@ const LOCALES = [
 const DEFAULT_LOCALE = "en";
 const LOCALE_IDS = LOCALES.map((item) => item.id);
 const STORAGE_KEY = "comfy-mobile-remote.ui-locale";
+// 和服务端 server.py 的 LOCALE_COOKIE 保持一致：直接连接时服务端靠它
+// 决定提示语用哪种语言（隧道里 Cookie 不转发，那边退回 Accept-Language）。
+const LOCALE_COOKIE = "mtr_locale";
 const DICT_URL = (lang) => `/mobile/api/i18n/${lang}`;
 const DICT_TIMEOUT_MS = 5000;
 
@@ -52,6 +55,9 @@ function storedLocale() {
 
 function persistLocale(id) {
   try { storage && storage.setItem(STORAGE_KEY, id); } catch { /* Storage is optional. */ }
+  try {
+    document.cookie = `${LOCALE_COOKIE}=${id}; path=/; max-age=31536000; SameSite=Lax`;
+  } catch { /* No document (tests, workers). */ }
 }
 
 /* `{name}` placeholders are substituted after the lookup, so a translation
@@ -59,7 +65,10 @@ function persistLocale(id) {
  * pair, but only when the caller actually passes a count as `n` — some
  * titles legitimately contain a "|" separator of their own. */
 function translate(source, params) {
-  const text = String(source ?? "");
+  /* 传进来的不是文本就原样返回。曾经有人把 DOM 元素递给 t()，结果元素被
+   * String() 成了 "[object HTMLParagraphElement]"，界面直接崩在赋值上。 */
+  if (typeof source !== "string") return source;
+  const text = source;
   if (!text) return text;
   let value = catalog && Object.prototype.hasOwnProperty.call(catalog, text) ? catalog[text] : text;
   if (typeof value !== "string") value = text;

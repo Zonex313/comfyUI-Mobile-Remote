@@ -51,11 +51,32 @@ function collectSourceKeys() {
     let match;
     while ((match = re.exec(text))) keys.add(unescapeJs(match[2]));
   }
+  /* 服务端进词典的路径有两类：显式翻译点（_t / _json_error 的入参）一律算；
+   * 结果字典的 error/message 字段与异常文案只挑中文的——像 "action"、
+   * "Invalid workflow id" 这类是内部标记，不是给人看的文案。 */
+  const PY_EXPLICIT = [
+    /(^|[^\w$.])_t\("((?:[^"\\]|\\.)*)"/g,
+    /(^|[^\w$.])_json_error\("((?:[^"\\]|\\.)*)"/g,
+  ];
+  const PY_CHINESE_ONLY = [
+    /"error":\s*f?"((?:[^"\\]|\\.)*)"/g,
+    /"message":\s*f?"((?:[^"\\]|\\.)*)"/g,
+    /raise\s+(?:ValueError|RuntimeError)\("((?:[^"\\]|\\.)*)"/g,
+  ];
+  const hasChinese = (value) => /[\u3000-\u303f\u3040-\u30ff\u4e00-\u9fff\uff00-\uffef]/.test(value);
   for (const file of PY_SOURCES) {
     const text = fs.readFileSync(path.join(ROOT, file), "utf8");
-    const re = /(^|[^\w$.])_t\("((?:[^"\\]|\\.)*)"/g;
-    let match;
-    while ((match = re.exec(text))) keys.add(unescapeJs(match[2]));
+    for (const re of PY_EXPLICIT) {
+      let match;
+      while ((match = re.exec(text))) keys.add(unescapeJs(match[2] ?? match[1]));
+    }
+    for (const re of PY_CHINESE_ONLY) {
+      let match;
+      while ((match = re.exec(text))) {
+        const value = unescapeJs(match[1]);
+        if (hasChinese(value)) keys.add(value);
+      }
+    }
   }
   return keys;
 }

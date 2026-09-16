@@ -85,9 +85,10 @@
   let submittingBatch = false;
   let applyingRemoteSettings = false;
   let catalogInvalidNotified = false;
-  const phoneSettings = new window.MobileSettingsSync({ onStatus: renderSettingsSync });
-
+  // MobileSettingsSync 构造时就会回调一次 onStatus，所以这个变量必须先声明，
+  // 否则 renderSettingsSync 会在 TDZ 里赋值失败、整个页面起不来。
   let lastSettingsStatus = null;
+  const phoneSettings = new window.MobileSettingsSync({ onStatus: renderSettingsSync });
 
   function renderSettingsSync(status) {
     lastSettingsStatus = status;

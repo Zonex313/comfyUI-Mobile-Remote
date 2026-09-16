@@ -709,7 +709,7 @@ function mountPanel(container) {
       ? t("暂未获取到有效链接，请刷新重试")
       : (t(tunnel?.message) || (tunnel ? t("连接后显示链接") : t("等待获取连接状态")));
     paintUrl(cloud, cloudUrl, cloudHint, tunnel?.state === "connected");
-    showMessage(t(cloud.message), "");
+    showMessage(cloud.message, "");
 
     const running = tunnelRunning(tunnel);
     const tailOnline = tailscale?.state === "connected";
@@ -747,7 +747,7 @@ function mountPanel(container) {
         ? t("配置 Tailscale 后显示链接")
         : (tailscale ? t("暂无可用链接") : t("等待获取连接状态"))));
     paintUrl(tail, tailChoice.value || urls[0] || "", tailHint, tailscale?.state === "connected");
-    showMessage(t(tail.message), "");
+    showMessage(tail.message, "");
   }
 
   async function requestSnapshot(body) {
