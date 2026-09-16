@@ -84,12 +84,18 @@ class DesktopCommandTests(unittest.TestCase):
         server._DESKTOP_COMMANDS = None
         self.temporary.cleanup()
 
-    def write_record(self, workflow_id: str, prompt: dict, name: str = "测试工作流") -> Path:
+    def write_record(
+        self,
+        workflow_id: str,
+        prompt: dict,
+        name: str = "测试工作流",
+        workflow: dict | None = None,
+    ) -> Path:
+        record = {"id": workflow_id, "name": name, "prompt": prompt}
+        if workflow is not None:
+            record["workflow"] = workflow
         path = self.workflows / f"{workflow_id}.json"
-        path.write_text(
-            json.dumps({"id": workflow_id, "name": name, "prompt": prompt}, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
         return path
 
     def submit(self, payload: dict):
@@ -216,6 +222,76 @@ class DesktopCommandTests(unittest.TestCase):
                 self.assertIsNone(command)
                 self.assertEqual((status, reason), (400, "payload"))
                 self.assertTrue(error)
+
+    # ---- 节点 / 组动作 ------------------------------------------------------
+
+    def test_node_action_is_queued_with_the_action_field(self):
+        command, error, status, reason = self.submit(command_payload(input_name="action", action="bypass", value=True))
+        self.assertEqual((error, status, reason), ("", 200, ""))
+        self.assertEqual(command["action"], "bypass")
+        self.assertEqual(command["input"], "action")
+        pending = server._desktop_commands_pending(WORKFLOW_ID)
+        self.assertEqual(pending[0]["action"], "bypass")
+        # 非动作指令不带 action 字段（老电脑端读到的形状不变）
+        self.submit(command_payload())
+        self.assertNotIn("action", server._desktop_commands_pending(WORKFLOW_ID)[1])
+
+    def test_unknown_node_action_is_rejected(self):
+        for action in ("rm -rf", "ACTION", "", "group-rename!"):
+            with self.subTest(action=action):
+                command, error, status, reason = self.submit(
+                    command_payload(input_name="action", action=action, value=True)
+                )
+                self.assertIsNone(command)
+                self.assertEqual((status, reason), (400, "action"))
+                self.assertTrue(error)
+        # 动作也要对应真实存在的节点
+        command, _, status, reason = self.submit(
+            command_payload(node_id="99", input_name="action", action="bypass", value=True)
+        )
+        self.assertIsNone(command)
+        self.assertEqual((status, reason), (400, "node"))
+        self.assertEqual(server._desktop_commands_count(), 0)
+
+    def test_group_actions_target_the_native_group_list(self):
+        groups = [{"title": "文本编码", "color": "#7eb4d4"}, {"title": "采样"}]
+        self.write_record(WORKFLOW_ID, PROMPT, workflow={"groups": groups, "nodes": []})
+        command, error, status, reason = self.submit(
+            command_payload(node_id="g1", input_name="action", action="group-rename", value="采样器")
+        )
+        self.assertEqual((error, status, reason), ("", 200, ""))
+        self.assertEqual(command["action"], "group-rename")
+        self.assertEqual(command["value"], "采样器")
+        command, _, _, _ = self.submit(
+            command_payload(node_id="g0", input_name="action", action="group-color", value="#ff0000")
+        )
+        self.assertEqual(command["value"], "#ff0000")
+        self.assertEqual(server._desktop_commands_count(), 2)
+
+    def test_group_actions_reject_bad_targets_and_values(self):
+        self.write_record(WORKFLOW_ID, PROMPT, workflow={"groups": [{"title": "文本编码"}]})
+        # 越界的组序号
+        for node_id in ("g9", "g0042"):
+            with self.subTest(node_id=node_id):
+                command, _, status, reason = self.submit(
+                    command_payload(node_id=node_id, input_name="action", action="group-rename", value="x")
+                )
+                self.assertIsNone(command)
+                self.assertEqual((status, reason), (400, "node"))
+        # 组名必须是字符串
+        command, _, status, reason = self.submit(
+            command_payload(node_id="g0", input_name="action", action="group-rename", value=True)
+        )
+        self.assertIsNone(command)
+        self.assertEqual((status, reason), (400, "value"))
+        # 没有原生工作流（只有 API prompt）时不能对组下手
+        self.write_record(OTHER_WORKFLOW_ID, PROMPT)
+        payload = command_payload(node_id="g0", input_name="action", action="group-rename", value="x")
+        payload["workflow_id"] = OTHER_WORKFLOW_ID
+        command, _, status, reason = self.submit(payload)
+        self.assertIsNone(command)
+        self.assertEqual((status, reason), (400, "node"))
+        self.assertEqual(server._desktop_commands_count(), 0)
 
     # ---- 去重与封顶 --------------------------------------------------------
 

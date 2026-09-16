@@ -245,6 +245,11 @@
           advancedEdited = true;
           pushDesktopAction(nodeId, action, value);
         },
+        // 组操作（改名 / 改颜色）：组 id 是 g<序号>，和电脑端 workflow.groups 的下标一致。
+        onGroupAction: (index, action, value) => {
+          advancedEdited = true;
+          pushDesktopAction("g" + String(index), action, value);
+        },
         onEdit: (field, value) => {
           advancedEdited = true;
           // 「高级」页改的值必须送回电脑端：那边的自制节点要靠自己的回调重画面板，
@@ -1100,7 +1105,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610122", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610125", { cache: "no-store" });
       if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];

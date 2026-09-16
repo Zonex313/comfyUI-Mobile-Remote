@@ -1,4 +1,4 @@
-import { t } from "./i18n.js?v=202610122";
+import { t } from "./i18n.js?v=202610125";
 import { app } from "../../scripts/app.js";
 
 const LOG_PREFIX = "[Mobile Remote]";
@@ -218,7 +218,30 @@ function applyDesktopCommand(command) {
         return "applied";
       } else if (action === "collapse") node.flags = { ...(node.flags || {}), collapsed: Boolean(value) };
       else if (action === "select") { node.selected = Boolean(value); app.canvas?.select?.(node, Boolean(value)); }
-      else return "skip";
+      else if (action === "connect") {
+        const spec = typeof value === "string" ? JSON.parse(value) : value;
+        const source = graph.getNodeById?.(Number(spec?.source)) || graph._nodes?.find((item) => String(item?.id) === String(spec?.source));
+        const inputIndex = Number(spec?.inputSlot);
+        const outputSlot = Number(spec?.outputSlot ?? 0);
+        if (!source || !Number.isFinite(inputIndex) || !Number.isFinite(outputSlot)) return "missing-node";
+        source.connect?.(outputSlot, node, inputIndex);
+      } else if (action === "group-rename" || action === "group-color") {
+        // 组框不是节点：它是 workflow.groups 里的一项，用手机端给的 g<序号> 直接对下标。
+        const match = /^g(\d+)$/.exec(nodeId);
+        const index = match ? Number(match[1]) : -1;
+        const groups = graph._groups || graph.groups || [];
+        const group = index >= 0 && index < groups.length ? groups[index] : null;
+        if (!group) return "missing-node";
+        if (action === "group-rename") group.title = String(value ?? "");
+        else group.color = String(value ?? "");
+        app.canvas?.setDirty?.(true);
+        app.graph?.setDirtyCanvas?.(true, true);
+        return "applied";
+      } else if (action === "disconnect") {
+        const inputIndex = Number(value);
+        if (!Number.isFinite(inputIndex)) return "skip";
+        node.disconnectInput?.(inputIndex);
+      } else return "skip";
       markCanvasDirty(node);
       return "applied";
     } catch (error) {

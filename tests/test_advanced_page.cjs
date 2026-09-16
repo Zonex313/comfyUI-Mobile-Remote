@@ -247,6 +247,10 @@ const HARNESS = String.raw`
   fields.forEach(function (field) { state.values[field.id] = field.value; });
 
   var calls = [];
+  // 真机上 app.js 还会注入 onEdit / onAction / onGroupAction（手机 → 电脑端指令通道），
+  // 夹具照抄同样的形状，测试才能断言菜单动作真的发出去了。
+  var actions = [];
+  var edits = [];
   function updateFieldValue(field, value) {
     state.values[field.id] = value;
     calls.push({ id: field.id, value: value, node_id: field.node_id, input: field.input, kind: field.kind, initial: field.value });
@@ -298,6 +302,8 @@ const HARNESS = String.raw`
 
   window.__state = state;
   window.__calls = calls;
+  window.__actions = actions;
+  window.__edits = edits;
   window.__renderFieldCalls = function () { return renderFieldCalls; };
   renderFieldCalls = 0;   // 从挂载开始只统计高级页触发的 renderField 调用
 
@@ -306,6 +312,16 @@ const HARNESS = String.raw`
     state: state,
     renderField: renderField,          // 注入仍然给，但高级页不该用它
     updateFieldValue: updateFieldValue,
+    onEdit: function (field, value) {
+      // 单独的数组：calls 的既有断言不受影响。
+      edits.push({ id: field.id, value: value, node_id: field.node_id, input: field.input });
+    },
+    onAction: function (nodeId, action, value) {
+      actions.push({ target: String(nodeId), action: String(action), value: value });
+    },
+    onGroupAction: function (index, action, value) {
+      actions.push({ target: "g" + String(index), action: String(action), value: value, group: true });
+    },
     $: function (id) { return document.getElementById(id); },
     view: document.getElementById("view-advanced"),
     storage: window.localStorage,
@@ -843,6 +859,58 @@ test("多连接菜单：一个输出槽接了多个节点时先弹就地菜单�
     assert.equal(await page.locator(".advanced-menu").count(), 1);
     await page.evaluate(() => window.MobileAdvanced.toggleAll());
     assert.equal(await page.locator(".advanced-menu").count(), 0, "重渲染要关掉菜单");
+    await expectNoErrors(errors);
+  } finally {
+    await context.close();
+  }
+});
+
+test("节点/组菜单是浮层：默认不外显、挂在 body 上、分段、点外面与 Esc 都关闭", async () => {
+  const { context, page, errors } = await openHarness();
+  try {
+    // 默认页面上不该有任何菜单项（上一版的 bug：菜单项直接铺在卡片里）。
+    assert.equal(await page.locator(".advanced-context-menu").count(), 0, "默认没有菜单");
+    assert.equal(await page.locator(".advanced-context-item").count(), 0, "菜单项默认不外显");
+
+    // 组头的「…」
+    const groupTrigger = page.locator('.advanced-group[data-group-id="g0"] > .advanced-group-summary .advanced-menu-trigger');
+    assert.equal(await groupTrigger.count(), 1, "组头有「…」");
+    await groupTrigger.click();
+    const menu = page.locator(".advanced-context-menu");
+    assert.equal(await menu.count(), 1, "点开只有一个菜单");
+    assert.equal(await menu.evaluate((node) => getComputedStyle(node).position), "fixed", "菜单是 fixed 浮层");
+    assert.equal(await menu.evaluate((node) => node.parentElement === document.body), true, "浮层挂在 body 上，不在组卡片里");
+    assert.equal(await menu.evaluate((node) => node.getBoundingClientRect().width > 0), true, "浮层有宽度");
+    assert.equal(await page.locator(".advanced-context-separator").count() >= 2, true, "按段分组（至少两条分隔线）");
+    assert.equal(await page.locator(".advanced-context-item").count() >= 6, true, "组菜单项齐全");
+    await page.screenshot({ path: path.join(SHOT_DIR, "advanced-390x844-zh-group-menu.png") });
+    // 组菜单项要真的把动作发出去（旁路本组全部节点）
+    await page.locator(".advanced-context-item", { hasText: "旁路/启用" }).click();
+    const groupActions = await page.evaluate(() => window.__actions.slice());
+    assert.equal(groupActions.length > 0, true, "组动作要发出去");
+    assert.equal(groupActions.every((item) => item.action === "bypass"), true, "整组都是 bypass");
+    assert.equal(new Set(groupActions.map((item) => item.target)).size, groupActions.length, "每个成员只发一次");
+    await page.evaluate(() => { window.__actions.length = 0; });
+
+    // 点外面关闭
+    await page.mouse.click(6, 6);
+    assert.equal(await page.locator(".advanced-context-menu").count(), 0, "点外面关闭");
+
+    // 节点菜单：删除项是危险色，Esc 关闭
+    await page.locator('.advanced-node[data-node-id="7"] .advanced-menu-trigger').click();
+    assert.equal(await page.locator(".advanced-context-menu").count(), 1, "节点菜单也只有一个");
+    assert.equal(await page.locator(".advanced-context-item.is-danger").count(), 1, "删除项单独一段且是危险色");
+    await page.screenshot({ path: path.join(SHOT_DIR, "advanced-390x844-zh-node-menu.png") });
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator(".advanced-context-menu").count(), 0, "Esc 关闭");
+
+    // 参数行的「…」也是同一套浮层
+    await openNodeCard(page, "7");
+    await page.locator('.advanced-node[data-node-id="7"] .advanced-input .advanced-menu-trigger').first().click();
+    assert.equal(await page.locator(".advanced-context-menu").count(), 1, "参数行也用浮层");
+    assert.equal(await page.evaluate(() => document.querySelectorAll(".advanced-input .advanced-context-item").length), 0,
+      "参数菜单项不许铺在行里");
+    await page.keyboard.press("Escape");
     await expectNoErrors(errors);
   } finally {
     await context.close();

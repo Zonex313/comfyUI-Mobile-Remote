@@ -1456,7 +1456,10 @@ DESKTOP_COMMAND_KEY_MAX_LENGTH = 200
 DESKTOP_COMMAND_ID_MAX_LENGTH = 64
 DESKTOP_COMMAND_VALUE_MAX_LENGTH = SUBMIT_TEXT_MAX_LENGTH   # 字符串 200000，和提交路径同一条线
 DESKTOP_COMMAND_FIELDS = frozenset({"workflow_id", "node_id", "input", "value", "action"})
-DESKTOP_NODE_ACTIONS = frozenset({"bypass", "hide", "delete", "duplicate", "copy", "paste-below", "rename", "color", "collapse", "select"})
+DESKTOP_NODE_ACTIONS = frozenset({"bypass", "hide", "delete", "duplicate", "copy", "paste-below", "rename", "color", "collapse", "select", "connect", "disconnect"})
+# 组操作作用于原生工作流的 groups[index]，不落在 prompt 的节点上（组框不是节点）。
+DESKTOP_GROUP_ACTIONS = frozenset({"group-rename", "group-color"})
+DESKTOP_COMMAND_ACTIONS = DESKTOP_NODE_ACTIONS | DESKTOP_GROUP_ACTIONS
 # 指令的身份是「节点id::输入名」，形状沿用提交路径那套约束（节点号只允许 ComfyUI 真会
 # 出现的字符、输入名不许带冒号、两段各自封顶），只多容忍一个单冒号写法。
 DESKTOP_COMMAND_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,64}::?[^:]{1,128}$")
@@ -1481,6 +1484,13 @@ def _desktop_command_key(node_id: Any, input_name: Any) -> str | None:
     if DESKTOP_COMMAND_KEY_PATTERN.fullmatch(key) is None:
         return None
     return key
+
+
+def _desktop_group_index(node_id: Any) -> int | None:
+    """组指令的节点位就是组序号（手机端组 id 是 g<序号>，和 workflow.groups 下标一致）。"""
+    text = "" if node_id is None else str(node_id)
+    match = re.fullmatch(r"g(\d{1,4})", text)
+    return int(match.group(1)) if match else None
 
 
 def _desktop_command_value(value: Any) -> tuple[bool, Any]:
@@ -1514,13 +1524,22 @@ def _desktop_command_from_payload(record: Any, payload: Any) -> tuple[dict[str, 
         return None, "参数格式错误", "payload"
     action = payload.get("action")
     if action is not None:
-        if not isinstance(action, str) or action not in DESKTOP_NODE_ACTIONS:
+        if not isinstance(action, str) or action not in DESKTOP_COMMAND_ACTIONS:
             return None, "参数格式错误", "action"
         if "value" not in payload:
             return None, "参数格式错误", "value"
         valid, value = _desktop_command_value(payload.get("value"))
         if not valid:
             return None, "参数格式错误", "value"
+        if action in DESKTOP_GROUP_ACTIONS:
+            index = _desktop_group_index(node_id)
+            workflow = record.get("workflow") if isinstance(record, dict) else None
+            groups = workflow.get("groups") if isinstance(workflow, dict) else None
+            if index is None or not isinstance(groups, list) or index >= len(groups) or not isinstance(groups[index], dict):
+                return None, "没有匹配的节点", "node"
+            if not isinstance(value, str):
+                return None, "参数格式错误", "value"
+            return {"node_id": str(node_id), "input": "action", "action": action, "value": value}, "", ""
         prompt = record.get("prompt") if isinstance(record, dict) else None
         if not isinstance(prompt, dict):
             return None, "工作流不存在", "workflow"

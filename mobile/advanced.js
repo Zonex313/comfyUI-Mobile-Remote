@@ -25,7 +25,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "202610123";
+  const VERSION = "202610125";
   const STYLE_ID = "mtr-advanced-styles";
   const DEFAULT_STYLE_HREF = "/mobile/assets/advanced.css?v=" + VERSION;
   // 组折叠状态：{ "<工作流 id>": { "<组 id>": true|false } }
@@ -40,10 +40,24 @@
 
   const ICONS = {
     chevron: ["m6 9 6 6 6-6"],
+    chevronRight: ["m9 6 6 6-6 6"],
+    chevronDown: ["m6 9 6 6 6-6"],
     expand: ["M4 9V6a2 2 0 0 1 2-2h3", "M15 4h3a2 2 0 0 1 2 2v3", "M20 15v3a2 2 0 0 1-2 2h-3", "M9 20H6a2 2 0 0 1-2-2v-3"],
     collapse: ["M9 4v3a2 2 0 0 1-2 2H4", "M15 4v3a2 2 0 0 0 2 2h3", "M20 15h-3a2 2 0 0 0-2 2v3", "M4 15h3a2 2 0 0 1 2 2v3"],
     search: ["M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z", "M21 21l-4.3-4.3"],
     empty: ["M4 7h16", "M4 12h16", "M4 17h10"],
+    // 菜单图标：照参考项目（lucide 风格）的一套描边图标。
+    pencil: ["M12 20h9", "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"],
+    palette: ["M12 21a9 9 0 1 1 0-18c4.97 0 9 3.58 9 8 0 2.5-2 4-4.5 4H15a2 2 0 0 0-1.6 3.2A2 2 0 0 1 12 21Z", "M7.5 10.5h.01", "M11 7.5h.01", "M15.5 9h.01"],
+    check: ["M20 6 9 17l-5-5"],
+    power: ["M12 3v9", "M18.4 6.6a9 9 0 1 1-12.8 0"],
+    eyeOff: ["M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94", "M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19", "M1 1l22 22"],
+    copy: ["M9 9h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1Z", "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"],
+    clipboard: ["M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2", "M9 2h6v4H9z"],
+    paste: ["M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2", "M12 11v6", "M9 14l3 3 3-3"],
+    trash: ["M3 6h18", "M8 6V4h8v2", "M6 6l1 14h10l1-14"],
+    bookmark: ["M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"],
+    plus: ["M12 5v14", "M5 12h14"],
   };
 
   /* ------------------------------------------------------------------ 依赖 */
@@ -55,6 +69,7 @@
     updateFieldValue: null,
     onEdit: null,
     onAction: null,
+    onGroupAction: null,
     window: null,
     storage: undefined,
     view: null,
@@ -669,64 +684,230 @@
 
   /* ------------------------------------------------------------ 卡片渲染 */
 
-  function renderGroupActions(group, entries, details) {
-    const wrap = el("div", "advanced-group-actions");
-    const menu = el("div", "advanced-group-menu");
-    const trigger = el("button", "advanced-group-menu-trigger", "⋯");
-    trigger.type = "button";
-    trigger.title = "组操作";
-    trigger.setAttribute("aria-label", "组操作");
-    trigger.addEventListener("click", (event) => {
+  /* ---------------------------------------------------------- 浮层菜单 */
+
+  // 参考项目的「…」菜单（WorkflowObjectContextMenu / NodeCard.Menu）：菜单项不铺在卡片里，
+  // 而是挂到 body 上的一层浮层，按段分组、段间一条分隔线，点外面 / 滚动 / Esc 关闭，
+  // 位置按锚点钳在视口内，下面放不开就翻到锚点上方。
+  let contextMenu = null;
+  let contextMenuAnchor = null;
+  let contextMenuOpenedAt = 0;
+
+  function closeContextMenu() {
+    const doc = deps.doc;
+    if (doc) {
+      doc.removeEventListener("mousedown", onContextMenuOutside, true);
+      doc.removeEventListener("scroll", onContextMenuScroll, true);
+      doc.removeEventListener("keydown", onContextMenuKey, true);
+    }
+    const view = win();
+    if (view && typeof view.removeEventListener === "function") {
+      view.removeEventListener("resize", onContextMenuResize);
+    }
+    if (contextMenu && contextMenu.parentNode) contextMenu.parentNode.removeChild(contextMenu);
+    contextMenu = null;
+    contextMenuAnchor = null;
+  }
+
+  function onContextMenuOutside(event) {
+    const target = event.target;
+    // 菜单自己也要排除：mousedown 先把浮层拆掉的话，随后的 click 根本到不了菜单项上，
+    // 动作就永远不会执行（参考项目的 useDismissOnOutsideClick 同样排除 content）。
+    if (contextMenu && target && typeof contextMenu.contains === "function" && contextMenu.contains(target)) return;
+    if (contextMenuAnchor && target && typeof contextMenuAnchor.contains === "function" && contextMenuAnchor.contains(target)) return;
+    closeContextMenu();
+  }
+
+  // 刚弹出那一下的惯性滚动不算「用户在滚」（和跳转菜单同一套宽限）。
+  function onContextMenuScroll() {
+    if (Date.now() - contextMenuOpenedAt < JUMP_MENU_GRACE_MS) return;
+    closeContextMenu();
+  }
+
+  function onContextMenuKey(event) {
+    if (!contextMenu || event.key !== "Escape") return;
+    event.preventDefault();
+    const anchor = contextMenuAnchor;
+    closeContextMenu();
+    if (anchor && typeof anchor.focus === "function") {
+      try { anchor.focus({ preventScroll: true }); } catch (error) { /* 老浏览器不认参数 */ }
+    }
+  }
+
+  function onContextMenuResize() {
+    if (contextMenu && contextMenuAnchor) positionContextMenu(contextMenu, contextMenuAnchor);
+  }
+
+  function positionContextMenu(menu, anchor) {
+    const view = win();
+    const rect = anchor.getBoundingClientRect();
+    const width = menu.offsetWidth || 208;
+    const height = menu.offsetHeight || 260;
+    const padding = 8;
+    const dockReserve = 96;   // 底部导航 dock 的高度，别把菜单压到底下
+    const maxLeft = Math.max(padding, (view.innerWidth || 0) - width - padding);
+    const left = Math.max(padding, Math.min(rect.right - width, maxLeft));
+    let top = rect.bottom + 6;
+    if (top + height > (view.innerHeight || 0) - dockReserve) {
+      top = Math.max(padding, rect.top - height - 6);
+    }
+    menu.style.left = Math.round(left) + "px";
+    menu.style.top = Math.round(top) + "px";
+    menu.style.visibility = "visible";
+  }
+
+  // sections = [[{ label, icon, danger?, onSelect }], ...]；空段自动跳过，段间自动加分隔。
+  function openContextMenu(anchor, sections) {
+    closeContextMenu();
+    closeJumpMenu();
+    const doc = deps.doc;
+    if (!doc || !anchor || !doc.body) return null;
+    const menu = el("div", "advanced-context-menu");
+    menu.setAttribute("role", "menu");
+    let started = false;
+    for (const section of sections || []) {
+      const items = (Array.isArray(section) ? section : []).filter(Boolean);
+      if (!items.length) continue;
+      if (started) menu.append(el("div", "advanced-context-separator"));
+      started = true;
+      for (const item of items) {
+        const button = el("button", "advanced-context-item" + (item.danger ? " is-danger" : "") + (item.icon ? "" : " is-plain"));
+        button.type = "button";
+        button.setAttribute("role", "menuitem");
+        if (item.icon) button.append(icon(item.icon, "advanced-context-icon"));
+        button.append(el("span", "advanced-context-label", String(item.label || "")));
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          closeContextMenu();
+          try {
+            if (typeof item.onSelect === "function") item.onSelect();
+          } catch (error) {
+            console.warn("[Mobile Remote] 菜单动作失败", error);
+          }
+        });
+        menu.append(button);
+      }
+    }
+    doc.body.append(menu);
+    contextMenu = menu;
+    contextMenuAnchor = anchor;
+    contextMenuOpenedAt = Date.now();
+    positionContextMenu(menu, anchor);
+    doc.addEventListener("mousedown", onContextMenuOutside, true);
+    doc.addEventListener("scroll", onContextMenuScroll, true);
+    doc.addEventListener("keydown", onContextMenuKey, true);
+    win().addEventListener("resize", onContextMenuResize);
+    return menu;
+  }
+
+  function menuTrigger(label, onOpen) {
+    const button = el("button", "advanced-menu-trigger", "⋯");
+    button.type = "button";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.setAttribute("aria-haspopup", "menu");
+    button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      menu.classList.toggle("is-open");
+      if (contextMenu && contextMenuAnchor === button) {
+        closeContextMenu();
+        return;
+      }
+      onOpen(button);
     });
-    menu.append(trigger);
-    const close = () => menu.classList.remove("is-open");
-    const act = (label, callback) => {
-      const button = el("button", "advanced-group-action", label);
-      button.type = "button";
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        callback();
-        close();
-      });
-      menu.append(button);
-    };
-    act("展开/收起本组", () => {
-      details.open = !details.open;
-      details.dataset.mtrOpen = details.open ? "1" : "0";
-      setGroupOpen(group.id, details.open);
+    return button;
+  }
+
+  function nodeAction(node, action, options) {
+    const settings = options || {};
+    let value = settings.value === undefined ? true : settings.value;
+    if (settings.kind === "rename") {
+      value = win().prompt ? win().prompt(t("节点标签"), String(node.title || "")) : null;
+    } else if (settings.kind === "color") {
+      value = win().prompt ? win().prompt(t("节点颜色"), String(node.color || "")) : null;
+    } else if (settings.confirm && win().confirm && !win().confirm(settings.confirm)) {
+      return;
+    }
+    if (value === null || value === undefined) return;
+    if (typeof deps.onAction === "function") deps.onAction(String(node.id), String(action), value);
+  }
+
+  function groupMemberNodes(group) {
+    if (!model) return [];
+    return model.nodes.filter((node) => model.groupOf.get(String(node.id)) === String(group.id));
+  }
+
+  function groupDesktopIndex(group) {
+    const match = /^g(\d+)$/.exec(String((group && group.id) || ""));
+    return match ? Number(match[1]) : -1;
+  }
+
+  function setGroupNodesExpanded(group, expanded) {
+    for (const node of groupMemberNodes(group)) {
+      if (expanded) expandedNodes.add(String(node.id));
+      else expandedNodes.delete(String(node.id));
+    }
+    render();
+  }
+
+  function forEachGroupNode(group, action, value) {
+    for (const node of groupMemberNodes(group)) nodeAction(node, action, { value });
+  }
+
+  function renderGroupMenuButton(group) {
+    return menuTrigger(t("组操作"), (anchor) => {
+      const index = groupDesktopIndex(group);
+      const canEditGroup = index >= 0 && typeof deps.onGroupAction === "function";
+      openContextMenu(anchor, [
+        [
+          canEditGroup ? { label: t("编辑标签"), icon: "pencil", onSelect: () => openGroupRename(group, index) } : null,
+          canEditGroup ? { label: t("修改颜色"), icon: "palette", onSelect: () => openGroupColor(group, index) } : null,
+        ],
+        [
+          { label: t("全部展开"), icon: "chevronDown", onSelect: () => setGroupNodesExpanded(group, true) },
+          { label: t("全部收起"), icon: "chevronRight", onSelect: () => setGroupNodesExpanded(group, false) },
+        ],
+        [
+          { label: t("旁路/启用"), icon: "power", onSelect: () => forEachGroupNode(group, "bypass", true) },
+          { label: t("隐藏/显示"), icon: "eyeOff", onSelect: () => forEachGroupNode(group, "hide", true) },
+          { label: t("选择节点"), icon: "check", onSelect: () => forEachGroupNode(group, "select", true) },
+        ],
+      ]);
     });
-    act("全部展开节点", () => {
-      for (const entry of entries) expandedNodes.add(String(entry.node.id));
-      render();
-    });
-    act("全部收起节点", () => {
-      for (const entry of entries) expandedNodes.delete(String(entry.node.id));
-      render();
-    });
-    act("旁路本组节点", () => {
-      for (const entry of entries) deps.onAction?.(String(entry.node.id), "bypass", true);
-    });
-    act("显示本组节点", () => {
-      for (const entry of entries) deps.onAction?.(String(entry.node.id), "hide", false);
-    });
-    act("选择本组节点", () => {
-      for (const entry of entries) deps.onAction?.(String(entry.node.id), "select", true);
-    });
-    act("收藏本组", () => {
-      const key = "comfy-mobile-remote.advancedBookmarks";
-      try {
-        const saved = JSON.parse(storageArea()?.getItem(key) || "[]");
-        const list = Array.isArray(saved) ? saved.map(String) : [];
-        if (!list.includes("group:" + group.id)) list.push("group:" + group.id);
-        storageArea()?.setItem(key, JSON.stringify(list));
-      } catch {}
-    });
-    wrap.append(menu);
-    return wrap;
+  }
+
+  function openGroupRename(group, index) {
+    const view = win();
+    const next = view && typeof view.prompt === "function" ? view.prompt(t("组名称"), String(group.title || "")) : null;
+    if (next === null || next === undefined) return;
+    const title = String(next);
+    group.title = title;
+    for (const node of groupMemberNodes(group)) node.group = title;
+    groupState.set("title:" + group.id, true);
+    deps.onGroupAction(index, "group-rename", title);
+    render();
+  }
+
+  function openGroupColor(group, index) {
+    const view = win();
+    const next = view && typeof view.prompt === "function" ? view.prompt(t("组颜色"), String(group.color || "#7eb4d4")) : null;
+    if (next === null || next === undefined) return;
+    const color = String(next);
+    group.color = color;
+    deps.onGroupAction(index, "group-color", color);
+    render();
+  }
+
+  // 组头铺底：参考项目按组色 15% 透明度染一层，没有组色就不染色。
+  function groupTint(color) {
+    const text = String(color || "").trim();
+    const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(text);
+    if (!match) return "";
+    let hex = match[1];
+    if (hex.length === 3) hex = hex.split("").map((part) => part + part).join("");
+    const value = parseInt(hex, 16);
+    return "rgba(" + ((value >> 16) & 255) + ", " + ((value >> 8) & 255) + ", " + (value & 255) + ", 0.15)";
   }
 
   function renderGroup(group, entries, searching) {
@@ -740,14 +921,29 @@
     if (open) details.setAttribute("open", "");
 
     const summary = el("summary", "advanced-group-summary");
+    // 参考项目的组头：整条用组色淡淡铺底，左边折叠箭头 + 组名 + 数量，右边「…」。
+    const tint = groupTint(group.color);
+    if (tint) summary.style.backgroundColor = tint;
+    const fold = el("button", "advanced-fold-button");
+    fold.type = "button";
+    fold.setAttribute("aria-expanded", open ? "true" : "false");
+    fold.title = t("折叠/展开");
+    fold.append(icon(open ? "chevronDown" : "chevronRight", "advanced-group-chevron"));
+    fold.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      details.open = !details.open;
+      details.dataset.mtrOpen = details.open ? "1" : "0";
+      if (!searching) setGroupOpen(group.id, details.open);
+    });
     const dot = el("span", "advanced-group-dot");
     dot.setAttribute("aria-hidden", "true");
     if (group.color) dot.style.backgroundColor = group.color;
     const title = el("span", "advanced-group-title");
     title.append(highlight(group.title || t("未分组"), null));
-    const count = el("span", "advanced-group-count", String(entries.length));
-    count.title = entries.length + " " + t("个节点");
-    summary.append(dot, title, count, renderGroupActions(group, entries, details), icon("chevron", "advanced-group-chevron"));
+    const count = el("span", "advanced-group-count", String(entries.length) + " " + t("个节点"));
+    const spacer = el("span", "advanced-group-spacer");
+    summary.append(fold, dot, title, count, spacer, renderGroupMenuButton(group));
     details.append(summary);
 
     const body = el("div", "advanced-group-nodes");
@@ -789,12 +985,21 @@
     const idText = el("span", "advanced-node-id");
     idText.append(highlight("#" + id, marks && marks.id));
     meta.append(idText);
-    head.append(title, meta);
-    toggle.append(icon("chevron", "advanced-node-chevron"), head);
-    if (nodeModified(node)) toggle.append(modifiedStar());
+    const headTop = el("span", "advanced-node-head-top");
+    headTop.append(title);
+    if (nodeModified(node)) headTop.append(modifiedStar());
+    head.append(headTop, meta);
+    // 参考项目的节点卡标题栏：左边折叠箭头 + 标题/类型，右边「…」。
+    toggle.append(icon(open ? "chevronDown" : "chevronRight", "advanced-node-chevron"), head);
     toggle.addEventListener("click", () => toggleNode(id));
     const header = el("div", "advanced-node-header");
-    header.append(toggle, renderNodeActions(node));
+    header.append(toggle);
+    if (isBookmarked("node:" + id)) {
+      const mark = el("span", "advanced-node-bookmark", "★");
+      mark.title = t("已收藏");
+      header.append(mark);
+    }
+    header.append(renderNodeActions(node));
     card.append(header);
 
     if (open) card.append(renderBody(node));
@@ -806,43 +1011,76 @@
     return card;
   }
 
+  // 书签（参考项目的 bookmarks）：本机记住节点/组，不写回工作流文件。
+  const BOOKMARK_KEY = "comfy-mobile-remote.advancedBookmarks";
+
+  function bookmarkList() {
+    try {
+      const parsed = JSON.parse((storageArea() && storageArea().getItem(BOOKMARK_KEY)) || "[]");
+      return Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch (error) {
+      return [];
+    }
+  }
+
+  function isBookmarked(key) {
+    return bookmarkList().includes(String(key));
+  }
+
+  function toggleBookmark(key) {
+    const area = storageArea();
+    if (!area) return false;
+    const list = bookmarkList();
+    const text = String(key);
+    const next = list.includes(text) ? list.filter((item) => item !== text) : list.concat(text);
+    try { area.setItem(BOOKMARK_KEY, JSON.stringify(next)); } catch (error) { /* 隐私模式：不落盘 */ }
+    return next.includes(text);
+  }
+
+  // 节点「…」菜单：段顺序照参考项目 NodeCard/Menu。
   function renderNodeActions(node) {
     const bar = el("div", "advanced-node-actions");
-    const menu = el("div", "advanced-node-menu");
-    const summary = el("button", "advanced-node-menu-trigger", "⋯");
-    summary.type = "button"; summary.title = t("节点操作");
-    menu.append(summary);
-    summary.addEventListener("click", (event) => { event.preventDefault(); menu.classList.toggle("is-open"); });
-    const items = [
-      ["bypass", t("旁路/启用"), true],
-      ["hide", t("隐藏/显示"), true],
-      ["collapse", t("折叠/展开"), true],
-      ["select", t("选择节点"), true],
-      ["duplicate", t("复制节点"), true],
-      ["copy", t("复制"), true],
-      ["paste-below", t("粘贴到下方"), true],
-      ["rename", t("编辑标签"), "rename"],
-      ["color", t("修改颜色"), "color"],
-      ["delete", t("删除节点"), "delete"],
-    ];
-    for (const [action, label, kind] of items) {
-      const button = el("button", "advanced-node-action", label);
-      button.type = "button";
-      button.dataset.action = String(action);
-      button.addEventListener("click", (event) => {
-        event.preventDefault(); event.stopPropagation();
-        let value = true;
-        if (kind === "rename") value = win().prompt ? win().prompt(t("节点标签"), String(node.title || "")) : null;
-        if (kind === "color") value = win().prompt ? win().prompt(t("节点颜色"), String(node.color || "")) : null;
-        if (kind === "delete" && win().confirm && !win().confirm(t("确定删除此节点？"))) return;
-        if (value === null) return;
-        if (typeof deps.onAction === "function") deps.onAction(String(node.id), String(action), value);
-        menu.classList.remove("is-open");
-      });
-      menu.append(button);
-    }
-    bar.append(menu);
+    bar.append(menuTrigger(t("节点操作"), (anchor) => {
+      const bookmarked = isBookmarked("node:" + String(node.id));
+      openContextMenu(anchor, [
+        [
+          { label: t("编辑标签"), icon: "pencil", onSelect: () => nodeAction(node, "rename", { kind: "rename" }) },
+          { label: t("修改颜色"), icon: "palette", onSelect: () => nodeAction(node, "color", { kind: "color" }) },
+        ],
+        [
+          { label: bookmarked ? t("取消收藏") : t("收藏"), icon: "bookmark", onSelect: () => toggleNodeBookmark(node.id) },
+        ],
+        [
+          { label: t("选择节点"), icon: "check", onSelect: () => nodeAction(node, "select", { value: true }) },
+          { label: t("旁路/启用"), icon: "power", onSelect: () => nodeAction(node, "bypass", { value: true }) },
+          { label: t("隐藏/显示"), icon: "eyeOff", onSelect: () => nodeAction(node, "hide", { value: true }) },
+          { label: t("复制节点"), icon: "copy", onSelect: () => nodeAction(node, "duplicate", { value: true }) },
+          { label: t("复制"), icon: "clipboard", onSelect: () => nodeAction(node, "copy", { value: true }) },
+          { label: t("粘贴到下方"), icon: "paste", onSelect: () => nodeAction(node, "paste-below", { value: true }) },
+        ],
+        [
+          {
+            label: t("删除节点"), icon: "trash", danger: true,
+            onSelect: () => nodeAction(node, "delete", { confirm: t("确定删除此节点？") }),
+          },
+        ],
+      ]);
+    }));
     return bar;
+  }
+
+  function toggleNodeBookmark(nodeId) {
+    const marked = toggleBookmark("node:" + String(nodeId));
+    const card = cards.get(String(nodeId));
+    if (card) {
+      const star = card.querySelector(".advanced-node-bookmark");
+      if (marked && !star) {
+        const mark = el("span", "advanced-node-bookmark", "★");
+        mark.title = t("已收藏");
+        const anchor = card.querySelector(".advanced-node-actions");
+        if (anchor) card.querySelector(".advanced-node-header").insertBefore(mark, anchor);
+      } else if (!marked && star) star.remove();
+    }
   }
 
   function modifiedStar() {
@@ -881,6 +1119,13 @@
     if (entry.link) {
       wrap.dataset.inputLinked = "1";
       head.append(connectionButton("in", { node: entry.link.node, slot: entry.link.slot }, [entry.link]));
+    } else {
+      const connect = el("button", "advanced-connect-button", "+");
+      connect.type = "button";
+      connect.title = "连接输入";
+      connect.setAttribute("aria-label", "连接输入");
+      connect.addEventListener("click", (event) => openInputConnectionMenu(entry, event.currentTarget));
+      head.append(connect);
     }
     if (entry.type) head.append(el("span", "advanced-input-type", entry.type));
     wrap.append(head);
@@ -903,33 +1148,65 @@
     return wrap;
   }
 
+  // 参数行的「…」：和节点菜单同一套浮层（参考项目 RowActionsMenu）。
   function renderInputActions(entry, wrap) {
-    if (entry.link || entry.kind === "readonly") return null;
-    const menu = el("div", "advanced-input-menu");
-    const trigger = el("button", "advanced-input-menu-trigger", "⋯");
-    trigger.type = "button";
-    trigger.title = "参数操作";
-    trigger.setAttribute("aria-label", "参数操作");
-    trigger.addEventListener("click", (event) => {
-      event.preventDefault(); event.stopPropagation();
-      menu.classList.toggle("is-open");
+    if (entry.kind === "readonly") return null;
+    const trigger = menuTrigger(t("参数操作"), (anchor) => {
+      const node = model ? model.byId.get(String(entry.nodeId)) : null;
+      const inputSlot = node && Array.isArray(node.inputs)
+        ? node.inputs.findIndex((item) => String(item && item.name) === String(entry.name))
+        : -1;
+      openContextMenu(anchor, [
+        [
+          entry.link
+            ? {
+              label: t("断开连线"), icon: "eyeOff",
+              onSelect: () => {
+                if (Number.isFinite(inputSlot) && inputSlot >= 0) {
+                  deps.onAction?.(String(entry.nodeId), "disconnect", inputSlot);
+                }
+              },
+            }
+            : { label: t("恢复默认值"), icon: "chevronRight", onSelect: () => applyEdit(entry.key, entry.initial) },
+        ],
+        [
+          {
+            label: t("复制参数值"), icon: "clipboard",
+            onSelect: async () => {
+              const value = currentValue(entry);
+              try { await win().navigator?.clipboard?.writeText(String(value === undefined || value === null ? "" : value)); } catch (error) { /* 剪贴板不可用就算了 */ }
+            },
+          },
+          { label: t("标记参数"), icon: "bookmark", onSelect: () => wrap.classList.toggle("is-pinned") },
+        ],
+      ]);
     });
-    menu.append(trigger);
-    const add = (label, callback) => {
-      const button = el("button", "advanced-input-action", label);
-      button.type = "button";
-      button.addEventListener("click", (event) => {
-        event.preventDefault(); event.stopPropagation(); callback(); menu.classList.remove("is-open");
-      });
-      menu.append(button);
-    };
-    add("恢复默认值", () => applyEdit(entry.key, entry.initial));
-    add("复制参数值", async () => {
-      const value = currentValue(entry);
-      try { await win().navigator?.clipboard?.writeText(String(value ?? "")); } catch {}
+    return trigger;
+  }
+
+  // 空输入的「+」：和参考项目一样列出可以作为来源的节点，选中即在画布上连线。
+  function openInputConnectionMenu(entry, anchor) {
+    if (!model || !anchor) return;
+    const target = model.byId.get(String(entry.nodeId));
+    const inputSlot = target && Array.isArray(target.inputs)
+      ? target.inputs.findIndex((item) => String(item && item.name) === String(entry.name))
+      : -1;
+    if (!Number.isFinite(inputSlot) || inputSlot < 0) return;
+    const candidates = model.nodes.filter((node) => String(node.id) !== String(entry.nodeId));
+    const items = candidates.map((source) => {
+      const outgoing = model.outgoing.get(String(source.id)) || [];
+      const outputSlot = outgoing.length ? normalizeSlot(outgoing[0].slot) : 0;
+      return {
+        label: nodeTitle(source) + " #" + String(source.id) + " · " + t("输出") + " " + outputSlot,
+        icon: "power",
+        onSelect: () => deps.onAction?.(
+          String(entry.nodeId),
+          "connect",
+          JSON.stringify({ source: String(source.id), outputSlot, inputSlot }),
+        ),
+      };
     });
-    add("标记参数", () => wrap.classList.toggle("is-pinned"));
-    return menu;
+    openContextMenu(anchor, [items.length ? items : [{ label: t("没有可用的连接来源"), onSelect: () => {} }]]);
   }
 
   // 对端节点标题：节点不在图里（脏数据）就退回 #编号。
@@ -1150,8 +1427,9 @@
     card.classList.toggle("is-modified", modified);
     const toggle = card.querySelector(".advanced-node-toggle");
     if (!toggle) return;
-    const star = toggle.querySelector(".advanced-node-modified");
-    if (modified && !star) toggle.append(modifiedStar());
+    const holder = toggle.querySelector(".advanced-node-head-top") || toggle;
+    const star = holder.querySelector(".advanced-node-modified");
+    if (modified && !star) holder.append(modifiedStar());
     else if (!modified && star) star.remove();
   }
 
@@ -1595,6 +1873,7 @@
     if (settings.updateFieldValue) deps.updateFieldValue = settings.updateFieldValue;
     if (settings.onEdit) deps.onEdit = settings.onEdit;
     if (settings.onAction) deps.onAction = settings.onAction;
+    if (settings.onGroupAction) deps.onGroupAction = settings.onGroupAction;
     if (settings.window) deps.window = settings.window;
     if (Object.prototype.hasOwnProperty.call(settings, "storage")) deps.storage = settings.storage;
     if (settings.styleHref) deps.styleHref = settings.styleHref;
@@ -1631,6 +1910,7 @@
 
   function destroy() {
     closeJumpMenu();
+    closeContextMenu();
     if (flashTimer) win().clearTimeout(flashTimer);
     flashTimer = 0;
     for (const node of [els.heading, els.toolbar, els.status, els.list, els.empty]) {
