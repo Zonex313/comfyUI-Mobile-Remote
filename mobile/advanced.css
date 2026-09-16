@@ -168,6 +168,36 @@
 /* ------------------------------------------------------------------ 节点 */
 
 /* 节点多时列表要跟手：屏幕外的卡片不参与布局/绘制（历史页同款做法）。 */
+.advanced-node-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 8px 6px;
+}
+.advanced-node-menu { position: relative; }
+.advanced-node-menu-trigger {
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 28px; border: 1px solid var(--border);
+  border-radius: 8px; color: var(--text-muted); cursor: pointer;
+  list-style: none; user-select: none;
+}
+.advanced-node-menu-trigger { appearance: none; }
+.advanced-node-menu.is-open .advanced-node-menu-trigger { color: var(--accent); background: var(--surface-raised); }
+.advanced-node-menu .advanced-node-action {
+  display: none; width: 100%; min-height: 34px; padding: 7px 10px;
+  border: 0; color: var(--text); background: transparent; text-align: left;
+  white-space: nowrap; cursor: pointer;
+}
+.advanced-node-menu .advanced-node-action:hover,
+.advanced-node-menu .advanced-node-action:active { background: var(--surface-raised); }
+.advanced-node-menu.is-open .advanced-node-action {
+  position: relative; z-index: 21; display: block;
+}
+.advanced-node-menu.is-open {
+  position: relative; z-index: 20; min-width: 150px; padding: 4px 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 10px 28px rgba(0,0,0,.35);
+}
+.advanced-node-menu.is-open .advanced-node-menu-trigger { margin-bottom: 2px; }
 .advanced-node {
   margin: 6px 0;
   border: 1px solid var(--border);

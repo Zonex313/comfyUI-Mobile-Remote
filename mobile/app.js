@@ -241,6 +241,10 @@
         state,
         renderField,
         updateFieldValue,
+        onAction: (nodeId, action, value) => {
+          advancedEdited = true;
+          pushDesktopAction(nodeId, action, value);
+        },
         onEdit: (field, value) => {
           advancedEdited = true;
           // 「高级」页改的值必须送回电脑端：那边的自制节点要靠自己的回调重画面板，
@@ -300,12 +304,28 @@
   }
 
   function loadDraft(workflow, fields) {
+    // 生成页字段只是精选参数；高级页还会编辑 graph.inputs 里的其它输入。
+    // 先把整张图的可编辑输入放进默认表，再用同一份草稿覆盖，避免切页后丢值。
     const defaults = Object.fromEntries(fields.map((field) => [field.id, field.value]));
+    const nodes = workflow && workflow.graph && Array.isArray(workflow.graph.nodes)
+      ? workflow.graph.nodes
+      : [];
+    for (const node of nodes) {
+      const nodeId = String(node && node.id !== undefined ? node.id : "");
+      if (!nodeId || !Array.isArray(node && node.inputs)) continue;
+      for (const input of node.inputs) {
+        const name = String(input && input.name !== undefined ? input.name : "");
+        if (!name || input.link) continue;
+        const key = nodeId + "::" + name;
+        if (!Object.hasOwn(defaults, key)) defaults[key] = input.value;
+      }
+    }
     try {
       const saved = JSON.parse(phoneSettings.getItem(draftKey(workflow.id)) || "{}");
       if (saved && typeof saved === "object" && !Array.isArray(saved)) {
-        for (const field of fields) {
-          if (Object.hasOwn(saved, field.id)) defaults[field.id] = saved[field.id];
+        for (const [key, value] of Object.entries(saved)) {
+          // 只恢复当前工作流仍存在的键，避免旧工作流残留值污染新图。
+          if (Object.hasOwn(defaults, key)) defaults[key] = value;
         }
       }
     } catch { /* Use workflow defaults if a cached draft is unreadable. */ }
@@ -384,6 +404,17 @@
       return;
     }
     desktopCommands.set(id + "::" + name, { workflow_id: workflowId, node_id: id, input: name, value });
+    if (desktopCommandTimer) return;
+    desktopCommandTimer = window.setTimeout(flushDesktopCommands, DESKTOP_COMMAND_THROTTLE_MS);
+  }
+
+  // 参考项目节点菜单动作：与控件修改共用同一条可靠指令队列。
+  function pushDesktopAction(nodeId, action, value = true) {
+    const workflowId = state.workflow?.id;
+    const id = String(nodeId ?? "");
+    const name = "action";
+    if (!workflowId || !id || !action) return;
+    desktopCommands.set(id + "::" + action, { workflow_id: workflowId, node_id: id, input: name, action: String(action), value });
     if (desktopCommandTimer) return;
     desktopCommandTimer = window.setTimeout(flushDesktopCommands, DESKTOP_COMMAND_THROTTLE_MS);
   }
@@ -1069,7 +1100,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610121", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610122", { cache: "no-store" });
       if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];

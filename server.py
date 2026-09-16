@@ -1455,7 +1455,8 @@ DESKTOP_COMMAND_ACK_MAX = 200    # 一次 ack 最多删这么多条
 DESKTOP_COMMAND_KEY_MAX_LENGTH = 200
 DESKTOP_COMMAND_ID_MAX_LENGTH = 64
 DESKTOP_COMMAND_VALUE_MAX_LENGTH = SUBMIT_TEXT_MAX_LENGTH   # 字符串 200000，和提交路径同一条线
-DESKTOP_COMMAND_FIELDS = frozenset({"workflow_id", "node_id", "input", "value"})
+DESKTOP_COMMAND_FIELDS = frozenset({"workflow_id", "node_id", "input", "value", "action"})
+DESKTOP_NODE_ACTIONS = frozenset({"bypass", "hide", "delete", "duplicate", "copy", "paste-below", "rename", "color", "collapse", "select"})
 # 指令的身份是「节点id::输入名」，形状沿用提交路径那套约束（节点号只允许 ComfyUI 真会
 # 出现的字符、输入名不许带冒号、两段各自封顶），只多容忍一个单冒号写法。
 DESKTOP_COMMAND_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,64}::?[^:]{1,128}$")
@@ -1511,6 +1512,21 @@ def _desktop_command_from_payload(record: Any, payload: Any) -> tuple[dict[str, 
     node_id = payload.get("node_id")
     if isinstance(node_id, bool) or not isinstance(node_id, (str, int)):
         return None, "参数格式错误", "payload"
+    action = payload.get("action")
+    if action is not None:
+        if not isinstance(action, str) or action not in DESKTOP_NODE_ACTIONS:
+            return None, "参数格式错误", "action"
+        if "value" not in payload:
+            return None, "参数格式错误", "value"
+        valid, value = _desktop_command_value(payload.get("value"))
+        if not valid:
+            return None, "参数格式错误", "value"
+        prompt = record.get("prompt") if isinstance(record, dict) else None
+        if not isinstance(prompt, dict):
+            return None, "工作流不存在", "workflow"
+        if str(node_id) not in prompt:
+            return None, "没有匹配的节点", "node"
+        return {"node_id": str(node_id), "input": "action", "action": action, "value": value}, "", ""
     input_name = payload.get("input")
     if not isinstance(input_name, str):
         return None, "参数格式错误", "payload"
@@ -1587,7 +1603,7 @@ def _desktop_commands_pending(workflow_id: str) -> list[dict[str, Any]]:
     """某个工作流还没被电脑端执行的指令。领了**不删**：等电脑端 ack 说它真落到画布上了。"""
     with _DESKTOP_COMMANDS_LOCK:
         return [
-            {"id": item["id"], "node_id": item["node_id"], "input": item["input"], "value": item["value"]}
+            ({"id": item["id"], "node_id": item["node_id"], "input": item["input"], "value": item["value"]} | ({"action": item["action"]} if item.get("action") else {}))
             for item in _desktop_commands_unlocked()
             if item.get("workflow_id") == workflow_id
         ]

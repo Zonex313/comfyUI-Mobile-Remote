@@ -25,7 +25,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "202610121";
+  const VERSION = "202610122";
   const STYLE_ID = "mtr-advanced-styles";
   const DEFAULT_STYLE_HREF = "/mobile/assets/advanced.css?v=" + VERSION;
   // 组折叠状态：{ "<工作流 id>": { "<组 id>": true|false } }
@@ -54,6 +54,7 @@
     state: null,
     updateFieldValue: null,
     onEdit: null,
+    onAction: null,
     window: null,
     storage: undefined,
     view: null,
@@ -717,6 +718,7 @@
     if (nodeModified(node)) toggle.append(modifiedStar());
     toggle.addEventListener("click", () => toggleNode(id));
     card.append(toggle);
+    card.append(renderNodeActions(node));
 
     if (open) card.append(renderBody(node));
     // 出边区（卡片底部）：没有出边时整块不渲染。
@@ -725,6 +727,45 @@
 
     cards.set(id, card);
     return card;
+  }
+
+  function renderNodeActions(node) {
+    const bar = el("div", "advanced-node-actions");
+    const menu = el("div", "advanced-node-menu");
+    const summary = el("button", "advanced-node-menu-trigger", "⋯");
+    summary.type = "button"; summary.title = t("节点操作");
+    menu.append(summary);
+    summary.addEventListener("click", (event) => { event.preventDefault(); menu.classList.toggle("is-open"); });
+    const items = [
+      ["bypass", t("旁路/启用"), true],
+      ["hide", t("隐藏/显示"), true],
+      ["collapse", t("折叠/展开"), true],
+      ["select", t("选择节点"), true],
+      ["duplicate", t("复制节点"), true],
+      ["copy", t("复制"), true],
+      ["paste-below", t("粘贴到下方"), true],
+      ["rename", t("编辑标签"), "rename"],
+      ["color", t("修改颜色"), "color"],
+      ["delete", t("删除节点"), "delete"],
+    ];
+    for (const [action, label, kind] of items) {
+      const button = el("button", "advanced-node-action", label);
+      button.type = "button";
+      button.dataset.action = String(action);
+      button.addEventListener("click", (event) => {
+        event.preventDefault(); event.stopPropagation();
+        let value = true;
+        if (kind === "rename") value = win().prompt ? win().prompt(t("节点标签"), String(node.title || "")) : null;
+        if (kind === "color") value = win().prompt ? win().prompt(t("节点颜色"), String(node.color || "")) : null;
+        if (kind === "delete" && win().confirm && !win().confirm(t("确定删除此节点？"))) return;
+        if (value === null) return;
+        if (typeof deps.onAction === "function") deps.onAction(String(node.id), String(action), value);
+        menu.classList.remove("is-open");
+      });
+      menu.append(button);
+    }
+    bar.append(menu);
+    return bar;
   }
 
   function modifiedStar() {
@@ -1406,6 +1447,7 @@
     if (settings.state) deps.state = settings.state;
     if (settings.updateFieldValue) deps.updateFieldValue = settings.updateFieldValue;
     if (settings.onEdit) deps.onEdit = settings.onEdit;
+    if (settings.onAction) deps.onAction = settings.onAction;
     if (settings.window) deps.window = settings.window;
     if (Object.prototype.hasOwnProperty.call(settings, "storage")) deps.storage = settings.storage;
     if (settings.styleHref) deps.styleHref = settings.styleHref;

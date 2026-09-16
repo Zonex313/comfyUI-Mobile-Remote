@@ -523,5 +523,17 @@
   "公网连接暂未成功，正在自动重试。也可继续使用 Tailscale。": "The public tunnel has not succeeded yet; retrying automatically. You can keep using Tailscale.",
   "临时公网连接已建立，手机浏览器可直接打开。": "The temporary public tunnel is up; open it directly in your phone browser.",
   "公网连接暂时中断，正在自动重连…": "The public tunnel is temporarily interrupted; reconnecting automatically…",
-  "连接超时，正在重新申请临时链接…": "Connection timed out; requesting a new temporary link…"
+  "连接超时，正在重新申请临时链接…": "Connection timed out; requesting a new temporary link…",
+  "节点操作": "节点操作",
+  "旁路/启用": "旁路/启用",
+  "隐藏/显示": "隐藏/显示",
+  "折叠/展开": "折叠/展开",
+  "选择节点": "选择节点",
+  "复制节点": "复制节点",
+  "粘贴到下方": "粘贴到下方",
+  "修改颜色": "修改颜色",
+  "删除节点": "删除节点",
+  "节点标签": "节点标签",
+  "节点颜色": "节点颜色",
+  "确定删除此节点？": "确定删除此节点？"
 }

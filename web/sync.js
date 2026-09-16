@@ -1,4 +1,4 @@
-import { t } from "./i18n.js?v=202610121";
+import { t } from "./i18n.js?v=202610122";
 import { app } from "../../scripts/app.js";
 
 const LOG_PREFIX = "[Mobile Remote]";
@@ -181,7 +181,8 @@ function applyDesktopCommand(command) {
   const graph = app?.graph;
   const nodeId = String(command?.node_id ?? "");
   const inputName = String(command?.input ?? "");
-  if (!graph || !nodeId || !inputName) return "skip";
+  const action = String(command?.action ?? "");
+  if (!graph || !nodeId || (!inputName && !action)) return "skip";
 
   let node = null;
   try { node = graph.getNodeById?.(Number(nodeId)) || null; } catch { node = null; }
@@ -193,6 +194,37 @@ function applyDesktopCommand(command) {
   if (!node) {
     console.debug(LOG_PREFIX + " 手机端指令作废：画布上没有节点 #" + nodeId + "（" + inputName + "）");
     return "missing-node";
+  }
+
+  // 节点控制动作：参考项目菜单中的 bypass / hide / rename / color / delete / duplicate。
+  // 这些动作直接作用于真实 LiteGraph 节点，随后统一标脏并触发同步。
+  if (action) {
+    const value = command?.value;
+    try {
+      if (action === "bypass") node.mode = Boolean(value) ? 4 : 0;
+      else if (action === "hide") node.flags = { ...(node.flags || {}), hidden: Boolean(value) };
+      else if (action === "rename") node.title = String(value ?? "");
+      else if (action === "color") { node.color = String(value ?? ""); node.bgcolor = String(value ?? ""); }
+      else if (action === "delete") { graph.remove?.(node); app.canvas?.setDirty?.(true); app.graph?.setDirtyCanvas?.(true, true); return "applied"; }
+      else if (action === "duplicate") {
+        const copy = node.clone?.();
+        if (copy) { copy.pos = [Number(node.pos?.[0] || 0) + 24, Number(node.pos?.[1] || 0) + 24]; graph.add?.(copy); }
+        else return "missing-node";
+      } else if (action === "copy") {
+        app.canvas?.copyToClipboard?.();
+        return "unchanged";
+      } else if (action === "paste-below") {
+        app.canvas?.pasteFromClipboard?.();
+        return "applied";
+      } else if (action === "collapse") node.flags = { ...(node.flags || {}), collapsed: Boolean(value) };
+      else if (action === "select") { node.selected = Boolean(value); app.canvas?.select?.(node, Boolean(value)); }
+      else return "skip";
+      markCanvasDirty(node);
+      return "applied";
+    } catch (error) {
+      console.warn(LOG_PREFIX + " 节点操作失败：" + action, error);
+      return "missing-node";
+    }
   }
 
   const widgets = Array.isArray(node.widgets) ? node.widgets : [];
