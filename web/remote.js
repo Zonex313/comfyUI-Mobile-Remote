@@ -1,10 +1,10 @@
-import { ready as i18nReady, t } from "./i18n.js?v=202609301";
+import { ready as i18nReady, t } from "./i18n.js?v=202609302";
 
 // 词典到位后再注册界面，否则侧边栏标题会先渲染成中文原文。
 await i18nReady;
 import { app } from "../../scripts/app.js";
-import { createPresetManager } from "./preset-manager.js?v=202609301";
-import { createWorkflowImporter } from "./workflow-import.js?v=202609301";
+import { createPresetManager } from "./preset-manager.js?v=202609302";
+import { createWorkflowImporter } from "./workflow-import.js?v=202609302";
 
 const TAB_ID = "mobile-remote";
 const POLL_MS = 3000;
@@ -424,7 +424,12 @@ function mountPanel(container) {
       result.copyTimer = 0;
       copy.node.classList.remove("is-copied");
       setText(copy.caption, "");
+      copy.glyph.className = "mobile-remote-icon pi pi-copy";
       copy.glyph.hidden = false;
+      if (feedback.dataset.tone === "success") {
+        feedback.hidden = true;
+        setText(feedback, "");
+      }
     }
     result.restoreCopy = restoreCopyButton;
     copy.node.addEventListener("click", async () => {
@@ -435,9 +440,15 @@ function mountPanel(container) {
       try {
         await copyUrl(value);
         if (!disposed && result.usable) {
+          // 图标按钮保持正方形：勾表示成功，完整译文放到卡片已有的反馈行，
+          // 否则日语「コピーしました」会把按钮撑破。
           copy.node.classList.add("is-copied");
-          setText(copy.caption, t("已复制"));
-          copy.glyph.hidden = true;
+          setText(copy.caption, "");
+          copy.glyph.className = "mobile-remote-icon pi pi-check";
+          copy.glyph.hidden = false;
+          feedback.dataset.tone = "success";
+          setText(feedback, t("已复制"));
+          feedback.hidden = false;
           window.clearTimeout(result.copyTimer);
           result.copyTimer = window.setTimeout(() => {
             if (!disposed) restoreCopyButton();
@@ -936,7 +947,7 @@ app.registerExtension({
       const stylesheet = document.createElement("link");
       stylesheet.id = "mobile-remote-styles";
       stylesheet.rel = "stylesheet";
-      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609301`;
+      stylesheet.href = `${new URL("./remote.css", import.meta.url).href}?v=202609302`;
       document.head.append(stylesheet);
     }
     app.extensionManager.registerSidebarTab({

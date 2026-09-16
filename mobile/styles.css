@@ -74,6 +74,16 @@ select {
   font: inherit;
 }
 
+/* 按钮里的译文往往比中文长：宁可换行撑高，也不要横向溢出或被裁掉。
+   标签芯片等定高控件有自己的规则，不受这里影响。 */
+button,
+.secondary-button,
+.upload-button {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 button,
 a,
 select,
@@ -227,6 +237,7 @@ svg {
 .icon-button {
   width: 44px;
   height: 44px;
+  flex: 0 0 auto;
   padding: 0;
   display: inline-grid;
   place-items: center;
@@ -1508,6 +1519,11 @@ select:focus {
   line-height: 1;
 }
 
+/* 上传按钮里的译文不参与压缩：宁可让输入框变窄，也不让文字溢出按钮。 */
+.upload-row .upload-button {
+  flex: 0 0 auto;
+}
+
 .stepper-group {
   display: flex;
   align-items: stretch;
@@ -2621,8 +2637,10 @@ select:focus {
 }
 
 .copy-menu-button {
-  height: 28px;
-  padding: 0 10px;
+  height: auto;
+  min-height: 28px;
+  flex: 0 0 auto;
+  padding: 4px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
   color: var(--text);
@@ -3154,8 +3172,10 @@ dialog:not([open]) {
 
 .preset-random-button {
   min-width: 52px;
-  height: 26px;
-  padding: 0 10px;
+  height: auto;
+  min-height: 26px;
+  flex: 0 0 auto;
+  padding: 3px 10px;
   border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 999px;
   color: #ffffff;
@@ -3241,9 +3261,12 @@ dialog:not([open]) {
 }
 
 .preset-row-label {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   min-width: 2em;
+  max-width: 46%;
   height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   padding: 0;
   border: 0;
   color: #8c93ad;
@@ -3399,6 +3422,10 @@ dialog:not([open]) {
 
 .preset-pool-chip {
   position: relative;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 6px 10px;
   border: 1px solid var(--border);
   border-radius: 999px;

@@ -1,4 +1,4 @@
-import { ready as i18nReady, t } from "./i18n.js?v=202609301";
+import { ready as i18nReady, t } from "./i18n.js?v=202609302";
 
 // 词典到位后再注册界面，否则侧边栏标题会先渲染成中文原文。
 await i18nReady;
@@ -9,7 +9,7 @@ import { app } from "../../scripts/app.js";
 // 但节点自己的锁定/忽略状态保存在节点上（写进工作流），与手机端设置互相独立。
 
 const NODE_TYPE = "MobileTagCLIPTextEncode";
-const VERSION = "202609301";
+const VERSION = "202609302";
 const PANEL_HEIGHT = 202;
 
 let libraryPromise = null;
