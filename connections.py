@@ -55,9 +55,11 @@ REQUEST_HEADERS = {"content-type", "content-length", "accept", "accept-encoding"
                    "if-range", "if-none-match", "if-modified-since", "accept-language"}
 GET_PATHS = (
     r"/mobile/?", r"/mobile/manifest\.webmanifest",
-    r"/mobile/assets/(?:app\.js|advanced\.js|advanced\.css|i18n\.js|settings-sync\.js|preset-catalog\.js|preset-engine\.js|progress-sync\.js|styles\.css|icon\.svg|prompt-presets\.json)",
+    r"/mobile/assets/(?:app\.js|advanced\.js|advanced\.css|panel\.html|panel\.js|panel\.css|i18n\.js|settings-sync\.js|preset-catalog\.js|preset-engine\.js|progress-sync\.js|styles\.css|icon\.svg|prompt-presets\.json)",
     r"/mobile/api/(?:status|settings|progress|workflows|jobs|favorites/file|preview|i18n/[a-z]{2})",
     r"/mobile/api/workflows/[a-f0-9]{20}",
+    # 面板要电脑端同步下来的原始工作流（原生格式），隧道用户也要能取到。
+    r"/mobile/api/panel/workflow/[a-f0-9]{20}",
     r"/mobile/api/jobs/[A-Za-z0-9_-]{1,128}", r"/view", r"/ws",
 )
 POST_PATHS = (

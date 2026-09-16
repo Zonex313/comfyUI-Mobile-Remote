@@ -1,0 +1,33 @@
+export const appChromeIconButtonClassName =
+  'bg-slate-900/95 border border-white/10 text-slate-200 hover:bg-slate-800/95 hover:text-slate-100';
+
+// Shared base for the square 48px bottom-bar chrome buttons. State-dependent
+// color/active classes are appended per button.
+export const chromeBarButtonClassName =
+  'relative w-12 h-12 rounded-xl flex items-center justify-center text-2xl transition-colors';
+
+// Bare icon-only variant: no background or outline, just the icon. Used by the
+// main menu button and the per-panel context menu buttons in the top bar.
+export const appChromeIconButtonBareClassName =
+  'text-slate-200 hover:text-slate-100';
+
+export const appChromeIconButtonActiveClassName =
+  'bg-cyan-500 border border-cyan-500 text-slate-950 shadow-sm';
+
+// Filters-applied state for the outputs filter button. Amber rather than the
+// cyan "active/selected" treatment: this isn't a toggle the user is holding
+// down, it's a warning that the listing is narrowed and files are being hidden
+// from view.
+export const appChromeIconButtonFilteredClassName =
+  'bg-amber-500 border border-amber-500 text-slate-950 shadow-sm';
+
+export const pinAccentActiveClassName =
+  'bg-fuchsia-500 border border-fuchsia-500 text-white';
+export const pinAccentTextClassName = 'text-fuchsia-500';
+export const pinAccentMutedTextClassName = 'text-fuchsia-400';
+
+export const appChromePrimaryButtonClassName =
+  'bg-cyan-500 text-slate-950 active:bg-cyan-400';
+
+export const appChromePrimaryButtonDisabledClassName =
+  'bg-slate-800 text-slate-500 cursor-not-allowed';

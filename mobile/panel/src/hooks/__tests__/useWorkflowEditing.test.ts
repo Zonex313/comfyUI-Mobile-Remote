@@ -1,0 +1,3930 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { NodeTypes, Workflow, WorkflowGroup, WorkflowLink, WorkflowNode } from '@/api/types';
+import type { MobileLayout } from '@/utils/mobileLayout';
+import {
+  createEmptyMobileLayout,
+  flattenLayoutToNodeOrder,
+  makeLocationPointer
+} from '@/utils/mobileLayout';
+import { computeNodeGroupsFor } from '@/utils/nodeGroups';
+import { orderNodesForMobile } from '@/utils/nodeOrdering';
+import { getWorkflowForPersistence } from '@/utils/workflowPersistence';
+import { themeColors } from '@/theme/colors';
+import { useWorkflowStore, isWorkflowModified } from '../useWorkflow';
+import { useWorkflowHiddenStore } from '../useWorkflowHidden';
+import { useBookmarksStore } from '../useBookmarks';
+import { useWorkflowErrorsStore } from '../useWorkflowErrors';
+import { useSeedStore } from '../useSeed';
+import { usePinnedWidgetStore } from '../usePinnedWidget';
+import { useWorkflowClipboardStore, type WorkflowClipboardPayload } from '../useWorkflowClipboard';
+import { queueAndGetEmbeddedWorkflow, queueAndGetPromptRequest } from './helpers/queueAndGetEmbeddedWorkflow';
+
+function makeNode(id: number, overrides?: Partial<WorkflowNode>): WorkflowNode {
+  return {
+    id,
+    itemKey: rootNodeHierarchicalKey(id),
+    type: 'Any',
+    pos: [0, 0],
+    size: [200, 100],
+    flags: {},
+    order: 0,
+    mode: 0,
+    inputs: [],
+    outputs: [],
+    properties: {},
+    widgets_values: [],
+    ...overrides
+  };
+}
+
+function makeWorkflow(nodes: WorkflowNode[], links: WorkflowLink[]): Workflow {
+  const rootGroupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+  return {
+    last_node_id: Math.max(0, ...nodes.map((n) => n.id)),
+    last_link_id: Math.max(0, ...links.map((l) => l[0])),
+    nodes,
+    links,
+    groups: [{ id: 10, itemKey: rootGroupHierarchicalKey, title: 'Group', color: '#fff', bounding: [100, 100, 500, 300] }],
+    config: {},
+    version: 1
+  };
+}
+
+function rootNodePointer(nodeId: number): string {
+  return makeLocationPointer({ type: 'node', nodeId, subgraphId: null });
+}
+
+function rootNodeHierarchicalKey(nodeId: number): string {
+  return rootNodePointer(nodeId);
+}
+
+function rootNodeStableRegistry(nodeIds: number[]) {
+  const itemKeyByPointer: Record<string, string> = {};
+  const pointerByHierarchicalKey: Record<string, string> = {};
+  for (const nodeId of nodeIds) {
+    const pointer = rootNodePointer(nodeId);
+    itemKeyByPointer[pointer] = pointer;
+    pointerByHierarchicalKey[pointer] = pointer;
+  }
+  return { itemKeyByPointer, pointerByHierarchicalKey };
+}
+
+const nodeTypes: NodeTypes = {
+  TestNode: {
+    input: {
+      required: {
+        model: ['MODEL'],
+        steps: ['INT', { default: 8 }]
+      }
+    },
+    output: ['MODEL'],
+    output_name: ['MODEL'],
+    name: 'TestNode',
+    display_name: 'Test Node',
+    description: '',
+    python_module: '',
+    category: 'test'
+  }
+};
+
+const comboNodeTypes: NodeTypes = {
+  ComboNode: {
+    input: {
+      required: {
+        ckpt_name: [[
+          'models/main/model.safetensors',
+          'models/alt/model.safetensors'
+        ] as unknown as string]
+      }
+    },
+    output: ['MODEL'],
+    output_name: ['MODEL'],
+    name: 'ComboNode',
+    display_name: 'Combo Node',
+    description: '',
+    python_module: '',
+    category: 'test'
+  }
+};
+
+const queueNodeTypes: NodeTypes = {
+  ...nodeTypes,
+  Any: {
+    input: { required: {} },
+    output: ['MODEL'],
+    output_name: ['MODEL'],
+    name: 'Any',
+    display_name: 'Any',
+    description: '',
+    python_module: '',
+    category: 'test'
+  }
+};
+
+beforeEach(() => {
+  useWorkflowStore.setState({
+    workflow: null,
+    originalWorkflow: null,
+    nodeTypes: null,
+    hiddenItems: {},
+    collapsedItems: {},
+    connectionHighlightModes: {},
+    mobileLayout: createEmptyMobileLayout(),
+    itemKeyByPointer: {},
+    pointerByHierarchicalKey: {},
+    scopeStack: [{ type: 'root' }],
+    currentWorkflowKey: null,
+    savedWorkflowStates: {},
+    executingNodeId: null,
+    executingNodePath: null,
+    executingPromptId: null,
+    nodeOutputs: {},
+    nodeTextOutputs: {},
+    promptOutputs: {},
+    sessions: [],
+    activeSessionId: null,
+    parkedSessions: {},
+    infiniteLoopSessionId: null,
+    promptToSession: {},
+    isLoadingBySession: {},
+    closeForNewWorkflowRequest: null,
+  });
+  useBookmarksStore.setState({ bookmarkedItems: [] });
+  useWorkflowClipboardStore.setState({ payload: null });
+  useWorkflowErrorsStore.setState({
+    error: null,
+    nodeErrors: {},
+    errorCycleIndex: 0,
+    errorsDismissed: false
+  });
+  useSeedStore.setState({
+    seedModes: {},
+    seedLastValues: {},
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe('setSavedWorkflow hidden carry-over', () => {
+  const emptyWorkflow = (): Workflow => ({
+    last_node_id: 0,
+    last_link_id: 0,
+    nodes: [],
+    links: [],
+    groups: [],
+    config: {},
+    extra: {},
+    version: 0.4,
+  });
+
+  it('marks the saved file hidden when the source workflow was hidden', () => {
+    useWorkflowHiddenStore.setState({ hidden: ['secret'], serverSynced: false, serverDirty: false });
+    useWorkflowStore.setState({
+      workflowSource: { type: 'user', filename: 'secret/flow.json' },
+      currentFilename: 'secret/flow.json',
+    });
+
+    useWorkflowStore.getState().setSavedWorkflow(emptyWorkflow(), 'public/copy.json');
+
+    expect(useWorkflowHiddenStore.getState().hidden).toContain('public/copy.json');
+  });
+
+  it('does not hide the saved file when the source workflow was not hidden', () => {
+    useWorkflowHiddenStore.setState({ hidden: [], serverSynced: false, serverDirty: false });
+    useWorkflowStore.setState({
+      workflowSource: { type: 'user', filename: 'public/flow.json' },
+      currentFilename: 'public/flow.json',
+    });
+
+    useWorkflowStore.getState().setSavedWorkflow(emptyWorkflow(), 'public/copy.json');
+
+    expect(useWorkflowHiddenStore.getState().hidden).not.toContain('public/copy.json');
+  });
+});
+
+describe('queue prompt link/slot repair', () => {
+  it('uses ComfyUI native front priority for front-of-queue submissions', async () => {
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([makeNode(1)], []),
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    const body = await queueAndGetPromptRequest(true);
+
+    expect(body.front).toBe(true);
+  });
+
+  it('keeps a multi-run front batch in its original iteration order', async () => {
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([makeNode(1)], []),
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    const promptBodies: Array<{ front?: boolean; number?: number }> = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes('/api/prompt') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { front?: boolean; number?: number };
+        promptBodies.push(body);
+        return {
+          ok: true,
+          json: async () => ({
+            prompt_id: `front-${promptBodies.length}`,
+            number: body.front ? -25 : body.number,
+          }),
+        };
+      }
+      if (url.includes('/api/queue')) {
+        return {
+          ok: true,
+          json: async () => ({ queue_running: [], queue_pending: [] }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+
+    expect(await useWorkflowStore.getState().queueWorkflow(3, undefined, false, true)).toBe(true);
+
+    expect(promptBodies.map(({ front, number }) => ({ front, number }))).toEqual([
+      { front: true, number: undefined },
+      { front: undefined, number: -24.75 },
+      { front: undefined, number: -24.5 },
+    ]);
+  });
+
+  it('includes a connection whose link is in the table even if inputs[].link was left stale', async () => {
+    // Reproduces the paste/connect bug: link 100 wires Source[0] -> Sink.model in
+    // the links table, but Sink's inputs[0].link was left null (out of sync). The
+    // embedded workflow was already repaired; the executed prompt must be too, or
+    // Sink loses its model input and its branch never runs.
+    const linkRepairNodeTypes: NodeTypes = {
+      Source: {
+        input: { required: {} },
+        output: ['MODEL'],
+        output_name: ['MODEL'],
+        name: 'Source', display_name: 'Source', description: '', python_module: '', category: 'test',
+      },
+      Sink: {
+        input: { required: { model: ['MODEL'] } },
+        output: [],
+        output_name: [],
+        name: 'Sink', display_name: 'Sink', description: '', python_module: '', category: 'test',
+      },
+    };
+    const source = makeNode(1, {
+      type: 'Source',
+      outputs: [{ name: 'MODEL', type: 'MODEL', links: [100] }],
+    });
+    const sink = makeNode(2, {
+      type: 'Sink',
+      inputs: [{ name: 'model', type: 'MODEL', link: null }], // stale: should be 100
+    });
+    const workflow = makeWorkflow([source, sink], [[100, 1, 0, 2, 0, 'MODEL']]);
+
+    useWorkflowStore.setState({
+      workflow,
+      nodeTypes: linkRepairNodeTypes,
+      ...rootNodeStableRegistry([1, 2]),
+    });
+
+    const body = await queueAndGetPromptRequest() as {
+      prompt?: Record<string, { inputs?: Record<string, unknown> }>;
+    };
+    expect(body.prompt?.['2']?.inputs?.model).toEqual(['1', 0]);
+  });
+
+  it('keeps node errors returned with a partially accepted prompt', async () => {
+    const workflow = makeWorkflow([makeNode(1)], []);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('/api/queue')) {
+        return {
+          ok: true,
+          json: async () => ({ queue_running: [], queue_pending: [] }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          prompt_id: 'partial-prompt',
+          number: 1,
+          node_errors: {
+            1: {
+              errors: [{
+                type: 'value_not_in_list',
+                message: 'Value not in list',
+                details: 'model_name: missing.safetensors',
+                extra_info: { input_name: 'model_name' },
+              }],
+            },
+          },
+        }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+    useWorkflowStore.setState({
+      workflow,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    const queued = await useWorkflowStore.getState().queueWorkflow(1);
+
+    expect(queued).toBe(true);
+    expect(useWorkflowErrorsStore.getState()).toMatchObject({
+      nodeErrorsFromRun: true,
+      nodeErrors: {
+        1: [{
+          type: 'value_not_in_list',
+          message: 'Value not in list',
+          details: 'model_name: missing.safetensors',
+          inputName: 'model_name',
+        }],
+      },
+    });
+  });
+
+  it('returns false when ComfyUI rejects the prompt', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes('/api/queue')) {
+        return {
+          ok: true,
+          json: async () => ({ queue_running: [], queue_pending: [] }),
+        };
+      }
+      return {
+        ok: false,
+        json: async () => ({ error: 'share queue rejected' }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([makeNode(1)], []),
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    const queued = await useWorkflowStore.getState().queueWorkflow(1);
+
+    expect(queued).toBe(false);
+    expect(useWorkflowErrorsStore.getState().error).toBe('share queue rejected');
+  });
+});
+
+describe('useWorkflow editing actions', () => {
+  it('keeps only the most recently activated connection highlight', () => {
+    useWorkflowStore.setState({
+      ...rootNodeStableRegistry([1, 2]),
+      connectionHighlightModes: {},
+    });
+
+    useWorkflowStore.getState().setConnectionHighlightMode(
+      rootNodeHierarchicalKey(1),
+      'outputs',
+    );
+    useWorkflowStore.getState().setConnectionHighlightMode(
+      rootNodeHierarchicalKey(2),
+      'inputs',
+    );
+
+    expect(useWorkflowStore.getState().connectionHighlightModes).toEqual({
+      [rootNodeHierarchicalKey(2)]: 'inputs',
+    });
+  });
+
+  it('keeps only the most recently cycled connection highlight and removes it when off', () => {
+    useWorkflowStore.setState({
+      ...rootNodeStableRegistry([1, 2]),
+      connectionHighlightModes: {
+        [rootNodeHierarchicalKey(1)]: 'both',
+      },
+    });
+
+    useWorkflowStore.getState().cycleConnectionHighlight(rootNodeHierarchicalKey(2));
+    expect(useWorkflowStore.getState().connectionHighlightModes).toEqual({
+      [rootNodeHierarchicalKey(2)]: 'inputs',
+    });
+
+    useWorkflowStore.getState().cycleConnectionHighlight(rootNodeHierarchicalKey(2));
+    useWorkflowStore.getState().cycleConnectionHighlight(rootNodeHierarchicalKey(2));
+    useWorkflowStore.getState().cycleConnectionHighlight(rootNodeHierarchicalKey(2));
+    expect(useWorkflowStore.getState().connectionHighlightModes).toEqual({});
+  });
+
+  it('clears stale executing node details when a new prompt starts without node identity', () => {
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([makeNode(1), makeNode(2)], []),
+      ...rootNodeStableRegistry([1, 2]),
+      executingNodeId: rootNodeHierarchicalKey(1),
+      executingNodePath: '1',
+      executingPromptId: 'prompt-a',
+      isExecuting: true
+    });
+
+    useWorkflowStore.getState().setExecutionState(true, null, 'prompt-b', 0);
+
+    expect(useWorkflowStore.getState()).toMatchObject({
+      isExecuting: true,
+      executingPromptId: 'prompt-b',
+      executingNodeId: null,
+      executingNodePath: null,
+      progress: 0
+    });
+  });
+
+  it('keeps the current executing node when progress updates omit node identity for the same prompt', () => {
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([makeNode(1), makeNode(2)], []),
+      ...rootNodeStableRegistry([1, 2]),
+      executingNodeId: rootNodeHierarchicalKey(1),
+      executingNodePath: '1',
+      executingPromptId: 'prompt-a',
+      isExecuting: true
+    });
+
+    useWorkflowStore.getState().setExecutionState(true, null, 'prompt-a', 42);
+
+    expect(useWorkflowStore.getState()).toMatchObject({
+      isExecuting: true,
+      executingPromptId: 'prompt-a',
+      executingNodeId: rootNodeHierarchicalKey(1),
+      executingNodePath: '1',
+      progress: 42
+    });
+  });
+
+  it('uses an actual seed control widget over stale persisted seed mode when queueing', async () => {
+    const easySeedNode = makeNode(1, {
+      type: 'easy seed',
+      widgets_values: [123, 'fixed'],
+      outputs: [{ name: 'seed', type: 'INT', links: [] }],
+    });
+    const workflow = makeWorkflow([easySeedNode], []);
+    const easySeedNodeTypes: NodeTypes = {
+      'easy seed': {
+        input: {
+          required: {
+            seed: ['INT', { default: 0, min: 0, max: 999999 }],
+          },
+          optional: {},
+        },
+        input_order: { required: ['seed'], optional: [] },
+        output: ['INT'],
+        output_name: ['seed'],
+        name: 'easy seed',
+        display_name: 'easy seed',
+        description: '',
+        python_module: '',
+        category: 'test',
+      },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/queue')) {
+        return {
+          ok: true,
+          json: async () => ({ queue_running: [], queue_pending: [] }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ prompt_id: 'p-test', number: 1 }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+    useSeedStore.setState({
+      seedModes: { 1: 'randomize' },
+      seedLastValues: {},
+    });
+    useWorkflowStore.setState({
+      workflow,
+      nodeTypes: easySeedNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    await useWorkflowStore.getState().queueWorkflow(1);
+
+    const promptCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).includes('/api/prompt'),
+    );
+    expect(promptCall).toBeDefined();
+    const requestInit = (promptCall as [RequestInfo | URL, RequestInit | undefined] | undefined)?.[1];
+    const body = JSON.parse(String(requestInit?.body ?? '{}')) as {
+      prompt?: Record<string, { inputs?: Record<string, unknown> }>;
+    };
+    expect(body.prompt?.['1']?.inputs?.seed).toBe(123);
+  });
+
+  it('resolves a special seed (-1) on a node inside a subgraph at queue time', async () => {
+    const sgId = 'aaaaaaaa-5555-6666-7777-888888888888';
+    const innerSeedNode = makeNode(7, {
+      type: 'easy seed',
+      itemKey: makeLocationPointer({ type: 'node', nodeId: 7, subgraphId: sgId }),
+      // -1 = "random seed each queue" convention; must never ship raw.
+      widgets_values: [-1],
+      outputs: [{ name: 'seed', type: 'INT', links: [] }],
+    });
+    const placeholder = makeNode(5, { type: sgId });
+    const workflow: Workflow = {
+      ...makeWorkflow([placeholder], []),
+      definitions: {
+        subgraphs: [{ id: sgId, nodes: [innerSeedNode], links: [], groups: [] }],
+      },
+    };
+    const easySeedNodeTypes: NodeTypes = {
+      'easy seed': {
+        input: {
+          required: {
+            seed: ['INT', { default: 0, min: 0, max: 999999 }],
+          },
+          optional: {},
+        },
+        input_order: { required: ['seed'], optional: [] },
+        output: ['INT'],
+        output_name: ['seed'],
+        name: 'easy seed',
+        display_name: 'easy seed',
+        description: '',
+        python_module: '',
+        category: 'test',
+      },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/queue')) {
+        return {
+          ok: true,
+          json: async () => ({ queue_running: [], queue_pending: [] }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ prompt_id: 'p-test', number: 1 }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+    useWorkflowStore.setState({
+      workflow,
+      nodeTypes: easySeedNodeTypes,
+      ...rootNodeStableRegistry([5]),
+    });
+
+    await useWorkflowStore.getState().queueWorkflow(1);
+
+    const promptCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).includes('/api/prompt'),
+    );
+    expect(promptCall).toBeDefined();
+    const requestInit = (promptCall as [RequestInfo | URL, RequestInit | undefined] | undefined)?.[1];
+    const body = JSON.parse(String(requestInit?.body ?? '{}')) as {
+      prompt?: Record<string, { inputs?: Record<string, unknown> }>;
+    };
+    const seed = body.prompt?.['5:7']?.inputs?.seed;
+    expect(typeof seed).toBe('number');
+    expect(seed).toBeGreaterThanOrEqual(0);
+  });
+
+  it('deleteNode reconnects compatible links and cleans ui state', () => {
+    const source = makeNode(1, {
+      outputs: [{ name: 'MODEL', type: 'MODEL', links: [1] }]
+    });
+    const mid = makeNode(2, {
+      inputs: [{ name: 'in', type: 'MODEL', link: 1 }],
+      outputs: [{ name: 'out', type: 'MODEL', links: [2] }]
+    });
+    const target = makeNode(3, {
+      inputs: [{ name: 'model', type: 'MODEL', link: 2 }]
+    });
+    const wf = makeWorkflow(
+      [source, mid, target],
+      [
+        [1, 1, 0, 2, 0, 'MODEL'],
+        [2, 2, 0, 3, 0, 'MODEL']
+      ]
+    );
+    useWorkflowStore.setState({
+      workflow: wf,
+      ...rootNodeStableRegistry([1, 2, 3]),
+      hiddenItems: {
+        [rootNodeHierarchicalKey(2)]: true
+      },
+      connectionHighlightModes: { [rootNodeHierarchicalKey(2)]: 'both' },
+      mobileLayout: {
+        root: [{ type: 'node', id: 1 }, { type: 'group', id: 10, subgraphId: null, itemKey: makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null }) }, { type: 'node', id: 3 }],
+        groups: { [makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null })]: [{ type: 'node', id: 2 }] },
+        subgraphs: {},
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(2), true);
+    const next = useWorkflowStore.getState();
+    expect(next.workflow?.nodes.map((n) => n.id)).toEqual([1, 3]);
+    expect(next.workflow?.links).toHaveLength(1);
+    expect(next.workflow?.links[0]?.slice(1, 5)).toEqual([1, 0, 3, 0]);
+    expect(next.workflow?.last_link_id).toBe(3);
+    expect(next.workflow?.nodes.find((n) => n.id === 3)?.inputs[0]?.link).toBe(3);
+    expect(next.workflow?.nodes.find((n) => n.id === 1)?.outputs[0]?.links).toEqual([3]);
+    expect(
+      next.hiddenItems[
+        makeLocationPointer({ type: 'node', nodeId: 2, subgraphId: null })
+      ]
+    ).toBeUndefined();
+    expect(next.connectionHighlightModes[rootNodeHierarchicalKey(2)]).toBeUndefined();
+    expect(flattenLayoutToNodeOrder(next.mobileLayout!)).toEqual([1, 3]);
+  });
+
+  it('connectNodes replaces existing input link and cleans old source output list', () => {
+    const sourceA = makeNode(1, {
+      outputs: [{ name: 'out', type: 'MODEL', links: [1] }]
+    });
+    const sourceB = makeNode(2, {
+      outputs: [{ name: 'out', type: 'MODEL', links: null }]
+    });
+    const target = makeNode(3, {
+      inputs: [{ name: 'model', type: 'MODEL', link: 1 }]
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow(
+        [sourceA, sourceB, target],
+        [[1, 1, 0, 3, 0, 'MODEL']]
+      ),
+      ...rootNodeStableRegistry([1, 2, 3])
+    });
+
+    useWorkflowStore.getState().connectNodes(rootNodeHierarchicalKey(2), 0, rootNodeHierarchicalKey(3), 0, 'MODEL');
+    const next = useWorkflowStore.getState().workflow;
+    expect(next?.links).toHaveLength(1);
+    expect(next?.links[0]?.slice(1, 5)).toEqual([2, 0, 3, 0]);
+    expect(next?.nodes.find((n) => n.id === 1)?.outputs[0]?.links).toBeNull();
+    expect(next?.nodes.find((n) => n.id === 2)?.outputs[0]?.links).toEqual([2]);
+    expect(next?.nodes.find((n) => n.id === 3)?.inputs[0]?.link).toBe(2);
+  });
+
+  it('connectNodes inside a subgraph mints unique link ids from the subgraph link-id space', () => {
+    const sgNodeKey = (nodeId: number) =>
+      makeLocationPointer({ type: 'node', nodeId, subgraphId: 'sg-a' });
+    const inner = (id: number, overrides?: Partial<WorkflowNode>) =>
+      makeNode(id, { itemKey: sgNodeKey(id), ...overrides });
+    const srcModel = inner(1, {
+      outputs: [{ name: 'out', type: 'MODEL', links: null }]
+    });
+    const srcClip = inner(2, {
+      outputs: [{ name: 'out', type: 'CLIP', links: null }]
+    });
+    const target = inner(3, {
+      inputs: [
+        { name: 'model', type: 'MODEL', link: null },
+        { name: 'clip', type: 'CLIP', link: null }
+      ]
+    });
+    const vaeOut = inner(4, {
+      outputs: [{ name: 'out', type: 'VAE', links: [7] }]
+    });
+    const vaeIn = inner(5, {
+      inputs: [{ name: 'vae', type: 'VAE', link: 7 }]
+    });
+    const workflow: Workflow = {
+      ...makeWorkflow([], []),
+      definitions: {
+        subgraphs: [{
+          id: 'sg-a',
+          nodes: [srcModel, srcClip, target, vaeOut, vaeIn],
+          // Existing subgraph link id (7) is ahead of root last_link_id (0).
+          links: [{ id: 7, origin_id: 4, origin_slot: 0, target_id: 5, target_slot: 0, type: 'VAE' }],
+          groups: []
+        }]
+      }
+    };
+    useWorkflowStore.setState({
+      workflow,
+      scopeStack: [
+        { type: 'root' },
+        { type: 'subgraph', id: 'sg-a', placeholderNodeId: 99 }
+      ],
+    });
+
+    useWorkflowStore.getState().connectNodes(sgNodeKey(1), 0, sgNodeKey(3), 0, 'MODEL');
+    useWorkflowStore.getState().connectNodes(sgNodeKey(2), 0, sgNodeKey(3), 1, 'CLIP');
+
+    const sg = useWorkflowStore.getState().workflow?.definitions?.subgraphs?.find(
+      (entry) => entry.id === 'sg-a',
+    );
+    const ids = (sg?.links ?? []).map((l) => l.id);
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(3);
+    expect(ids).toEqual(expect.arrayContaining([7, 8, 9]));
+    expect(sg?.nodes.find((n) => n.id === 3)?.inputs.map((i) => i.link)).toEqual([8, 9]);
+  });
+
+  it('deleteNode reconnect inside a subgraph mints the bridge link id from the subgraph link-id space', () => {
+    const sgNodeKey = (nodeId: number) =>
+      makeLocationPointer({ type: 'node', nodeId, subgraphId: 'sg-a' });
+    const inner = (id: number, overrides?: Partial<WorkflowNode>) =>
+      makeNode(id, { itemKey: sgNodeKey(id), ...overrides });
+    const source = inner(1, {
+      outputs: [{ name: 'out', type: 'MODEL', links: [7] }]
+    });
+    const mid = inner(2, {
+      inputs: [{ name: 'in', type: 'MODEL', link: 7 }],
+      outputs: [{ name: 'out', type: 'MODEL', links: [8] }]
+    });
+    const target = inner(3, {
+      inputs: [{ name: 'model', type: 'MODEL', link: 8 }]
+    });
+    const workflow: Workflow = {
+      ...makeWorkflow([], []),
+      definitions: {
+        subgraphs: [{
+          id: 'sg-a',
+          nodes: [source, mid, target],
+          links: [
+            { id: 7, origin_id: 1, origin_slot: 0, target_id: 2, target_slot: 0, type: 'MODEL' },
+            { id: 8, origin_id: 2, origin_slot: 0, target_id: 3, target_slot: 0, type: 'MODEL' }
+          ],
+          groups: []
+        }]
+      }
+    };
+    useWorkflowStore.setState({
+      workflow,
+      scopeStack: [
+        { type: 'root' },
+        { type: 'subgraph', id: 'sg-a', placeholderNodeId: 99 }
+      ],
+    });
+
+    useWorkflowStore.getState().deleteNode(sgNodeKey(2), true);
+
+    const sg = useWorkflowStore.getState().workflow?.definitions?.subgraphs?.find(
+      (entry) => entry.id === 'sg-a',
+    );
+    expect(sg?.nodes.map((n) => n.id)).toEqual([1, 3]);
+    expect(sg?.links).toHaveLength(1);
+    // Bridge id mints above the subgraph's own max (8), not root last_link_id (0).
+    expect(sg?.links[0]?.id).toBe(9);
+    expect(sg?.nodes.find((n) => n.id === 3)?.inputs[0]?.link).toBe(9);
+    expect(sg?.nodes.find((n) => n.id === 1)?.outputs[0]?.links).toEqual([9]);
+  });
+
+  it('addNode supports group placement and mobile ordering state', () => {
+    const existing = makeNode(1, { pos: [140, 150] });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([existing], []),
+      nodeTypes,
+      ...rootNodeStableRegistry([1]),
+      mobileLayout: {
+        root: [{ type: 'node', id: 1 }, { type: 'group', id: 10, subgraphId: null, itemKey: makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null }) }],
+        groups: { [makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null })]: [] },
+        subgraphs: {},
+        hiddenBlocks: {}
+      }
+    });
+
+    const newId = useWorkflowStore.getState().addNode('TestNode', {
+      nearNodeHierarchicalKey: rootNodeHierarchicalKey(1),
+      inGroupId: 10
+    });
+    const next = useWorkflowStore.getState();
+    const newNode = next.workflow?.nodes.find((n) => n.id === newId);
+    expect(newId).toBe(2);
+    expect(newNode?.inputs.map((i) => i.name)).toEqual(['model', 'steps']);
+    expect(newNode?.inputs[1]?.widget).toEqual({ name: 'steps' });
+    expect(newNode?.outputs.map((o) => o.type)).toEqual(['MODEL']);
+    expect(newNode?.widgets_values).toEqual([8]);
+    expect(newNode?.pos[0]).toBeGreaterThanOrEqual(124);
+    expect(newNode?.pos[1]).toBeGreaterThanOrEqual(148);
+    expect(flattenLayoutToNodeOrder(next.mobileLayout!)).toEqual([1, 2]);
+    // Node 2 should be in group 10
+    expect(next.mobileLayout!.groups[makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null })]).toContainEqual({ type: 'node', id: 2 });
+  });
+
+  it('addNode gives V3 string-typed combos widget values and coexisting sockets', () => {
+    // A V3 node: one real socket, a DynamicCombo whose default option adds two
+    // sub-inputs, a plain V3 COMBO, an INT seed (implicit control slot), and a
+    // explicitly socketless COLOR widget.
+    const v3NodeTypes: NodeTypes = {
+      V3Node: {
+        input: {
+          required: {
+            image: ['IMAGE'],
+            resize_type: ['COMFY_DYNAMICCOMBO_V3', {
+              options: [
+                { key: 'by size', inputs: { required: {
+                  width: ['INT', { default: 512 }],
+                  crop: ['COMBO', { default: 'center', options: ['disabled', 'center'] }],
+                } } },
+                { key: 'by factor', inputs: { required: { factor: ['FLOAT', { default: 2.0 }] } } },
+              ],
+            }],
+            scale_method: ['COMBO', { default: 'area', options: ['nearest', 'area'] }],
+            seed: ['INT', { default: 0, control_after_generate: true }],
+            tint: ['COLOR', { default: '#ffffff', socketless: true }],
+          },
+        },
+        input_order: {
+          required: ['image', 'resize_type', 'scale_method', 'seed', 'tint'],
+        },
+        output: ['IMAGE'],
+        output_name: ['IMAGE'],
+        name: 'V3Node',
+        display_name: 'V3 Node',
+        description: '',
+        python_module: '',
+        category: 'test',
+      },
+    } as unknown as NodeTypes;
+
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([makeNode(1)], []),
+      nodeTypes: v3NodeTypes,
+      ...rootNodeStableRegistry([1]),
+      mobileLayout: { root: [{ type: 'node', id: 1 }], groups: {}, subgraphs: {}, hiddenBlocks: {} },
+    });
+
+    const newId = useWorkflowStore.getState().addNode('V3Node', {
+      nearNodeHierarchicalKey: rootNodeHierarchicalKey(1),
+    });
+    const added = useWorkflowStore.getState().workflow?.nodes.find((n) => n.id === newId);
+
+    // Current ComfyUI gives widgets a coexisting socket; only the explicitly
+    // socketless color omits one. Dynamic children are active for the default.
+    expect(added?.inputs.map((i) => i.name)).toEqual([
+      'image',
+      'resize_type',
+      'resize_type.width',
+      'resize_type.crop',
+      'scale_method',
+      'seed',
+    ]);
+    expect(added?.inputs.find((input) => input.name === 'resize_type')?.widget)
+      .toEqual({ name: 'resize_type' });
+    // Slot order: combo, its default option's sub-inputs, then the rest, with
+    // control_after_generate reserved right after the INT seed.
+    expect(added?.widgets_values).toEqual([
+      'by size', 512, 'center', 'area', 0, 'randomize', '#ffffff',
+    ]);
+  });
+
+  it('updateNodeWidget rebuilds DynamicCombo sub-slots when the option changes', () => {
+    const dynTypes: NodeTypes = {
+      Resize: {
+        input: {
+          required: {
+            image: ['IMAGE'],
+            resize_type: ['COMFY_DYNAMICCOMBO_V3', {
+              options: [
+                { key: 'by size', inputs: { required: {
+                  width: ['INT', { default: 512 }],
+                  crop: ['COMBO', { default: 'center', options: ['disabled', 'center'] }],
+                } } },
+                { key: 'by factor', inputs: { required: { factor: ['FLOAT', { default: 2.0 }] } } },
+              ],
+            }],
+            scale_method: ['COMBO', { default: 'area', options: ['nearest', 'area'] }],
+          },
+        },
+        input_order: { required: ['image', 'resize_type', 'scale_method'] },
+        output: ['IMAGE'],
+        output_name: ['IMAGE'],
+        name: 'Resize',
+        display_name: 'Resize',
+        description: '',
+        python_module: '',
+        category: 'test',
+      },
+    } as unknown as NodeTypes;
+
+    // In "by size": [combo, width, crop, scale_method]
+    const target = makeNode(1, {
+      type: 'Resize',
+      inputs: [{ name: 'image', type: 'IMAGE', link: null }],
+      widgets_values: ['by size', 768, 'disabled', 'nearest'],
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target], []),
+      nodeTypes: dynTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    // `image` is a materialized socket, so the combo is widget slot 0.
+    // Switch to "by factor", which contributes a single sub-input.
+    useWorkflowStore.getState().updateNodeWidget(rootNodeHierarchicalKey(1), 0, 'by factor', 'resize_type');
+
+    const next = useWorkflowStore.getState().workflow?.nodes.find((n) => n.id === 1);
+    // Stale width/crop are gone; scale_method keeps its value instead of being
+    // read out of a leftover slot.
+    expect(next?.widgets_values).toEqual(['by factor', 2.0, 'nearest']);
+  });
+
+  it('updateNodeWidget reconciles pins and stale index maps across a DynamicCombo branch change', () => {
+    const dynTypes: NodeTypes = {
+      Resize: {
+        input: {
+          required: {
+            image: ['IMAGE'],
+            resize_type: ['COMFY_DYNAMICCOMBO_V3', {
+              options: [
+                { key: 'by size', inputs: { required: {
+                  width: ['INT', { default: 512 }],
+                  crop: ['COMBO', { default: 'center', options: ['disabled', 'center'] }],
+                } } },
+                { key: 'by factor', inputs: { required: { factor: ['FLOAT', { default: 2.0 }] } } },
+              ],
+            }],
+            scale_method: ['COMBO', { default: 'area', options: ['nearest', 'area'] }],
+          },
+        },
+        input_order: { required: ['image', 'resize_type', 'scale_method'] },
+        output: ['IMAGE'],
+        output_name: ['IMAGE'],
+        name: 'Resize',
+        display_name: 'Resize',
+        description: '',
+        python_module: '',
+        category: 'test',
+      },
+    } as unknown as NodeTypes;
+
+    // In "by size": [combo, width, crop, scale_method], with per-node and
+    // workflow-level index metadata recorded against that layout.
+    const target = makeNode(1, {
+      type: 'Resize',
+      inputs: [{ name: 'image', type: 'IMAGE', link: null }],
+      widgets_values: ['by size', 768, 'disabled', 'nearest'],
+      properties: {
+        __lm_widget_ids: ['resize_type', 'resize_type.width', 'resize_type.crop', 'scale_method'],
+      },
+    });
+    const workflow = makeWorkflow([target], []);
+    workflow.widget_idx_map = { '1': { scale_method: 3 } };
+    useWorkflowStore.setState({
+      workflow,
+      nodeTypes: dynTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+    usePinnedWidgetStore.setState({
+      pinnedWidget: {
+        nodeId: 1, widgetIndex: 3, widgetName: 'scale_method',
+        inputName: 'scale_method', widgetType: 'COMBO',
+      },
+      pinOverlayOpen: true,
+    });
+
+    useWorkflowStore.getState().updateNodeWidget(rootNodeHierarchicalKey(1), 0, 'by factor', 'resize_type');
+
+    // "by factor" leaves [combo, factor, scale_method]: the pin follows its
+    // input to slot 2 instead of editing whatever landed on slot 3, and the
+    // stale index metadata is dropped rather than overriding the schema walk.
+    expect(usePinnedWidgetStore.getState().pinnedWidget).toMatchObject({ nodeId: 1, widgetIndex: 2 });
+    const next = useWorkflowStore.getState().workflow;
+    expect(next?.widget_idx_map?.['1']).toBeUndefined();
+    expect(next?.nodes.find((n) => n.id === 1)?.properties?.__lm_widget_ids).toBeUndefined();
+
+    usePinnedWidgetStore.setState({ pinnedWidget: null, pinnedWidgets: {}, pinOverlayOpen: false });
+  });
+
+  it('updateNodeWidget clears a pin whose input retired with the old DynamicCombo branch', () => {
+    const dynTypes: NodeTypes = {
+      Resize: {
+        input: {
+          required: {
+            resize_type: ['COMFY_DYNAMICCOMBO_V3', {
+              options: [
+                { key: 'by size', inputs: { required: { width: ['INT', { default: 512 }] } } },
+                { key: 'by factor', inputs: { required: { factor: ['FLOAT', { default: 2.0 }] } } },
+              ],
+            }],
+          },
+        },
+        input_order: { required: ['resize_type'] },
+        output: [],
+        output_name: [],
+        name: 'Resize',
+        display_name: 'Resize',
+        description: '',
+        python_module: '',
+        category: 'test',
+      },
+    } as unknown as NodeTypes;
+
+    const target = makeNode(1, {
+      type: 'Resize',
+      widgets_values: ['by size', 768],
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target], []),
+      nodeTypes: dynTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+    usePinnedWidgetStore.setState({
+      pinnedWidget: {
+        nodeId: 1, widgetIndex: 1, widgetName: 'width',
+        inputName: 'resize_type.width', widgetType: 'INT',
+      },
+      pinOverlayOpen: true,
+    });
+
+    useWorkflowStore.getState().updateNodeWidget(rootNodeHierarchicalKey(1), 0, 'by factor', 'resize_type');
+
+    // width no longer exists on the active branch — a stale by-index pin
+    // would otherwise silently edit the factor widget now occupying slot 1.
+    expect(usePinnedWidgetStore.getState().pinnedWidget).toBeNull();
+    expect(usePinnedWidgetStore.getState().pinOverlayOpen).toBe(false);
+  });
+
+  it('updateNodeWidget leaves values alone when the DynamicCombo selection is unchanged', () => {
+    const dynTypes: NodeTypes = {
+      Resize: {
+        input: {
+          required: {
+            resize_type: ['COMFY_DYNAMICCOMBO_V3', {
+              options: [{ key: 'by factor', inputs: { required: { factor: ['FLOAT', { default: 2.0 }] } } }],
+            }],
+          },
+        },
+        input_order: { required: ['resize_type'] },
+        output: [], output_name: [], name: 'Resize', display_name: 'Resize',
+        description: '', python_module: '', category: 'test',
+      },
+    } as unknown as NodeTypes;
+
+    const target = makeNode(1, {
+      type: 'Resize', inputs: [], widgets_values: ['by factor', 7.5],
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target], []),
+      nodeTypes: dynTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    useWorkflowStore.getState().updateNodeWidget(rootNodeHierarchicalKey(1), 0, 'by factor', 'resize_type');
+
+    // A user-edited 7.5 must not be reset to the option default.
+    expect(
+      useWorkflowStore.getState().workflow?.nodes.find((n) => n.id === 1)?.widgets_values
+    ).toEqual(['by factor', 7.5]);
+  });
+
+  it('reconciles DynamicCombo sockets, links, source outputs, and target slots', () => {
+    const dynTypes: NodeTypes = {
+      Switcher: {
+        input: {
+          required: {
+            mode: ['COMFY_DYNAMICCOMBO_V3', {
+              options: [
+                { key: 'a', inputs: { required: {
+                  old_image: ['IMAGE'],
+                  shared: ['MASK'],
+                } } },
+                { key: 'b', inputs: { required: {
+                  shared: ['MASK'],
+                  new_model: ['MODEL'],
+                } } },
+              ],
+            }],
+            tail: ['LATENT'],
+          },
+        },
+        input_order: { required: ['mode', 'tail'] },
+        output: [], output_name: [], name: 'Switcher', display_name: 'Switcher',
+        description: '', python_module: '', category: 'test',
+      },
+    } as unknown as NodeTypes;
+    const target = makeNode(1, {
+      type: 'Switcher',
+      inputs: [
+        { name: 'mode.old_image', type: 'IMAGE', link: 10 },
+        { name: 'mode.shared', type: 'MASK', link: 11 },
+        { name: 'tail', type: 'LATENT', link: 12 },
+      ],
+      widgets_values: ['a'],
+    });
+    const oldSource = makeNode(2, {
+      outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [10] }],
+    });
+    const sharedSource = makeNode(3, {
+      outputs: [{ name: 'MASK', type: 'MASK', links: [11] }],
+    });
+    const tailSource = makeNode(4, {
+      outputs: [{ name: 'LATENT', type: 'LATENT', links: [12] }],
+    });
+    const links: WorkflowLink[] = [
+      [10, 2, 0, 1, 0, 'IMAGE'],
+      [11, 3, 0, 1, 1, 'MASK'],
+      [12, 4, 0, 1, 2, 'LATENT'],
+    ];
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target, oldSource, sharedSource, tailSource], links),
+      nodeTypes: dynTypes,
+      ...rootNodeStableRegistry([1, 2, 3, 4]),
+    });
+
+    useWorkflowStore.getState().updateNodeWidget(
+      rootNodeHierarchicalKey(1), 0, 'b', 'mode',
+    );
+
+    const workflow = useWorkflowStore.getState().workflow!;
+    const next = workflow.nodes.find((node) => node.id === 1)!;
+    expect(next.widgets_values).toEqual(['b']);
+    expect(next.inputs).toEqual([
+      { name: 'mode.shared', type: 'MASK', link: 11 },
+      { name: 'mode.new_model', type: 'MODEL', link: null },
+      { name: 'tail', type: 'LATENT', link: 12 },
+    ]);
+    expect(workflow.links).toEqual([
+      [11, 3, 0, 1, 0, 'MASK'],
+      [12, 4, 0, 1, 2, 'LATENT'],
+    ]);
+    expect(workflow.nodes.find((node) => node.id === 2)?.outputs[0].links).toBeNull();
+    expect(workflow.nodes.find((node) => node.id === 3)?.outputs[0].links).toEqual([11]);
+  });
+
+  it('disconnects a same-named DynamicCombo socket when its type changes', () => {
+    const dynTypes: NodeTypes = {
+      Switcher: {
+        input: { required: {
+          mode: ['COMFY_DYNAMICCOMBO_V3', { options: [
+            { key: 'image', inputs: { required: { source: ['IMAGE'] } } },
+            { key: 'model', inputs: { required: { source: ['MODEL'] } } },
+          ] }],
+        } },
+        input_order: { required: ['mode'] },
+        output: [], output_name: [], name: 'Switcher', display_name: 'Switcher',
+        description: '', python_module: '', category: 'test',
+      },
+    } as unknown as NodeTypes;
+    const target = makeNode(1, {
+      type: 'Switcher',
+      inputs: [{ name: 'mode.source', type: 'IMAGE', link: 10 }],
+      widgets_values: ['image'],
+    });
+    const source = makeNode(2, {
+      outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [10] }],
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target, source], [[10, 2, 0, 1, 0, 'IMAGE']]),
+      nodeTypes: dynTypes,
+      ...rootNodeStableRegistry([1, 2]),
+    });
+
+    useWorkflowStore.getState().updateNodeWidget(
+      rootNodeHierarchicalKey(1), 0, 'model', 'mode',
+    );
+
+    const workflow = useWorkflowStore.getState().workflow!;
+    expect(workflow.nodes.find((node) => node.id === 1)?.inputs).toEqual([
+      { name: 'mode.source', type: 'MODEL', link: null },
+    ]);
+    expect(workflow.links).toEqual([]);
+    expect(workflow.nodes.find((node) => node.id === 2)?.outputs[0].links).toBeNull();
+  });
+
+  it('updates a nested DynamicCombo by qualified name', () => {
+    const dynTypes: NodeTypes = {
+      Encoder: {
+        input: {
+          required: {
+            codec: ['COMFY_DYNAMICCOMBO_V3', {
+              options: [{ key: 'h264', inputs: { required: {
+                encoding: ['COMFY_DYNAMICCOMBO_V3', {
+                  options: [
+                    { key: 'hardware', inputs: { required: { device: ['DEVICE'] } } },
+                    { key: 'software', inputs: { required: { threads: ['INT', { default: 4 }] } } },
+                  ],
+                }],
+              } } }],
+            }],
+            method: ['COMBO', { options: ['area'], default: 'area' }],
+          },
+        },
+        input_order: { required: ['codec', 'method'] },
+        output: [], output_name: [], name: 'Encoder', display_name: 'Encoder',
+        description: '', python_module: '', category: 'test',
+      },
+    } as unknown as NodeTypes;
+    const target = makeNode(1, {
+      type: 'Encoder',
+      inputs: [{ name: 'codec.encoding.device', type: 'DEVICE', link: 10 }],
+      widgets_values: ['h264', 'hardware', 'area'],
+    });
+    const source = makeNode(2, {
+      outputs: [{ name: 'DEVICE', type: 'DEVICE', links: [10] }],
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target, source], [[10, 2, 0, 1, 0, 'DEVICE']]),
+      nodeTypes: dynTypes,
+      ...rootNodeStableRegistry([1, 2]),
+    });
+
+    useWorkflowStore.getState().updateNodeWidget(
+      rootNodeHierarchicalKey(1), 1, 'software', 'codec.encoding',
+    );
+
+    const workflow = useWorkflowStore.getState().workflow!;
+    const next = workflow.nodes.find((node) => node.id === 1)!;
+    expect(next.widgets_values).toEqual(['h264', 'software', 4, 'area']);
+    expect(next.inputs).toEqual([
+      {
+        name: 'codec.encoding.threads',
+        type: 'INT',
+        widget: { name: 'codec.encoding.threads' },
+        link: null,
+      },
+    ]);
+    expect(workflow.links).toEqual([]);
+    expect(workflow.nodes.find((node) => node.id === 2)?.outputs[0].links).toBeNull();
+  });
+
+  it('rebuilds DynamicCombos through the subgraph proxy update route', () => {
+    const dynTypes: NodeTypes = {
+      Switcher: {
+        input: { required: {
+          mode: ['COMFY_DYNAMICCOMBO_V3', { options: [
+            { key: 'image', inputs: { required: { source: ['IMAGE'] } } },
+            { key: 'none', inputs: {} },
+          ] }],
+        } },
+        input_order: { required: ['mode'] },
+        output: [], output_name: [], name: 'Switcher', display_name: 'Switcher',
+        description: '', python_module: '', category: 'test',
+      },
+    } as unknown as NodeTypes;
+    const innerKey = (nodeId: number) =>
+      makeLocationPointer({ type: 'node', nodeId, subgraphId: 'sg-a' });
+    const target = makeNode(1, {
+      itemKey: innerKey(1),
+      type: 'Switcher',
+      inputs: [
+        { name: 'mode', type: 'COMFY_DYNAMICCOMBO_V3', link: null, widget: { name: 'mode' } },
+        { name: 'mode.source', type: 'IMAGE', link: 10 },
+      ],
+      widgets_values: ['image'],
+    });
+    const source = makeNode(2, {
+      itemKey: innerKey(2),
+      outputs: [{ name: 'IMAGE', type: 'IMAGE', links: [10] }],
+    });
+    // Real-world malformed/custom nodes occasionally omit outputs entirely.
+    // Link cleanup must remain defensive for every node in the scope.
+    const withoutOutputs = makeNode(3, { itemKey: innerKey(3) });
+    delete (withoutOutputs as Partial<WorkflowNode>).outputs;
+    const workflow: Workflow = {
+      ...makeWorkflow([], []),
+      definitions: { subgraphs: [{
+        id: 'sg-a', nodes: [target, source, withoutOutputs], groups: [],
+        links: [{ id: 10, origin_id: 2, origin_slot: 0, target_id: 1, target_slot: 1, type: 'IMAGE' }],
+      }] },
+    };
+    useWorkflowStore.setState({ workflow, nodeTypes: dynTypes });
+
+    // The store must infer the schema name from the slot so persisted pins and
+    // older callers without canonical-name metadata still rebuild correctly.
+    useWorkflowStore.getState().updateSubgraphInnerNodeWidget('sg-a', 1, 0, 'none');
+
+    const subgraph = useWorkflowStore.getState().workflow?.definitions?.subgraphs?.[0];
+    expect(subgraph?.nodes.find((node) => node.id === 1)?.widgets_values).toEqual(['none']);
+    expect(subgraph?.nodes.find((node) => node.id === 1)?.inputs).toEqual([
+      { name: 'mode', type: 'COMFY_DYNAMICCOMBO_V3', link: null, widget: { name: 'mode' } },
+    ]);
+    expect(subgraph?.links).toEqual([]);
+    expect(subgraph?.nodes.find((node) => node.id === 2)?.outputs[0].links).toBeNull();
+    expect(subgraph?.nodes.find((node) => node.id === 3)?.outputs).toEqual([]);
+  });
+
+  it('setMobileLayout updates layout', () => {
+    const layout: MobileLayout = {
+      root: [{ type: 'node', id: 3 }, { type: 'node', id: 1 }, { type: 'node', id: 2 }],
+      groups: {},
+      subgraphs: {},
+      hiddenBlocks: {}
+    };
+    useWorkflowStore.getState().setMobileLayout(layout);
+    expect(flattenLayoutToNodeOrder(useWorkflowStore.getState().mobileLayout!)).toEqual([3, 1, 2]);
+  });
+
+  it('rekeys node identity when node moves across subgraph scope', () => {
+    const nodeId = 1;
+    const itemKey = rootNodeHierarchicalKey(nodeId);
+    useWorkflowStore.setState({
+      ...rootNodeStableRegistry([nodeId]),
+      collapsedItems: {
+        [itemKey]: true
+      },
+      mobileLayout: {
+        root: [{ type: 'node', id: nodeId }],
+        groups: {},
+        subgraphs: {},
+        hiddenBlocks: {}
+      }
+    });
+
+    const movedLayout: MobileLayout = {
+      root: [{ type: 'subgraph', id: 'sg-a' }],
+      groups: {},
+      subgraphs: {
+        'sg-a': [{ type: 'node', id: nodeId }]
+      },
+      hiddenBlocks: {}
+    };
+
+    useWorkflowStore.getState().setMobileLayout(movedLayout);
+    const next = useWorkflowStore.getState();
+    const movedPointer = makeLocationPointer({
+      type: 'node',
+      nodeId,
+      subgraphId: 'sg-a'
+    });
+
+    expect(next.itemKeyByPointer[movedPointer]).toBe(movedPointer);
+    expect(next.pointerByHierarchicalKey[movedPointer]).toBe(movedPointer);
+    expect(next.collapsedItems[movedPointer]).toBeUndefined();
+  });
+
+  it('addNode uses subgraph-scope fallback placement when target subgraph is empty', () => {
+    const root = makeNode(1, { pos: [0, 1500], size: [200, 140] });
+    const workflow: Workflow = {
+      ...makeWorkflow([root], []),
+      definitions: {
+        subgraphs: [{ id: 'sg-a', nodes: [], links: [], groups: [] }]
+      }
+    };
+    useWorkflowStore.setState({
+      workflow,
+      nodeTypes,
+      ...rootNodeStableRegistry([1]),
+      mobileLayout: {
+        root: [{ type: 'node', id: 1 }, { type: 'subgraph', id: 'sg-a' }],
+        groups: {},
+        subgraphs: { 'sg-a': [] },
+        hiddenBlocks: {}
+      }
+    });
+
+    const newId = useWorkflowStore.getState().addNode('TestNode', {
+      inSubgraphId: 'sg-a'
+    });
+    expect(newId).toBe(2);
+
+    const nextWorkflow = useWorkflowStore.getState().workflow as Workflow;
+    const sg = nextWorkflow.definitions?.subgraphs?.find((entry) => entry.id === 'sg-a');
+    const added = sg?.nodes.find((node) => node.id === 2);
+    expect(added).toBeDefined();
+    // Should not use root bottom placement (~1720 in this fixture).
+    expect(added?.pos).toEqual([0, 0]);
+  });
+
+  it('deleteContainer removes an empty group without deleting nodes', () => {
+    const outside = makeNode(1, { pos: [10, 10] });
+    const groupPointer = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const groupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([outside], []),
+      ...rootNodeStableRegistry([1]),
+      itemKeyByPointer: {
+        ...rootNodeStableRegistry([1]).itemKeyByPointer,
+        [groupPointer]: groupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...rootNodeStableRegistry([1]).pointerByHierarchicalKey,
+        [groupHierarchicalKey]: groupPointer
+      },
+      collapsedItems: {
+        [groupHierarchicalKey]: true
+      },
+      hiddenItems: {
+        [groupHierarchicalKey]: true
+      },
+      mobileLayout: {
+        root: [{ type: 'group', id: 10, subgraphId: null, itemKey: groupPointer }],
+        groups: { [groupPointer]: [{ type: 'node', id: 1 }] },
+        subgraphs: {},
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().deleteContainer(groupHierarchicalKey, { deleteNodes: false });
+    const next = useWorkflowStore.getState();
+    expect(next.workflow?.groups).toEqual([]);
+    expect(next.workflow?.nodes.map((n) => n.id)).toEqual([1]);
+    expect(
+      next.collapsedItems[
+        groupHierarchicalKey
+      ]
+    ).toBeUndefined();
+    expect(
+      next.hiddenItems[
+        groupHierarchicalKey
+      ]
+    ).toBeUndefined();
+    // Group removed from layout, node promoted to root
+    expect(next.mobileLayout!.groups[groupPointer]).toBeUndefined();
+    expect(next.mobileLayout!.root).toContainEqual({ type: 'node', id: 1 });
+  });
+
+  it('duplicateContainer clones a group and its contents without replacing the clipboard', () => {
+    const inside = makeNode(1, { pos: [150, 150] });
+    const outside = makeNode(2, { pos: [900, 900] });
+    const groupKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const workflow = makeWorkflow([inside, outside], []);
+    const registry = rootNodeStableRegistry([1, 2]);
+    useWorkflowStore.setState({
+      workflow,
+      ...registry,
+      itemKeyByPointer: { ...registry.itemKeyByPointer, [groupKey]: groupKey },
+      pointerByHierarchicalKey: { ...registry.pointerByHierarchicalKey, [groupKey]: groupKey },
+      mobileLayout: {
+        root: [
+          { type: 'group', id: 10, subgraphId: null, itemKey: groupKey },
+          { type: 'node', id: 2 },
+        ],
+        groups: { [groupKey]: [{ type: 'node', id: 1 }] },
+        subgraphs: {},
+        hiddenBlocks: {},
+      },
+    });
+    const clipboardBefore: WorkflowClipboardPayload = {
+      nodes: [structuredClone(outside)],
+      links: [],
+      subgraphs: [],
+      group: null,
+      summary: 'existing clipboard',
+    };
+    useWorkflowClipboardStore.setState({ payload: clipboardBefore });
+
+    const duplicatedIds = useWorkflowStore.getState().duplicateContainer(groupKey);
+
+    expect(duplicatedIds).toHaveLength(1);
+    const next = useWorkflowStore.getState().workflow as Workflow;
+    expect(next.groups).toHaveLength(2);
+    expect(next.nodes).toHaveLength(3);
+    expect(next.nodes.find((node) => duplicatedIds?.includes(node.id))?.type).toBe(inside.type);
+    expect(useWorkflowClipboardStore.getState().payload).toBe(clipboardBefore);
+  });
+
+  it('duplicateContainer also clones an empty group', () => {
+    const groupKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([], []),
+      itemKeyByPointer: { [groupKey]: groupKey },
+      pointerByHierarchicalKey: { [groupKey]: groupKey },
+      mobileLayout: {
+        root: [{ type: 'group', id: 10, subgraphId: null, itemKey: groupKey }],
+        groups: { [groupKey]: [] },
+        subgraphs: {},
+        hiddenBlocks: {},
+      },
+    });
+
+    expect(useWorkflowStore.getState().duplicateContainer(groupKey)).toEqual([]);
+    expect(useWorkflowStore.getState().workflow?.groups).toHaveLength(2);
+  });
+
+  it('deleteContainer can remove group and all nodes in it', () => {
+    const inGroup = makeNode(1, {
+      pos: [120, 120],
+      outputs: [{ name: 'out', type: 'MODEL', links: [1] }]
+    });
+    const outside = makeNode(2, {
+      pos: [900, 120],
+      inputs: [{ name: 'model', type: 'MODEL', link: 1 }]
+    });
+    const groupPointer = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const groupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const nodeRegistry = rootNodeStableRegistry([1, 2]);
+    useWorkflowStore.setState({
+      workflow: makeWorkflow(
+        [inGroup, outside],
+        [[1, 1, 0, 2, 0, 'MODEL']]
+      ),
+      itemKeyByPointer: {
+        ...nodeRegistry.itemKeyByPointer,
+        [groupPointer]: groupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...nodeRegistry.pointerByHierarchicalKey,
+        [groupHierarchicalKey]: groupPointer
+      },
+      hiddenItems: {
+        [makeLocationPointer({ type: 'node', nodeId: 1, subgraphId: null })]: true,
+        [groupHierarchicalKey]: true
+      },
+      connectionHighlightModes: { [rootNodeHierarchicalKey(1)]: 'both' },
+      mobileLayout: {
+        root: [{ type: 'group', id: 10, subgraphId: null, itemKey: groupPointer }, { type: 'node', id: 2 }],
+        groups: { [groupPointer]: [{ type: 'node', id: 1 }] },
+        subgraphs: {},
+        hiddenBlocks: {}
+      },
+      collapsedItems: {
+        [groupHierarchicalKey]: true
+      },
+    });
+    useBookmarksStore.setState({
+      bookmarkedItems: [
+        rootNodeHierarchicalKey(1),
+        rootNodeHierarchicalKey(2)
+      ]
+    });
+
+    useWorkflowStore.getState().deleteContainer(groupHierarchicalKey, { deleteNodes: true });
+    const next = useWorkflowStore.getState();
+    expect(next.workflow?.groups).toEqual([]);
+    expect(next.workflow?.nodes.map((n) => n.id)).toEqual([2]);
+    expect(next.workflow?.links).toEqual([]);
+    expect(next.workflow?.nodes[0]?.inputs[0]?.link).toBeNull();
+    expect(
+      next.hiddenItems[
+        makeLocationPointer({ type: 'node', nodeId: 1, subgraphId: null })
+      ]
+    ).toBeUndefined();
+    expect(next.connectionHighlightModes[rootNodeHierarchicalKey(1)]).toBeUndefined();
+    expect(flattenLayoutToNodeOrder(next.mobileLayout!)).toEqual([2]);
+    expect(next.mobileLayout!.groups[groupPointer]).toBeUndefined();
+    expect(
+      next.collapsedItems[
+        groupHierarchicalKey
+      ]
+    ).toBeUndefined();
+    expect(
+      next.hiddenItems[
+        groupHierarchicalKey
+      ]
+    ).toBeUndefined();
+    expect(useBookmarksStore.getState().bookmarkedItems).toEqual([
+      rootNodeHierarchicalKey(2)
+    ]);
+  });
+
+  it('deleteContainer deletes a group and its nodes when given a valid item key', () => {
+    const inGroup = makeNode(1, {
+      pos: [120, 120],
+      outputs: [{ name: 'out', type: 'MODEL', links: [1] }]
+    });
+    const outside = makeNode(2, {
+      pos: [900, 120],
+      inputs: [{ name: 'model', type: 'MODEL', link: 1 }]
+    });
+    const groupPointer = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const groupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const nodeRegistry = rootNodeStableRegistry([1, 2]);
+    useWorkflowStore.setState({
+      workflow: {
+        ...makeWorkflow([inGroup, outside], [[1, 1, 0, 2, 0, 'MODEL']]),
+        groups: [{ id: 10, title: 'Group', color: '#fff', bounding: [100, 100, 500, 300], itemKey: groupHierarchicalKey }]
+      },
+      itemKeyByPointer: {
+        ...nodeRegistry.itemKeyByPointer,
+        [groupPointer]: groupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...nodeRegistry.pointerByHierarchicalKey,
+        [groupHierarchicalKey]: groupPointer
+      },
+      mobileLayout: {
+        root: [{ type: 'group', id: 10, subgraphId: null, itemKey: groupPointer }, { type: 'node', id: 2 }],
+        groups: { [groupPointer]: [{ type: 'node', id: 1 }] },
+        subgraphs: {},
+        hiddenBlocks: {}
+      },
+    });
+
+    useWorkflowStore.getState().deleteContainer(groupHierarchicalKey, { deleteNodes: true });
+    const next = useWorkflowStore.getState();
+    expect(next.workflow?.groups).toEqual([]);
+    expect(next.workflow?.nodes.map((n) => n.id)).toEqual([2]);
+    expect(next.workflow?.links).toEqual([]);
+  });
+
+  it('keeps bookmarked subgraph nodes across workflow-state sync', () => {
+    const placeholder = makeNode(50, {
+      type: 'sg-a',
+      itemKey: makeLocationPointer({ type: 'node', nodeId: 50, subgraphId: null }),
+    });
+    const innerNodeKey = makeLocationPointer({ type: 'node', nodeId: 1044, subgraphId: 'sg-a' });
+    const innerNode = makeNode(1044, {
+      type: 'InnerNode',
+      itemKey: innerNodeKey,
+    });
+    const workflow: Workflow = {
+      last_node_id: 1044,
+      last_link_id: 0,
+      nodes: [placeholder],
+      links: [],
+      groups: [],
+      config: {},
+      version: 1,
+      definitions: {
+        subgraphs: [
+          {
+            id: 'sg-a',
+            itemKey: makeLocationPointer({ type: 'subgraph', subgraphId: 'sg-a' }),
+            nodes: [innerNode],
+            groups: [],
+            links: [],
+            config: {},
+          },
+        ],
+      },
+    };
+
+    useWorkflowStore.setState({
+      workflow,
+      currentWorkflowKey: 'bookmark-subgraph-node',
+      savedWorkflowStates: {
+        'bookmark-subgraph-node': {
+          nodes: {},
+          seedModes: {},
+          bookmarkedItems: [innerNodeKey],
+        },
+      },
+    });
+
+    expect(useBookmarksStore.getState().bookmarkedItems).toEqual([innerNodeKey]);
+
+    useWorkflowStore.setState({ hiddenItems: {} });
+
+    expect(useBookmarksStore.getState().bookmarkedItems).toEqual([innerNodeKey]);
+  });
+
+  it('deleteContainer for a markdown-notes group leaves executable links unchanged', () => {
+    const notesGroupPointer = makeLocationPointer({ type: 'group', groupId: 99, subgraphId: null });
+    const notesGroupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 99, subgraphId: null });
+    const notes = [200, 201, 202, 203, 204, 205, 206].map((id) =>
+      makeNode(id, { type: 'MarkdownNote' })
+    );
+    const source = makeNode(1046, {
+      type: '233f1485-e82d-4c79-b376-da0c57e1c6d3',
+      outputs: [
+        { name: 'a', type: 'ANY', links: [1, 2, 3, 4] }
+      ]
+    });
+    const ifElse = makeNode(1002, {
+      type: 'easy ifElse',
+      inputs: [{ name: 'on_true', type: 'ANY', link: 1 }]
+    });
+    const wan = makeNode(1031, {
+      type: 'WanImageToVideo',
+      inputs: [
+        { name: 'start_image', type: 'IMAGE', link: 2 },
+        { name: 'width', type: 'INT', link: 3 },
+        { name: 'height', type: 'INT', link: 4 }
+      ]
+    });
+    const rootNodes = [source, ifElse, wan, ...notes];
+    const registry = rootNodeStableRegistry(rootNodes.map((node) => node.id));
+    useWorkflowStore.setState({
+      workflow: {
+        last_node_id: 1046,
+        last_link_id: 4,
+        nodes: rootNodes,
+        links: [
+          [1, 1046, 0, 1002, 0, 'ANY'],
+          [2, 1046, 0, 1031, 0, 'IMAGE'],
+          [3, 1046, 0, 1031, 1, 'INT'],
+          [4, 1046, 0, 1031, 2, 'INT']
+        ],
+        groups: [
+          { id: 99, itemKey: notesGroupHierarchicalKey, title: 'Notes, Explanation, Hints', color: '#fff', bounding: [0, 0, 600, 400] }
+        ],
+        config: {},
+        version: 1
+      },
+      itemKeyByPointer: {
+        ...registry.itemKeyByPointer,
+        [notesGroupPointer]: notesGroupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...registry.pointerByHierarchicalKey,
+        [notesGroupHierarchicalKey]: notesGroupPointer
+      },
+      mobileLayout: {
+        root: [
+          { type: 'group', id: 99, subgraphId: null, itemKey: notesGroupPointer },
+          { type: 'node', id: 1046 },
+          { type: 'node', id: 1002 },
+          { type: 'node', id: 1031 }
+        ],
+        groups: {
+          [notesGroupPointer]: notes.map((node) => ({ type: 'node' as const, id: node.id }))
+        },
+        subgraphs: {},
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().deleteContainer(notesGroupHierarchicalKey, { deleteNodes: true });
+    const next = useWorkflowStore.getState().workflow as Workflow;
+    expect(next.groups).toEqual([]);
+    expect(next.nodes.map((node) => node.id)).toEqual([1046, 1002, 1031]);
+    expect(next.links).toEqual([
+      [1, 1046, 0, 1002, 0, 'ANY'],
+      [2, 1046, 0, 1031, 0, 'IMAGE'],
+      [3, 1046, 0, 1031, 1, 'INT'],
+      [4, 1046, 0, 1031, 2, 'INT']
+    ]);
+    expect(next.nodes.find((node) => node.id === 1002)?.inputs[0]?.link).toBe(1);
+    const wanInputs = next.nodes.find((node) => node.id === 1031)?.inputs ?? [];
+    expect(wanInputs.map((entry) => entry.link)).toEqual([2, 3, 4]);
+  });
+
+  it('deleteContainer does not prune nested subgraph definitions when deleting unrelated notes', () => {
+    const notesGroupPointer = makeLocationPointer({ type: 'group', groupId: 99, subgraphId: null });
+    const notesGroupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 99, subgraphId: null });
+    const notes = [200, 201, 202, 203, 204, 205, 206].map((id) =>
+      makeNode(id, { type: 'MarkdownNote' })
+    );
+    const placeholderA = makeNode(1046, { type: 'sg-a' });
+    const rootNodes = [placeholderA, ...notes];
+    const registry = rootNodeStableRegistry(rootNodes.map((node) => node.id));
+    useWorkflowStore.setState({
+      workflow: {
+        last_node_id: 1046,
+        last_link_id: 0,
+        nodes: rootNodes,
+        links: [],
+        groups: [
+          { id: 99, itemKey: notesGroupHierarchicalKey, title: 'Notes, Explanation, Hints', color: '#fff', bounding: [0, 0, 600, 400] }
+        ],
+        config: {},
+        version: 1,
+        definitions: {
+          subgraphs: [
+            {
+              id: 'sg-a',
+              nodes: [makeNode(7, { itemKey: makeLocationPointer({ type: 'node', nodeId: 7, subgraphId: 'sg-a' }), type: 'sg-b' })],
+              links: [],
+              groups: []
+            },
+            {
+              id: 'sg-b',
+              nodes: [makeNode(8, { itemKey: makeLocationPointer({ type: 'node', nodeId: 8, subgraphId: 'sg-b' }), type: 'Any' })],
+              links: [],
+              groups: []
+            }
+          ]
+        }
+      },
+      itemKeyByPointer: {
+        ...registry.itemKeyByPointer,
+        [notesGroupPointer]: notesGroupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...registry.pointerByHierarchicalKey,
+        [notesGroupHierarchicalKey]: notesGroupPointer
+      },
+      mobileLayout: {
+        root: [
+          { type: 'group', id: 99, subgraphId: null, itemKey: notesGroupPointer },
+          { type: 'subgraph', id: 'sg-a', nodeId: 1046 }
+        ],
+        groups: {
+          [notesGroupPointer]: notes.map((node) => ({ type: 'node' as const, id: node.id }))
+        },
+        subgraphs: {
+          'sg-a': [{ type: 'subgraph', id: 'sg-b', nodeId: 7 }],
+          'sg-b': [{ type: 'node', id: 8 }]
+        },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().deleteContainer(notesGroupHierarchicalKey, { deleteNodes: true });
+    const next = useWorkflowStore.getState().workflow as Workflow;
+    expect(next.definitions?.subgraphs?.map((sg) => sg.id)).toEqual(['sg-a', 'sg-b']);
+  });
+
+  it('deleteContainer in a subgraph scope does not delete same-id root nodes', () => {
+    const rootNode = makeNode(7, {
+      outputs: [{ name: 'out', type: 'MODEL', links: [1] }]
+    });
+    const placeholder = makeNode(100, {
+      type: 'sg-a',
+      inputs: [{ name: 'in', type: 'MODEL', link: 1 }]
+    });
+    const innerSource = makeNode(7, {
+      itemKey: makeLocationPointer({ type: 'node', nodeId: 7, subgraphId: 'sg-a' }),
+      outputs: [{ name: 'out', type: 'MODEL', links: [2] }]
+    });
+    const innerTarget = makeNode(8, {
+      itemKey: makeLocationPointer({ type: 'node', nodeId: 8, subgraphId: 'sg-a' }),
+      inputs: [{ name: 'in', type: 'MODEL', link: 2 }]
+    });
+    const sgGroupPointer = makeLocationPointer({ type: 'group', groupId: 20, subgraphId: 'sg-a' });
+    const sgGroupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 20, subgraphId: 'sg-a' });
+    useWorkflowStore.setState({
+      workflow: {
+        last_node_id: 100,
+        last_link_id: 1,
+        nodes: [rootNode, placeholder],
+        links: [[1, 7, 0, 100, 0, 'MODEL']],
+        groups: [],
+        config: {},
+        version: 1,
+        definitions: {
+          subgraphs: [
+            {
+              id: 'sg-a',
+              nodes: [innerSource, innerTarget],
+              links: [{ id: 2, origin_id: 7, origin_slot: 0, target_id: 8, target_slot: 0, type: 'MODEL' }],
+              groups: [
+                { id: 20, itemKey: sgGroupHierarchicalKey, title: 'SG Group', color: '#fff', bounding: [0, 0, 500, 300] }
+              ]
+            }
+          ]
+        }
+      },
+      itemKeyByPointer: {
+        [makeLocationPointer({ type: 'node', nodeId: 7, subgraphId: null })]: rootNodeHierarchicalKey(7),
+        [makeLocationPointer({ type: 'node', nodeId: 100, subgraphId: null })]: rootNodeHierarchicalKey(100),
+        [makeLocationPointer({ type: 'node', nodeId: 7, subgraphId: 'sg-a' })]: makeLocationPointer({ type: 'node', nodeId: 7, subgraphId: 'sg-a' }),
+        [makeLocationPointer({ type: 'node', nodeId: 8, subgraphId: 'sg-a' })]: makeLocationPointer({ type: 'node', nodeId: 8, subgraphId: 'sg-a' }),
+        [sgGroupPointer]: sgGroupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        [rootNodeHierarchicalKey(7)]: makeLocationPointer({ type: 'node', nodeId: 7, subgraphId: null }),
+        [rootNodeHierarchicalKey(100)]: makeLocationPointer({ type: 'node', nodeId: 100, subgraphId: null }),
+        [makeLocationPointer({ type: 'node', nodeId: 7, subgraphId: 'sg-a' })]: makeLocationPointer({ type: 'node', nodeId: 7, subgraphId: 'sg-a' }),
+        [makeLocationPointer({ type: 'node', nodeId: 8, subgraphId: 'sg-a' })]: makeLocationPointer({ type: 'node', nodeId: 8, subgraphId: 'sg-a' }),
+        [sgGroupHierarchicalKey]: sgGroupPointer
+      },
+      mobileLayout: {
+        root: [{ type: 'node', id: 7 }, { type: 'subgraph', id: 'sg-a', nodeId: 100 }],
+        groups: { [sgGroupPointer]: [{ type: 'node', id: 7 }] },
+        subgraphs: {
+          'sg-a': [{ type: 'group', id: 20, subgraphId: 'sg-a', itemKey: sgGroupPointer }, { type: 'node', id: 8 }]
+        },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().deleteContainer(sgGroupHierarchicalKey, { deleteNodes: true });
+    const next = useWorkflowStore.getState().workflow as Workflow;
+    expect(next.nodes.map((node) => node.id)).toEqual([7, 100]);
+    expect(next.links).toEqual([[1, 7, 0, 100, 0, 'MODEL']]);
+    const nextSubgraph = next.definitions?.subgraphs?.find((sg) => sg.id === 'sg-a');
+    expect(nextSubgraph?.nodes.map((node) => node.id)).toEqual([8]);
+    expect(nextSubgraph?.links).toEqual([]);
+    expect(nextSubgraph?.nodes.find((node) => node.id === 8)?.inputs[0]?.link).toBeNull();
+  });
+
+  it('deleteContainer removes a nested subgraph placeholder inside the group', () => {
+    const outerPlaceholder = makeNode(100, { type: 'sg-a' });
+    const nestedPlaceholderKey = makeLocationPointer({
+      type: 'node', nodeId: 200, subgraphId: 'sg-a'
+    });
+    const nestedPlaceholder = makeNode(200, {
+      type: 'sg-b',
+      itemKey: nestedPlaceholderKey,
+    });
+    const outerSurvivorKey = makeLocationPointer({
+      type: 'node', nodeId: 201, subgraphId: 'sg-a'
+    });
+    const outerSurvivor = makeNode(201, { itemKey: outerSurvivorKey });
+    const sharedPlaceholderKey = makeLocationPointer({
+      type: 'node', nodeId: 202, subgraphId: 'sg-a'
+    });
+    const sharedPlaceholder = makeNode(202, {
+      type: 'sg-b',
+      itemKey: sharedPlaceholderKey,
+    });
+    const nestedInnerKey = makeLocationPointer({
+      type: 'node', nodeId: 300, subgraphId: 'sg-b'
+    });
+    const nestedInner = makeNode(300, { itemKey: nestedInnerKey });
+    const groupKey = makeLocationPointer({
+      type: 'group', groupId: 20, subgraphId: 'sg-a'
+    });
+    const outerPlaceholderKey = rootNodeHierarchicalKey(100);
+
+    useWorkflowStore.setState({
+      workflow: {
+        last_node_id: 300,
+        last_link_id: 0,
+        nodes: [outerPlaceholder],
+        links: [],
+        groups: [],
+        config: {},
+        version: 1,
+        definitions: {
+          subgraphs: [
+            {
+              id: 'sg-a',
+              nodes: [nestedPlaceholder, outerSurvivor, sharedPlaceholder],
+              links: [],
+              groups: [{
+                id: 20,
+                itemKey: groupKey,
+                title: 'Nested placeholder group',
+                color: '#fff',
+                bounding: [0, 0, 500, 300],
+              }],
+            },
+            {
+              id: 'sg-b',
+              nodes: [nestedInner],
+              links: [],
+              groups: [],
+            },
+          ],
+        },
+      },
+      itemKeyByPointer: {
+        [outerPlaceholderKey]: outerPlaceholderKey,
+        [nestedPlaceholderKey]: nestedPlaceholderKey,
+        [outerSurvivorKey]: outerSurvivorKey,
+        [sharedPlaceholderKey]: sharedPlaceholderKey,
+        [nestedInnerKey]: nestedInnerKey,
+        [groupKey]: groupKey,
+      },
+      pointerByHierarchicalKey: {
+        [outerPlaceholderKey]: outerPlaceholderKey,
+        [nestedPlaceholderKey]: nestedPlaceholderKey,
+        [outerSurvivorKey]: outerSurvivorKey,
+        [sharedPlaceholderKey]: sharedPlaceholderKey,
+        [nestedInnerKey]: nestedInnerKey,
+        [groupKey]: groupKey,
+      },
+      mobileLayout: {
+        root: [{ type: 'subgraph', id: 'sg-a', nodeId: 100 }],
+        groups: {
+          [groupKey]: [{ type: 'subgraph', id: 'sg-b', nodeId: 200 }],
+        },
+        subgraphs: {
+          'sg-a': [
+            { type: 'group', id: 20, subgraphId: 'sg-a', itemKey: groupKey },
+            { type: 'node', id: 201 },
+            { type: 'subgraph', id: 'sg-b', nodeId: 202 },
+          ],
+          'sg-b': [{ type: 'node', id: 300 }],
+        },
+        hiddenBlocks: {},
+      },
+    });
+
+    useWorkflowStore.getState().deleteContainer(groupKey, { deleteNodes: true });
+
+    const next = useWorkflowStore.getState().workflow as Workflow;
+    expect(next.nodes.map((node) => node.id)).toEqual([100]);
+    const outer = next.definitions?.subgraphs?.find((subgraph) => subgraph.id === 'sg-a');
+    expect(outer?.groups).toEqual([]);
+    expect(outer?.nodes.map((node) => node.id)).toEqual([201, 202]);
+    // The other instance still reaches sg-b, so deleting this group must not
+    // erase the shared definition's contents.
+    const shared = next.definitions?.subgraphs?.find((subgraph) => subgraph.id === 'sg-b');
+    expect(shared?.nodes.map((node) => node.id)).toEqual([300]);
+  });
+
+  it('clears workflow node errors when loading a workflow without node types', () => {
+    useWorkflowErrorsStore.setState({
+      error: 'Workflow load error: stale',
+      nodeErrors: {
+        '1': [{ type: 'workflow_load', message: 'Missing value', details: 'stale' }]
+      },
+      errorCycleIndex: 1,
+      errorsDismissed: true
+    });
+
+    useWorkflowStore.getState().loadWorkflow(makeWorkflow([makeNode(1)], []), 'new.json');
+    const nextErrors = useWorkflowErrorsStore.getState();
+    expect(nextErrors.error).toBeNull();
+    expect(nextErrors.nodeErrors).toEqual({});
+    expect(nextErrors.errorCycleIndex).toBe(0);
+    expect(nextErrors.errorsDismissed).toBe(false);
+  });
+
+  it('clears workflow node errors when unloading workflow', () => {
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([makeNode(1)], []),
+      currentWorkflowKey: 'wk-1'
+    });
+    useWorkflowErrorsStore.setState({
+      error: 'Workflow load error: stale',
+      nodeErrors: {
+        '1': [{ type: 'workflow_load', message: 'Missing value', details: 'stale' }]
+      },
+      errorCycleIndex: 1,
+      errorsDismissed: true
+    });
+
+    useWorkflowStore.getState().unloadWorkflow();
+    const nextErrors = useWorkflowErrorsStore.getState();
+    expect(nextErrors.error).toBeNull();
+    expect(nextErrors.nodeErrors).toEqual({});
+    expect(nextErrors.errorCycleIndex).toBe(0);
+    expect(nextErrors.errorsDismissed).toBe(false);
+  });
+
+  it('clears node-specific errors when updating node widget values', () => {
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([makeNode(1), makeNode(2)], []),
+      ...rootNodeStableRegistry([1, 2])
+    });
+    useWorkflowErrorsStore.setState({
+      error: 'Prompt error',
+      nodeErrors: {
+        '1': [{ type: 'prompt', message: 'Bad value', details: 'bad' }],
+        '2': [{ type: 'prompt', message: 'Other issue', details: 'other' }]
+      },
+      errorCycleIndex: 0,
+      errorsDismissed: false
+    });
+
+    useWorkflowStore.getState().updateNodeWidget(rootNodeHierarchicalKey(1), 0, 123);
+    expect(useWorkflowErrorsStore.getState().nodeErrors['1']).toBeUndefined();
+    expect(useWorkflowErrorsStore.getState().nodeErrors['2']).toBeDefined();
+
+    useWorkflowErrorsStore.setState({
+      error: 'Prompt error',
+      nodeErrors: {
+        '1': [{ type: 'prompt', message: 'Bad value', details: 'bad' }],
+        '2': [{ type: 'prompt', message: 'Other issue', details: 'other' }]
+      },
+      errorCycleIndex: 0,
+      errorsDismissed: false
+    });
+    useWorkflowStore.getState().updateNodeWidgets(rootNodeHierarchicalKey(1), { 0: 456, 1: 789 });
+    expect(useWorkflowErrorsStore.getState().nodeErrors['1']).toBeUndefined();
+    expect(useWorkflowErrorsStore.getState().nodeErrors['2']).toBeDefined();
+  });
+
+  it('restores only cosmetic cached state when loading another workflow with the same cache key', () => {
+    const workflowA = makeWorkflow([
+      makeNode(1, { type: 'Any', widgets_values: [111] })
+    ], []);
+    const workflowB = makeWorkflow([
+      makeNode(1, { type: 'Any', widgets_values: [222] })
+    ], []);
+
+    useWorkflowStore.getState().loadWorkflow(workflowA, 'workflow-a.json');
+    const initialState = useWorkflowStore.getState();
+    const itemKey = initialState.workflow?.groups?.[0]?.itemKey ?? makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+
+    useWorkflowStore.setState((state) => ({
+      workflow: state.workflow
+        ? {
+            ...state.workflow,
+            nodes: state.workflow.nodes.map((node) =>
+              node.id === 1 ? { ...node, widgets_values: [999] } : node
+            )
+          }
+        : state.workflow,
+      hiddenItems: { [itemKey]: true },
+      collapsedItems: { [itemKey]: true },
+    }));
+    useWorkflowStore.getState().saveCurrentWorkflowState();
+
+    useWorkflowStore.getState().loadWorkflow(workflowB, 'workflow-b.json');
+    const next = useWorkflowStore.getState();
+    expect(next.workflow?.nodes.find((node) => node.id === 1)?.widgets_values).toEqual([222]);
+  });
+
+  it('resolves a local input alias before loading an embedded queue workflow', async () => {
+    const loadImageTypes: NodeTypes = {
+      LoadImage: {
+        input: { required: { image: [['private/photo.png']] } },
+        input_order: { required: ['image'] },
+        output: ['IMAGE', 'MASK'],
+        output_name: ['IMAGE', 'MASK'],
+        name: 'LoadImage',
+        display_name: 'Load Image',
+        description: '',
+        python_module: 'nodes',
+        category: 'image',
+      },
+    };
+    const aliased = makeWorkflow([
+      makeNode(1, {
+        type: 'LoadImage',
+        widgets_values: ['.mi-deadbeef.png', 'image'],
+      }),
+    ], []);
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe('/mobile/api/input-aliases/resolve');
+      expect(JSON.parse(String(init?.body))).toEqual({ aliases: ['.mi-deadbeef.png'] });
+      return {
+        ok: true,
+        json: async () => ({
+          resolved: { '.mi-deadbeef.png': 'private/photo.png' },
+        }),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock as unknown as typeof fetch);
+    useWorkflowStore.setState({ nodeTypes: loadImageTypes });
+
+    useWorkflowStore.getState().loadWorkflow(aliased, 'history-prompt-1.json', {
+      source: { type: 'history', promptId: 'prompt-1' },
+      navigate: false,
+    });
+
+    await vi.waitFor(() => {
+      expect(useWorkflowStore.getState().workflow?.nodes[0].widgets_values)
+        .toEqual(['private/photo.png', 'image']);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((aliased.nodes[0].widgets_values as unknown[])[0]).toBe('.mi-deadbeef.png');
+  });
+
+  it('preserves collapsed root subgraph placeholder nodes when reloading the same workflow', () => {
+    const placeholderNodeId = 7;
+    const placeholderItemKey = rootNodeHierarchicalKey(placeholderNodeId);
+    const workflow = makeWorkflow([
+      makeNode(placeholderNodeId, { type: 'sg-fast' })
+    ], []);
+    workflow.definitions = {
+      subgraphs: [{
+        id: 'sg-fast',
+        itemKey: makeLocationPointer({ type: 'subgraph', subgraphId: 'sg-fast' }),
+        name: 'Fast Graph',
+        nodes: [],
+        links: [],
+        groups: []
+      }]
+    };
+
+    useWorkflowStore.getState().loadWorkflow(workflow, 'placeholder.json');
+    useWorkflowStore.setState({
+      collapsedItems: {
+        [placeholderItemKey]: true
+      }
+    });
+
+    useWorkflowStore.getState().loadWorkflow(workflow, 'placeholder.json');
+
+    expect(useWorkflowStore.getState().collapsedItems[placeholderItemKey]).toBe(true);
+  });
+
+  it('canonicalizes legacy pointer-style group keys before building layout on load', () => {
+    const groupPointer = makeLocationPointer({
+      type: 'group',
+      groupId: 10,
+      subgraphId: null
+    });
+    const canonicalGroupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const wf = makeWorkflow([makeNode(1, { pos: [120, 120] })], []);
+    wf.groups = [
+      {
+        ...(wf.groups?.[0] ?? {
+          id: 10,
+          title: 'Group',
+          color: '#fff',
+          bounding: [100, 100, 500, 300]
+        }),
+        itemKey: groupPointer
+      }
+    ];
+
+    useWorkflowStore.setState({
+      ...rootNodeStableRegistry([1]),
+      itemKeyByPointer: {
+        ...rootNodeStableRegistry([1]).itemKeyByPointer,
+        [groupPointer]: canonicalGroupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...rootNodeStableRegistry([1]).pointerByHierarchicalKey,
+        [canonicalGroupHierarchicalKey]: groupPointer
+      }
+    });
+
+    useWorkflowStore.getState().loadWorkflow(wf, 'legacy-pointer-groups.json');
+    const next = useWorkflowStore.getState();
+    expect(next.workflow?.groups?.[0]?.itemKey).toBe(canonicalGroupHierarchicalKey);
+    const rootGroup = next.mobileLayout?.root.find((ref) => ref.type === 'group');
+    expect(rootGroup && rootGroup.type === 'group' ? rootGroup.itemKey : null).toBe(
+      canonicalGroupHierarchicalKey
+    );
+    expect(next.mobileLayout?.groups[groupPointer]).toBeDefined();
+    expect(next.mobileLayout?.groups[canonicalGroupHierarchicalKey]).toBeDefined();
+  });
+
+  it('coerces out-of-range combo widget values on load', () => {
+    const wf = makeWorkflow([
+      makeNode(1, {
+        type: 'ComboNode',
+        widgets_values: ['other/path/model.safetensors']
+      })
+    ], []);
+    useWorkflowStore.setState({
+      nodeTypes: comboNodeTypes
+    });
+
+    useWorkflowStore.getState().loadWorkflow(wf, 'combo.json');
+    const next = useWorkflowStore.getState();
+    expect(next.workflow?.nodes.find((node) => node.id === 1)?.widgets_values).toEqual([
+      'models/main/model.safetensors'
+    ]);
+  });
+
+  it('preserves an unavailable closed-enum combo value on load', () => {
+    const samplerTypes = {
+      Sampler: {
+        input: { required: { sampler_name: [['euler', 'dpmpp_2m']] } },
+        output: [], output_name: [], name: 'Sampler', display_name: 'Sampler',
+        description: '', python_module: '', category: 'test',
+      },
+    } as unknown as NodeTypes;
+    const wf = makeWorkflow([
+      makeNode(1, { type: 'Sampler', widgets_values: ['custom_pack_sampler'] }),
+    ], []);
+    useWorkflowStore.setState({ nodeTypes: samplerTypes });
+
+    useWorkflowStore.getState().loadWorkflow(wf, 'missing-sampler.json');
+
+    expect(useWorkflowStore.getState().workflow?.nodes[0]?.widgets_values)
+      .toEqual(['custom_pack_sampler']);
+  });
+
+  it('ignores missing combo options on bypassed nodes when loading', () => {
+    const missingValue = 'models/missing/not-on-server.safetensors';
+    const wf = makeWorkflow([
+      makeNode(1, {
+        type: 'ComboNode',
+        mode: 4,
+        widgets_values: [missingValue]
+      })
+    ], []);
+    useWorkflowStore.setState({
+      nodeTypes: comboNodeTypes
+    });
+
+    useWorkflowStore.getState().loadWorkflow(wf, 'bypassed-combo.json');
+
+    expect(useWorkflowStore.getState().workflow?.nodes[0]?.widgets_values).toEqual([
+      missingValue
+    ]);
+    expect(useWorkflowErrorsStore.getState().error).toBeNull();
+    expect(useWorkflowErrorsStore.getState().nodeErrors).toEqual({});
+  });
+
+  it('syncs embed workflow when toggling bypass', () => {
+    const wf = makeWorkflow([makeNode(1, { mode: 0 })], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    useWorkflowStore.getState().toggleBypass(rootNodeHierarchicalKey(1));
+    const next = useWorkflowStore.getState();
+    expect(next.workflow?.nodes.find((n) => n.id === 1)?.mode).toBe(4);
+    expect(next.workflow?.nodes.find((n) => n.id === 1)?.mode).toBe(4);
+  });
+
+  it('clears a stale validation error when a node is bypassed', () => {
+    const wf = makeWorkflow([makeNode(1, { mode: 0 })], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      ...rootNodeStableRegistry([1]),
+    });
+    useWorkflowErrorsStore.setState({
+      error: 'Workflow load error: 1 input references missing options.',
+      nodeErrors: {
+        '1': [
+          {
+            type: 'workflow_load',
+            message: 'Missing value: ghost.png',
+            details: 'Not found on server.',
+            inputName: 'image',
+          },
+        ],
+      },
+    });
+
+    useWorkflowStore.getState().toggleBypass(rootNodeHierarchicalKey(1));
+
+    expect(useWorkflowStore.getState().workflow?.nodes[0]?.mode).toBe(4);
+    expect(useWorkflowErrorsStore.getState().nodeErrors['1']).toBeUndefined();
+    expect(useWorkflowErrorsStore.getState().error).toBeNull();
+  });
+
+  it('syncs embed workflow for structural graph edits', () => {
+    const source = makeNode(1, {
+      outputs: [{ name: 'out', type: 'MODEL', links: null }]
+    });
+    const target = makeNode(2, {
+      inputs: [{ name: 'model', type: 'MODEL', link: null }]
+    });
+    const wf = makeWorkflow([source, target], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      ...rootNodeStableRegistry([1, 2]),
+    });
+
+    useWorkflowStore.getState().connectNodes(
+      rootNodeHierarchicalKey(1),
+      0,
+      rootNodeHierarchicalKey(2),
+      0,
+      'MODEL'
+    );
+    const next = useWorkflowStore.getState();
+    expect(next.workflow?.links).toHaveLength(1);
+    expect(next.workflow?.links).toHaveLength(1);
+    expect(next.workflow?.nodes.find((n) => n.id === 2)?.inputs[0]?.link).toBe(1);
+  });
+
+  it('deleteNode preserves root subgraph placeholder nodes and links in embed workflow', () => {
+    // Canonical model: node 50 is a placeholder for subgraphId, connected to node 2 via link 1.
+    // Deleting unrelated node 3 must not remove the placeholder or its link.
+    const subgraphId = 'sg-a';
+    const canonicalWorkflow: Workflow = {
+      ...makeWorkflow(
+        [
+          makeNode(50, { type: subgraphId, outputs: [{ name: 'out', type: 'IMAGE', links: [1] }] }),
+          makeNode(2, { inputs: [{ name: 'image', type: 'IMAGE', link: 1 }] }),
+          makeNode(3),
+        ],
+        [[1, 50, 0, 2, 0, 'IMAGE']]
+      ),
+      definitions: {
+        subgraphs: [{ id: subgraphId, nodes: [makeNode(7)], groups: [], links: [] }]
+      }
+    };
+
+    useWorkflowStore.setState({
+      workflow: canonicalWorkflow,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([50, 2, 3]),
+      mobileLayout: {
+        root: [{ type: 'subgraph', id: subgraphId }, { type: 'node', id: 2 }, { type: 'node', id: 3 }],
+        groups: {},
+        subgraphs: { [subgraphId]: [{ type: 'node', id: 7 }] },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(3), false);
+    const embedded = useWorkflowStore.getState().workflow;
+    expect(embedded?.nodes.some((node) => node.id === 50 && node.type === subgraphId)).toBe(true);
+    expect(embedded?.links.some((link) => link[1] === 50 && link[3] === 2)).toBe(true);
+    expect(embedded?.nodes.find((node) => node.id === 2)?.inputs[0]?.link).toBe(1);
+    expect(embedded?.definitions?.subgraphs?.some((subgraph) => subgraph.id === subgraphId)).toBe(true);
+  });
+
+  it('deleteNode preserves subgraph boundary links needed by SubgraphNode', () => {
+    const subgraphId = 'sg-a';
+    const canonicalWorkflow: Workflow = {
+      ...makeWorkflow([makeNode(50, { type: subgraphId }), makeNode(3)], []),
+      definitions: {
+        subgraphs: [
+          {
+            id: subgraphId,
+            nodes: [
+              makeNode(7, {
+                inputs: [{ name: 'in', type: 'MODEL', link: 2044 }],
+                outputs: [{ name: 'out', type: 'MODEL', links: [2045] }]
+              })
+            ],
+            groups: [],
+            links: [
+              { id: 2044, origin_id: -10, origin_slot: 0, target_id: 7, target_slot: 0, type: 'MODEL' },
+              { id: 2045, origin_id: 7, origin_slot: 0, target_id: -20, target_slot: 0, type: 'MODEL' }
+            ]
+          }
+        ]
+      }
+    };
+    useWorkflowStore.setState({
+      workflow: canonicalWorkflow,
+      ...rootNodeStableRegistry([50, 3]),
+      mobileLayout: {
+        root: [{ type: 'node', id: 3 }, { type: 'subgraph', id: subgraphId }],
+        groups: {},
+        subgraphs: { [subgraphId]: [{ type: 'node', id: 7 }] },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(3), false);
+    const subgraph = useWorkflowStore
+      .getState()
+      .workflow?.definitions?.subgraphs?.find((entry) => entry.id === subgraphId);
+    const boundaryLinks = (subgraph?.links ?? []).filter(
+      (link) => link.origin_id === -10 || link.target_id === -20,
+    );
+    expect(boundaryLinks).toHaveLength(2);
+    expect(subgraph?.nodes[0]?.inputs?.[0]?.link).toBe(2044);
+    expect(subgraph?.nodes[0]?.outputs?.[0]?.links).toEqual([2045]);
+  });
+
+  it('queues updated embed workflow after updateNodeWidget', async () => {
+    const wf = makeWorkflow([makeNode(1, { widgets_values: [1] })], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+    useWorkflowStore.getState().updateNodeWidget(rootNodeHierarchicalKey(1), 0, 42);
+    const embedded = await queueAndGetEmbeddedWorkflow();
+    expect(embedded.nodes.find((n) => n.id === 1)?.widgets_values).toEqual([42]);
+  });
+
+  it('queues updated embed workflow after updateNodeWidgets', async () => {
+    const wf = makeWorkflow([makeNode(1, { widgets_values: [1, 2] })], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+    useWorkflowStore.getState().updateNodeWidgets(rootNodeHierarchicalKey(1), { 0: 7, 1: 9 });
+    const embedded = await queueAndGetEmbeddedWorkflow();
+    expect(embedded.nodes.find((n) => n.id === 1)?.widgets_values).toEqual([7, 9]);
+  });
+
+  it('queues updated embed workflow after updateNodeTitle', async () => {
+    const wf = makeWorkflow([makeNode(1, { title: 'old' } as Partial<WorkflowNode>)], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+    useWorkflowStore.getState().updateNodeTitle(rootNodeHierarchicalKey(1), 'new title');
+    const embedded = await queueAndGetEmbeddedWorkflow();
+    const node = embedded.nodes.find((n) => n.id === 1) as WorkflowNode & { title?: string };
+    expect(node.title).toBe('new title');
+  });
+
+  it('queues updated embed workflow after toggleBypass', async () => {
+    const wf = makeWorkflow([makeNode(1, { mode: 0 })], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+    useWorkflowStore.getState().toggleBypass(rootNodeHierarchicalKey(1));
+    const embedded = await queueAndGetEmbeddedWorkflow();
+    expect(embedded.nodes.find((n) => n.id === 1)?.mode).toBe(4);
+  });
+
+  it('queues updated embed workflow after connect and disconnect edits', async () => {
+    const source = makeNode(1, {
+      outputs: [{ name: 'out', type: 'MODEL', links: null }]
+    });
+    const target = makeNode(2, {
+      inputs: [{ name: 'model', type: 'MODEL', link: null }]
+    });
+    const wf = makeWorkflow([source, target], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1, 2]),
+    });
+    useWorkflowStore.getState().connectNodes(rootNodeHierarchicalKey(1), 0, rootNodeHierarchicalKey(2), 0, 'MODEL');
+    let embedded = await queueAndGetEmbeddedWorkflow();
+    expect(embedded.links).toHaveLength(1);
+    expect(embedded.nodes.find((n) => n.id === 2)?.inputs[0]?.link).toBe(1);
+
+    useWorkflowStore.getState().disconnectInput(rootNodeHierarchicalKey(2), 0);
+    embedded = await queueAndGetEmbeddedWorkflow();
+    expect(embedded.links).toHaveLength(0);
+    expect(embedded.nodes.find((n) => n.id === 2)?.inputs[0]?.link).toBeNull();
+  });
+
+  it('queues updated embed workflow after addNode and deleteNode edits', async () => {
+    const source = makeNode(1, {
+      outputs: [{ name: 'out', type: 'MODEL', links: null }]
+    });
+    const wf = makeWorkflow([source], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1]),
+      mobileLayout: {
+        root: [{ type: 'node', id: 1 }],
+        groups: {},
+        subgraphs: {},
+        hiddenBlocks: {}
+      }
+    });
+
+    const added = useWorkflowStore.getState().addNode('TestNode', {
+      nearNodeHierarchicalKey: rootNodeHierarchicalKey(1),
+    });
+    expect(added).toBe(2);
+    let embedded = await queueAndGetEmbeddedWorkflow();
+    expect(embedded.nodes.some((n) => n.id === 2)).toBe(true);
+
+    const addedHierarchicalKey = useWorkflowStore.getState().workflow?.nodes.find((n) => n.id === 2)?.itemKey;
+    expect(addedHierarchicalKey).toBeDefined();
+    useWorkflowStore.getState().deleteNode(addedHierarchicalKey as string, false);
+    embedded = await queueAndGetEmbeddedWorkflow();
+    expect(embedded.nodes.some((n) => n.id === 2)).toBe(false);
+  });
+
+  it('preserves embedded subgraph definitions after deleting a root node and saving', async () => {
+    const embeddedSubgraphNode = makeNode(7, { widgets_values: [9] });
+    const placeholderNode = makeNode(50, { type: 'sg-a' });
+    const canonicalWorkflow: Workflow = {
+      ...makeWorkflow([makeNode(1), makeNode(2), placeholderNode], []),
+      definitions: {
+        subgraphs: [{ id: 'sg-a', nodes: [embeddedSubgraphNode], groups: [], links: [] }]
+      }
+    };
+    useWorkflowStore.setState({
+      workflow: canonicalWorkflow,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1, 2, 50]),
+      mobileLayout: {
+        root: [{ type: 'node', id: 1 }, { type: 'node', id: 2 }, { type: 'subgraph', id: 'sg-a' }],
+        groups: {},
+        subgraphs: { 'sg-a': [{ type: 'node', id: 7 }] },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(2), false);
+    let embedded = await queueAndGetEmbeddedWorkflow();
+    let sg = embedded.definitions?.subgraphs?.find((subgraph) => subgraph.id === 'sg-a');
+    expect(embedded.nodes.some((node) => node.id === 2)).toBe(false);
+    expect(sg?.nodes.some((node) => node.id === 7)).toBe(true);
+    expect(sg?.nodes.some((node) => node.id === 101)).toBe(false);
+
+    useWorkflowStore
+      .getState()
+      .setSavedWorkflow(useWorkflowStore.getState().workflow as Workflow, 'saved-with-subgraphs.json');
+    embedded = await queueAndGetEmbeddedWorkflow();
+    sg = embedded.definitions?.subgraphs?.find((subgraph) => subgraph.id === 'sg-a');
+    expect(sg?.nodes.some((node) => node.id === 7)).toBe(true);
+    expect(sg?.nodes.some((node) => node.id === 101)).toBe(false);
+  });
+
+  it('setSavedWorkflow and root delete do not mutate subgraph definition links/ios', () => {
+    // Canonical model: workflow.nodes = root nodes + placeholder (type=subgraphId).
+    // Verify that deleting a root node (node 3) does not corrupt the subgraph's
+    // boundary IO connections or inner links.
+    const subgraphId = 'sg-a';
+    const canonicalWorkflow: Workflow = {
+      ...makeWorkflow(
+        [makeNode(1), makeNode(2), makeNode(3), makeNode(50, { type: subgraphId })],
+        [[1, 50, 0, 2, 0, 'MODEL']]
+      ),
+      definitions: {
+        subgraphs: [
+          {
+            id: subgraphId,
+            inputs: [{ id: 'in-1', name: 'model', type: 'MODEL', linkIds: [2044] }],
+            outputs: [{ id: 'out-1', name: 'model', type: 'MODEL', linkIds: [2045] }],
+            nodes: [
+              makeNode(7, {
+                inputs: [{ name: 'in', type: 'MODEL', link: 2044 }],
+                outputs: [{ name: 'out', type: 'MODEL', links: [2045] }]
+              })
+            ],
+            groups: [],
+            links: [
+              { id: 2044, origin_id: -10, origin_slot: 0, target_id: 7, target_slot: 0, type: 'MODEL' },
+              { id: 2045, origin_id: 7, origin_slot: 0, target_id: -20, target_slot: 0, type: 'MODEL' }
+            ]
+          }
+        ]
+      }
+    };
+    // Capture the expected structural shape (ignoring client-side itemKey annotations).
+    const expectedSubgraph = canonicalWorkflow.definitions!.subgraphs![0];
+    useWorkflowStore.setState({
+      workflow: canonicalWorkflow,
+      ...rootNodeStableRegistry([1, 2, 3, 50]),
+      mobileLayout: {
+        root: [{ type: 'node', id: 1 }, { type: 'node', id: 2 }, { type: 'node', id: 3 }, { type: 'subgraph', id: subgraphId }],
+        groups: {},
+        subgraphs: { [subgraphId]: [{ type: 'node', id: 7 }] },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().setSavedWorkflow(useWorkflowStore.getState().workflow as Workflow, 'sg-preserve.json');
+    useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(3), false);
+    const nextSubgraphs = useWorkflowStore.getState().workflow?.definitions?.subgraphs ?? [];
+    const sg = nextSubgraphs.find((s) => s.id === subgraphId);
+    // Structural integrity: inputs, outputs, links, and node connections must be unchanged.
+    // (itemKey annotations on inner nodes are allowed — they are stripped before persistence.)
+    expect(sg).toMatchObject({
+      id: expectedSubgraph.id,
+      inputs: expectedSubgraph.inputs,
+      outputs: expectedSubgraph.outputs,
+      links: expectedSubgraph.links,
+    });
+    expect(sg?.nodes.find((n) => n.id === 7)).toMatchObject({
+      inputs: [{ name: 'in', type: 'MODEL', link: 2044 }],
+      outputs: [{ name: 'out', type: 'MODEL', links: [2045] }],
+    });
+  });
+
+  it('preserves subgraph definitions in queued embed when deleting a root node', async () => {
+    // Canonical model: workflow.nodes holds root nodes + placeholder node (type = subgraph UUID).
+    // Inner subgraph nodes live in definitions.subgraphs — deleteNode must not erase them.
+    const innerNode = makeNode(7, { widgets_values: [9] });
+    const canonicalWorkflow: Workflow = {
+      ...makeWorkflow([makeNode(1), makeNode(2), makeNode(3, { type: 'sg-a' })], []),
+      definitions: {
+        subgraphs: [{ id: 'sg-a', nodes: [innerNode], groups: [], links: [] }]
+      }
+    };
+    useWorkflowStore.setState({
+      workflow: canonicalWorkflow,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1, 2, 3]),
+      mobileLayout: {
+        root: [{ type: 'node', id: 1 }, { type: 'node', id: 2 }, { type: 'subgraph', id: 'sg-a' }],
+        groups: {},
+        subgraphs: { 'sg-a': [{ type: 'node', id: 7 }] },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(2), false);
+    const embedded = await queueAndGetEmbeddedWorkflow();
+    const sg = embedded.definitions?.subgraphs?.find((subgraph) => subgraph.id === 'sg-a');
+    expect(embedded.nodes.some((node) => node.id === 2)).toBe(false);
+    expect(sg).toBeDefined();
+    expect(sg?.nodes.some((node) => node.id === 7)).toBe(true);
+  });
+
+  it('preserves subgraph definitions in queued embed when deleting a root node (subgraph has no groups)', async () => {
+    // Same as above but the subgraph definition has no groups key — defensive coverage.
+    const innerNode = makeNode(7, { widgets_values: [9] });
+    const canonicalWorkflow: Workflow = {
+      ...makeWorkflow([makeNode(1), makeNode(2), makeNode(3, { type: 'sg-a' })], []),
+      definitions: {
+        subgraphs: [{ id: 'sg-a', nodes: [innerNode], links: [] }]
+      }
+    };
+    useWorkflowStore.setState({
+      workflow: canonicalWorkflow,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1, 2, 3]),
+      mobileLayout: {
+        root: [{ type: 'node', id: 1 }, { type: 'node', id: 2 }, { type: 'subgraph', id: 'sg-a' }],
+        groups: {},
+        subgraphs: { 'sg-a': [{ type: 'node', id: 7 }] },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(2), false);
+    const embedded = await queueAndGetEmbeddedWorkflow();
+    const sg = embedded.definitions?.subgraphs?.find((subgraph) => subgraph.id === 'sg-a');
+    expect(embedded.nodes.some((node) => node.id === 2)).toBe(false);
+    expect(sg).toBeDefined();
+    expect(sg?.nodes.some((node) => node.id === 7)).toBe(true);
+  });
+
+  it('queues updated embed workflow after bypassAllInContainer', async () => {
+    const groupPointer = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const groupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const wf = makeWorkflow([
+      makeNode(1, { pos: [150, 150] }),
+      makeNode(2, { pos: [250, 150] })
+    ], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1, 2]),
+      itemKeyByPointer: {
+        ...rootNodeStableRegistry([1, 2]).itemKeyByPointer,
+        [groupPointer]: groupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...rootNodeStableRegistry([1, 2]).pointerByHierarchicalKey,
+        [groupHierarchicalKey]: groupPointer
+      },
+      mobileLayout: {
+        root: [
+          { type: 'node', id: 1 },
+          { type: 'node', id: 2 },
+          { type: 'group', id: 10, subgraphId: null, itemKey: groupPointer }
+        ],
+        groups: { [groupPointer]: [] },
+        subgraphs: {},
+        hiddenBlocks: {}
+      }
+    });
+    useWorkflowStore.getState().bypassAllInContainer(groupHierarchicalKey, true);
+    const embedded = await queueAndGetEmbeddedWorkflow();
+    expect(embedded.nodes.find((n) => n.id === 1)?.mode).toBe(4);
+    expect(embedded.nodes.find((n) => n.id === 2)?.mode).toBe(4);
+  });
+
+  it('bypasses nodes in descendant groups in the same graph scope', () => {
+    const outerKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const innerKey = makeLocationPointer({ type: 'group', groupId: 20, subgraphId: null });
+    const wf = makeWorkflow([
+      makeNode(1, { pos: [500, 150] }),
+      makeNode(2, { pos: [150, 150] }),
+      makeNode(3, { pos: [1000, 1000] }),
+    ], []);
+    wf.groups = [
+      { id: 10, itemKey: outerKey, title: 'Outer', color: '#fff', bounding: [100, 100, 800, 500] },
+      { id: 20, itemKey: innerKey, title: 'Inner', color: '#fff', bounding: [100, 100, 300, 400] },
+    ];
+    const nodeRegistry = rootNodeStableRegistry([1, 2, 3]);
+    useWorkflowStore.setState({
+      workflow: wf,
+      ...nodeRegistry,
+      itemKeyByPointer: {
+        ...nodeRegistry.itemKeyByPointer,
+        [outerKey]: outerKey,
+        [innerKey]: innerKey,
+      },
+      pointerByHierarchicalKey: {
+        ...nodeRegistry.pointerByHierarchicalKey,
+        [outerKey]: outerKey,
+        [innerKey]: innerKey,
+      },
+      mobileLayout: {
+        root: [{ type: 'group', id: 10, subgraphId: null, itemKey: outerKey }],
+        groups: {
+          [outerKey]: [
+            { type: 'node', id: 1 },
+            { type: 'group', id: 20, subgraphId: null, itemKey: innerKey },
+          ],
+          [innerKey]: [{ type: 'node', id: 2 }],
+        },
+        groupParents: {
+          [outerKey]: { scope: 'root' },
+          [innerKey]: { scope: 'group', groupKey: outerKey },
+        },
+        subgraphs: {},
+        hiddenBlocks: {},
+      },
+    });
+
+    useWorkflowStore.getState().bypassAllInContainer(outerKey, true);
+
+    const next = useWorkflowStore.getState().workflow;
+    expect(next?.nodes.find((n) => n.id === 1)?.mode).toBe(4);
+    expect(next?.nodes.find((n) => n.id === 2)?.mode).toBe(4);
+    expect(next?.nodes.find((n) => n.id === 3)?.mode).toBe(0);
+  });
+
+  it('bypassing a group with a shared subgraph leaves the definition and its other instances alone', () => {
+    const sgId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const groupPointer = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    // Placeholder 1 sits inside group 10's bounding box; placeholder 2 is outside it.
+    const wf: Workflow = {
+      ...makeWorkflow([
+        makeNode(1, { type: sgId, pos: [150, 150] }),
+        makeNode(2, { type: sgId, pos: [900, 900] })
+      ], []),
+      definitions: {
+        subgraphs: [
+          { id: sgId, name: 'Shared', nodes: [makeNode(10, { pos: [0, 0] })], links: [], groups: [] }
+        ]
+      }
+    };
+    useWorkflowStore.setState({
+      workflow: wf,
+      ...rootNodeStableRegistry([1, 2]),
+      itemKeyByPointer: {
+        ...rootNodeStableRegistry([1, 2]).itemKeyByPointer,
+        [groupPointer]: groupPointer
+      },
+      pointerByHierarchicalKey: {
+        ...rootNodeStableRegistry([1, 2]).pointerByHierarchicalKey,
+        [groupPointer]: groupPointer
+      },
+      mobileLayout: {
+        root: [
+          { type: 'group', id: 10, subgraphId: null, itemKey: groupPointer },
+          { type: 'subgraph', id: sgId, nodeId: 2 }
+        ],
+        groups: { [groupPointer]: [{ type: 'subgraph', id: sgId, nodeId: 1 }] },
+        subgraphs: { [sgId]: [{ type: 'node', id: 10 }] },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().bypassAllInContainer(groupPointer, true);
+
+    const next = useWorkflowStore.getState().workflow as Workflow;
+    // The placeholder in the group carries the bypass; expansion applies it to
+    // the inner nodes at queue time.
+    expect(next.nodes.find((node) => node.id === 1)?.mode).toBe(4);
+    // The other instance of the same definition stays engaged, and the shared
+    // definition itself is untouched.
+    expect(next.nodes.find((node) => node.id === 2)?.mode).toBe(0);
+    expect(
+      next.definitions?.subgraphs?.find((sg) => sg.id === sgId)?.nodes[0]?.mode,
+    ).toBe(0);
+  });
+
+  it('commitRepositionLayout syncs geometry so group bypass uses canonical geometry membership', () => {
+    const groupPointer = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const groupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const wf = makeWorkflow([
+      makeNode(1, { pos: [1200, 1200], mode: 0 }),
+      makeNode(2, { pos: [1400, 1200], mode: 0 })
+    ], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      ...rootNodeStableRegistry([1, 2]),
+      itemKeyByPointer: {
+        ...rootNodeStableRegistry([1, 2]).itemKeyByPointer,
+        [groupPointer]: groupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...rootNodeStableRegistry([1, 2]).pointerByHierarchicalKey,
+        [groupHierarchicalKey]: groupPointer
+      },
+      mobileLayout: {
+        root: [
+          { type: 'node', id: 1 },
+          { type: 'node', id: 2 },
+          { type: 'group', id: 10, subgraphId: null, itemKey: groupPointer }
+        ],
+        groups: { [groupPointer]: [] },
+        subgraphs: {},
+        hiddenBlocks: {}
+      }
+    });
+
+    const movedLayout: MobileLayout = {
+      root: [{ type: 'group', id: 10, subgraphId: null, itemKey: groupPointer }],
+      groups: { [groupPointer]: [{ type: 'node', id: 1 }, { type: 'node', id: 2 }] },
+      subgraphs: {},
+      hiddenBlocks: {}
+    };
+    useWorkflowStore.getState().commitRepositionLayout(movedLayout);
+    const repositioned = useWorkflowStore.getState().workflow?.nodes.map((node) => ({ id: node.id, pos: node.pos })) ?? [];
+    const node1Pos = repositioned.find((entry) => entry.id === 1)?.pos;
+    const node2Pos = repositioned.find((entry) => entry.id === 2)?.pos;
+    // Tidy layout stacks group members vertically in one column: same x,
+    // node 2 below node 1.
+    expect(node1Pos?.[0]).toBe(node2Pos?.[0]);
+    expect(node2Pos?.[1]).toBeGreaterThan(node1Pos?.[1] ?? 0);
+    const postCommitWorkflow = useWorkflowStore.getState().workflow as Workflow;
+    const grouped = computeNodeGroupsFor(postCommitWorkflow.nodes, postCommitWorkflow.groups ?? []);
+    expect(grouped.get(1)).toBe(10);
+    expect(grouped.get(2)).toBe(10);
+    useWorkflowStore.getState().bypassAllInContainer(groupHierarchicalKey, true);
+    const next = useWorkflowStore.getState().workflow;
+    expect(next?.nodes.find((n) => n.id === 1)?.mode).toBe(4);
+    expect(next?.nodes.find((n) => n.id === 2)?.mode).toBe(4);
+  });
+
+  // Issue #63: reordering nodes on the mobile panel — with no widget/connection
+  // edits — must mark the workflow dirty (so Save is offered) AND round-trip
+  // through save/reload so the mobile order is not lost on reopen.
+  it('commitRepositionLayout makes a reorder dirty and persists the order across a save/reload round-trip', () => {
+    const wf = makeWorkflow([
+      makeNode(1, { pos: [100, 100], mode: 0 }),
+      makeNode(2, { pos: [100, 300], mode: 0 }),
+      makeNode(3, { pos: [100, 500], mode: 0 }),
+    ], []);
+    // No group: keep the scenario to a plain node reorder.
+    wf.groups = [];
+    const original = structuredClone(wf);
+
+    useWorkflowStore.setState({
+      workflow: wf,
+      originalWorkflow: original,
+      nodeTypes: null,
+      ...rootNodeStableRegistry([1, 2, 3]),
+      mobileLayout: {
+        root: [{ type: 'node', id: 1 }, { type: 'node', id: 2 }, { type: 'node', id: 3 }],
+        groups: {},
+        subgraphs: {},
+        hiddenBlocks: {},
+      },
+    });
+
+    expect(isWorkflowModified(
+      useWorkflowStore.getState().workflow,
+      useWorkflowStore.getState().originalWorkflow,
+    )).toBe(false);
+
+    // Drag node 3 to the top: desired mobile order [3, 1, 2].
+    useWorkflowStore.getState().commitRepositionLayout({
+      root: [{ type: 'node', id: 3 }, { type: 'node', id: 1 }, { type: 'node', id: 2 }],
+      groups: {},
+      subgraphs: {},
+      hiddenBlocks: {},
+    });
+
+    const after = useWorkflowStore.getState();
+    // The reorder alone (no widget/connection change) makes the workflow dirty.
+    expect(isWorkflowModified(after.workflow, after.originalWorkflow)).toBe(true);
+
+    // Saving persists the new geometry, and a reload re-derives the mobile order
+    // from node positions — so the moved order survives the round-trip.
+    const payload = getWorkflowForPersistence(after.workflow!);
+    expect(payload).not.toBeNull();
+    const reloadedOrder = orderNodesForMobile(payload!).map((node) => node.id);
+    expect(reloadedOrder).toEqual([3, 1, 2]);
+  });
+
+  it('commitRepositionLayout moving node out of group removes geometry membership', () => {
+    const groupPointer = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const groupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const wf = makeWorkflow([
+      makeNode(1, { pos: [150, 150], mode: 0 }),
+      makeNode(2, { pos: [250, 150], mode: 0 })
+    ], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      ...rootNodeStableRegistry([1, 2]),
+      itemKeyByPointer: {
+        ...rootNodeStableRegistry([1, 2]).itemKeyByPointer,
+        [groupPointer]: groupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...rootNodeStableRegistry([1, 2]).pointerByHierarchicalKey,
+        [groupHierarchicalKey]: groupPointer
+      },
+      mobileLayout: {
+        root: [{ type: 'group', id: 10, subgraphId: null, itemKey: groupPointer }],
+        groups: { [groupPointer]: [{ type: 'node', id: 1 }, { type: 'node', id: 2 }] },
+        subgraphs: {},
+        hiddenBlocks: {}
+      }
+    });
+
+    const movedOutLayout: MobileLayout = {
+      root: [{ type: 'group', id: 10, subgraphId: null, itemKey: groupPointer }, { type: 'node', id: 2 }],
+      groups: { [groupPointer]: [{ type: 'node', id: 1 }] },
+      subgraphs: {},
+      hiddenBlocks: {}
+    };
+    useWorkflowStore.getState().commitRepositionLayout(movedOutLayout);
+    const repositioned = useWorkflowStore.getState().workflow?.nodes.map((node) => ({ id: node.id, pos: node.pos })) ?? [];
+    const node2Pos = repositioned.find((entry) => entry.id === 2)?.pos;
+    expect(node2Pos?.[0]).toBeGreaterThanOrEqual(0);
+
+    useWorkflowStore.getState().bypassAllInContainer(groupHierarchicalKey, true);
+    const next = useWorkflowStore.getState().workflow;
+    expect(next?.nodes.find((n) => n.id === 1)?.mode).toBe(4);
+    expect(next?.nodes.find((n) => n.id === 2)?.mode).toBe(0);
+  });
+
+  it('commitRepositionLayout subgraph-to-root: node position is updated, definitions unchanged (canonical model)', () => {
+    const expandedNodeHierarchicalKey = 'sk-node-expanded-101';
+    const subgraphNodePointer = makeLocationPointer({
+      type: 'node',
+      nodeId: 101,
+      subgraphId: 'sg-a'
+    });
+    const wf: Workflow = {
+      ...makeWorkflow([
+        makeNode(101, {
+          itemKey: expandedNodeHierarchicalKey,
+          type: 'Any',
+          pos: [100, 100],
+          properties: {}
+        })
+      ], []),
+      groups: [],
+      definitions: {
+        subgraphs: [
+          {
+            id: 'sg-a',
+            nodes: [
+              makeNode(1, { pos: [100, 100], outputs: [{ name: 'out', type: 'MODEL', links: [1] }] }),
+              makeNode(2, { pos: [300, 100], inputs: [{ name: 'in', type: 'MODEL', link: 1 }] })
+            ],
+            links: [
+              {
+                id: 1,
+                origin_id: 1,
+                origin_slot: 0,
+                target_id: 2,
+                target_slot: 0,
+                type: 'MODEL'
+              }
+            ],
+            groups: []
+          }
+        ]
+      }
+    };
+
+    useWorkflowStore.setState({
+      workflow: wf,
+      itemKeyByPointer: {
+        [subgraphNodePointer]: expandedNodeHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        [expandedNodeHierarchicalKey]: subgraphNodePointer
+      },
+      mobileLayout: {
+        root: [{ type: 'subgraph', id: 'sg-a' }],
+        groups: {},
+        subgraphs: { 'sg-a': [{ type: 'node', id: 101 }] },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().commitRepositionLayout({
+      root: [{ type: 'node', id: 101 }, { type: 'subgraph', id: 'sg-a' }],
+      groups: {},
+      subgraphs: { 'sg-a': [] },
+      hiddenBlocks: {}
+    });
+
+    const next = useWorkflowStore.getState().workflow as Workflow;
+    const moved = next.nodes.find((node) => node.id === 101);
+    expect(moved).toBeDefined();
+    // Definitions are not modified by commitRepositionLayout in canonical model
+    const sg = next.definitions?.subgraphs?.find((subgraph) => subgraph.id === 'sg-a');
+    expect(sg?.nodes).toHaveLength(2);
+  });
+
+  it('commitRepositionLayout root-to-subgraph: node position is updated, definitions unchanged (canonical model)', () => {
+    const expandedNodeHierarchicalKey = rootNodeHierarchicalKey(201);
+    const rootPointer = rootNodePointer(201);
+    const wf: Workflow = {
+      ...makeWorkflow([
+        makeNode(201, {
+          itemKey: expandedNodeHierarchicalKey,
+          type: 'Any',
+          pos: [200, 200],
+          properties: {}
+        })
+      ], []),
+      groups: [],
+      definitions: {
+        subgraphs: [
+          {
+            id: 'sg-a',
+            nodes: [makeNode(3, { type: 'Existing' }), makeNode(7, { type: 'Existing' })],
+            links: [],
+            groups: []
+          }
+        ]
+      }
+    };
+
+    useWorkflowStore.setState({
+      workflow: wf,
+      itemKeyByPointer: {
+        [rootPointer]: expandedNodeHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        [expandedNodeHierarchicalKey]: rootPointer
+      },
+      mobileLayout: {
+        root: [{ type: 'node', id: 201 }, { type: 'subgraph', id: 'sg-a' }],
+        groups: {},
+        subgraphs: { 'sg-a': [] },
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().commitRepositionLayout({
+      root: [{ type: 'subgraph', id: 'sg-a' }],
+      groups: {},
+      subgraphs: { 'sg-a': [{ type: 'node', id: 201 }] },
+      hiddenBlocks: {}
+    });
+
+    const migrated = useWorkflowStore.getState().workflow as Workflow;
+    // Canonical model: node 201 remains in root nodes array
+    const moved = migrated.nodes.find((node) => node.id === 201);
+    expect(moved).toBeDefined();
+    // Definitions are not modified by commitRepositionLayout in canonical model
+    const sg = migrated.definitions?.subgraphs?.find((subgraph) => subgraph.id === 'sg-a');
+    expect(sg).toBeDefined();
+    // No new definition node added (canonical model doesn't auto-create definition nodes)
+    expect(sg?.nodes).toHaveLength(2);
+  });
+
+  it('queues updated embed workflow after container title/color and deleteContainer edits', async () => {
+    const groupPointer = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const groupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const wf = makeWorkflow([makeNode(1)], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1]),
+      itemKeyByPointer: {
+        ...rootNodeStableRegistry([1]).itemKeyByPointer,
+        [groupPointer]: groupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...rootNodeStableRegistry([1]).pointerByHierarchicalKey,
+        [groupHierarchicalKey]: groupPointer
+      },
+      mobileLayout: {
+        root: [{ type: 'group', id: 10, subgraphId: null, itemKey: groupPointer }],
+        groups: { [groupPointer]: [{ type: 'node', id: 1 }] },
+        subgraphs: {},
+        hiddenBlocks: {}
+      }
+    });
+
+    useWorkflowStore.getState().updateContainerTitle(groupHierarchicalKey, 'Renamed Group');
+    let embedded = await queueAndGetEmbeddedWorkflow();
+    expect(embedded.groups?.find((g) => g.id === 10)?.title).toBe('Renamed Group');
+
+    useWorkflowStore.getState().updateWorkflowItemColor(groupHierarchicalKey, '#335555');
+    embedded = await queueAndGetEmbeddedWorkflow();
+    expect(embedded.groups?.find((g) => g.id === 10)?.color).toBe('#335555');
+
+    useWorkflowStore.getState().deleteContainer(groupHierarchicalKey, { deleteNodes: false });
+    embedded = await queueAndGetEmbeddedWorkflow();
+    expect((embedded.groups ?? []).find((g) => g.id === 10)).toBeUndefined();
+  });
+
+  it('sets subgraph color back to default blue when "no color" is selected', () => {
+    const subgraphHierarchicalKey = makeLocationPointer({ type: 'subgraph', subgraphId: 'sg-a' });
+    const subgraphPointer = makeLocationPointer({ type: 'subgraph', subgraphId: 'sg-a' });
+    const wf: Workflow = {
+      ...makeWorkflow([makeNode(1)], []),
+      definitions: {
+        subgraphs: [
+          {
+            id: 'sg-a',
+            itemKey: subgraphHierarchicalKey,
+            state: { color: '#3a5455' },
+            nodes: [],
+            links: []
+          }
+        ]
+      }
+    };
+    useWorkflowStore.setState({
+      workflow: wf,
+      itemKeyByPointer: {
+        ...rootNodeStableRegistry([1]).itemKeyByPointer,
+        [subgraphPointer]: subgraphHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...rootNodeStableRegistry([1]).pointerByHierarchicalKey,
+        [subgraphHierarchicalKey]: subgraphPointer
+      }
+    });
+
+    useWorkflowStore.getState().updateWorkflowItemColor(subgraphHierarchicalKey, '#353535');
+    const nextColor = (useWorkflowStore.getState().workflow?.definitions?.subgraphs ?? [])
+      .find((subgraph) => subgraph.id === 'sg-a')?.state?.color;
+    expect(nextColor).toBe(themeColors.brand.blue500);
+  });
+
+  it('preserves exact comfy group colors when toggling away and back', () => {
+    const groupPointer = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const groupHierarchicalKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+    const wf = makeWorkflow([makeNode(1)], []);
+    wf.groups = [{ ...(wf.groups?.[0] as NonNullable<typeof wf.groups>[number]), color: '#553333', itemKey: groupHierarchicalKey }];
+    useWorkflowStore.setState({
+      workflow: wf,
+      itemKeyByPointer: {
+        ...rootNodeStableRegistry([1]).itemKeyByPointer,
+        [groupPointer]: groupHierarchicalKey
+      },
+      pointerByHierarchicalKey: {
+        ...rootNodeStableRegistry([1]).pointerByHierarchicalKey,
+        [groupHierarchicalKey]: groupPointer
+      }
+    });
+
+    useWorkflowStore.getState().updateWorkflowItemColor(groupHierarchicalKey, '#335555');
+    useWorkflowStore.getState().updateWorkflowItemColor(groupHierarchicalKey, '#553333');
+    const nextColor = useWorkflowStore.getState().workflow?.groups?.find((group) => group.id === 10)?.color;
+    expect(nextColor).toBe('#553333');
+  });
+
+  it('preserves exact comfy node colors when toggling away and back', () => {
+    const wf = makeWorkflow([
+      makeNode(1, { color: '#553333', bgcolor: '#553333' })
+    ], []);
+    useWorkflowStore.setState({
+      workflow: wf,
+      ...rootNodeStableRegistry([1])
+    });
+
+    useWorkflowStore.getState().updateWorkflowItemColor(rootNodeHierarchicalKey(1), '#335555');
+    useWorkflowStore.getState().updateWorkflowItemColor(rootNodeHierarchicalKey(1), '#553333');
+    const nextNode = useWorkflowStore.getState().workflow?.nodes.find((node) => node.id === 1);
+    expect(nextNode?.color).toBe('#553333');
+    expect(nextNode?.bgcolor).toBe('#553333');
+  });
+
+  it('queued embed workflow preserves subgraph definitions and updated root node widget value', async () => {
+    // Canonical model: root node 1 is a regular node, node 3 is a placeholder for 'sg1'.
+    // Inner subgraph node 7 lives in definitions.subgraphs.
+    // Editing root node 1's widget should appear in the embedded canonical workflow.
+    const innerNode = makeNode(7, { type: 'Any', widgets_values: [0] });
+    const canonical: Workflow = {
+      ...makeWorkflow([
+        makeNode(1, { type: 'Any', widgets_values: [11] }),
+        makeNode(3, { type: 'sg1' })
+      ], []),
+      definitions: {
+        subgraphs: [{ id: 'sg1', nodes: [innerNode], links: [] }]
+      }
+    };
+    useWorkflowStore.setState({
+      workflow: canonical,
+      nodeTypes: queueNodeTypes,
+      ...rootNodeStableRegistry([1, 3])
+    });
+
+    useWorkflowStore.getState().updateNodeWidget(rootNodeHierarchicalKey(1), 0, 33);
+    const embedded = await queueAndGetEmbeddedWorkflow();
+    // Root node 1 should have the updated widget value in the embedded workflow
+    expect(embedded.nodes.find((n) => n.id === 1)?.widgets_values).toEqual([33]);
+    // Subgraph definitions must be preserved in the embedded canonical workflow
+    const subgraph = embedded.definitions?.subgraphs?.find((sg) => sg.id === 'sg1');
+    expect(subgraph).toBeDefined();
+    expect(subgraph?.nodes.some((n) => n.id === 7)).toBe(true);
+  });
+});
+
+describe('filenameIsPlaceholder', () => {
+  it('marks app-generated names as placeholders and clears the mark on save', () => {
+    const wf = makeWorkflow([makeNode(1, { widgets_values: [1] })], []);
+    // A pasted workflow: the caller mints the stand-in name itself.
+    useWorkflowStore.getState().loadWorkflow(wf, 'Pasted workflow (12:00:00)', {
+      filenameIsPlaceholder: true,
+    });
+    expect(useWorkflowStore.getState().filenameIsPlaceholder).toBe(true);
+
+    useWorkflowStore.getState().setSavedWorkflow(wf, 'named.json');
+    expect(useWorkflowStore.getState().filenameIsPlaceholder).toBe(false);
+  });
+
+  it('treats history and file sources as placeholder names', () => {
+    const wf = makeWorkflow([makeNode(1, { widgets_values: [1] })], []);
+    useWorkflowStore.getState().loadWorkflow(wf, 'history-abc.json', {
+      source: { type: 'history', promptId: 'abc' },
+    });
+    expect(useWorkflowStore.getState().filenameIsPlaceholder).toBe(true);
+
+    useWorkflowStore.getState().loadWorkflow(wf, 'flow.json', {
+      replaceActive: true,
+      source: { type: 'user', filename: 'flow.json' },
+    });
+    expect(useWorkflowStore.getState().filenameIsPlaceholder).toBe(false);
+  });
+});
+
+describe('setSavedWorkflow', () => {
+  it('sets workflowSource to user type with the saved filename', () => {
+    const wf = makeWorkflow([makeNode(1, { widgets_values: [42] })], []);
+    useWorkflowStore.getState().loadWorkflow(wf, 'original.json', {
+      source: { type: 'template', moduleName: 'default', templateName: 'basic' }
+    });
+
+    useWorkflowStore.getState().setSavedWorkflow(wf, 'saved.json');
+
+    const state = useWorkflowStore.getState();
+    expect(state.workflowSource).toEqual({ type: 'user', filename: 'saved.json' });
+    expect(state.currentFilename).toBe('saved.json');
+  });
+
+  it('clears isDirty after saving (originalWorkflow matches workflow)', () => {
+    const wf = makeWorkflow([makeNode(1, { widgets_values: [10] })], []);
+    useWorkflowStore.getState().loadWorkflow(wf, 'foo.json');
+
+    // Simulate an edit
+    useWorkflowStore.setState((state) => ({
+      workflow: state.workflow
+        ? {
+            ...state.workflow,
+            nodes: state.workflow.nodes.map((n) =>
+              n.id === 1 ? { ...n, widgets_values: [99] } : n
+            )
+          }
+        : state.workflow
+    }));
+
+    const editedWorkflow = useWorkflowStore.getState().workflow!;
+    useWorkflowStore.getState().setSavedWorkflow(editedWorkflow, 'foo.json');
+
+    const state = useWorkflowStore.getState();
+    expect(JSON.stringify(state.workflow)).toBe(JSON.stringify(state.originalWorkflow));
+  });
+
+  it('preserves edited widget values after saving', () => {
+    const wf = makeWorkflow([makeNode(1, { widgets_values: [10] })], []);
+    useWorkflowStore.getState().loadWorkflow(wf, 'foo.json');
+
+    const editedWf = {
+      ...wf,
+      nodes: wf.nodes.map((n) => n.id === 1 ? { ...n, widgets_values: [99] } : n)
+    };
+    useWorkflowStore.getState().setSavedWorkflow(editedWf, 'foo.json');
+
+    const state = useWorkflowStore.getState();
+    expect(state.workflow?.nodes.find((n) => n.id === 1)?.widgets_values).toEqual([99]);
+  });
+});
+
+describe('popWidgetToPrimitive', () => {
+  const primitiveNodeTypes: NodeTypes = {
+    CLIPTextEncode: {
+      input: { required: { text: ['STRING', { multiline: true }] } },
+      output: ['CONDITIONING'],
+      output_name: ['CONDITIONING'],
+      name: 'CLIPTextEncode',
+      display_name: 'CLIP Text Encode',
+      description: '',
+      python_module: '',
+      category: 'conditioning'
+    },
+    PrimitiveString: {
+      input: { required: { value: ['STRING', {}] } },
+      output: ['STRING'],
+      output_name: ['STRING'],
+      name: 'PrimitiveString',
+      display_name: 'String',
+      description: '',
+      python_module: '',
+      category: 'primitive'
+    }
+  };
+
+  it('creates a typed primitive seeded with the value and connects it to the input', () => {
+    const target = makeNode(1, {
+      type: 'CLIPTextEncode',
+      inputs: [{ name: 'text', type: 'STRING', link: null }],
+      widgets_values: ['a photo of a cat'],
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target], []),
+      nodeTypes: primitiveNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    const newId = useWorkflowStore
+      .getState()
+      .popWidgetToPrimitive(rootNodeHierarchicalKey(1), 'text', 'a photo of a cat', {
+        title: 'text (via Positive Prompt)',
+      });
+
+    expect(newId).not.toBeNull();
+    const state = useWorkflowStore.getState();
+    const created = state.workflow?.nodes.find((n) => n.id === newId);
+    expect(created?.type).toBe('PrimitiveString');
+    expect(created?.title).toBe('text (via Positive Prompt)');
+    expect((created?.widgets_values as unknown[] | undefined)?.[0]).toBe('a photo of a cat');
+
+    // The target's input now carries a link from the primitive's output.
+    const targetInputLink = state.workflow?.nodes.find((n) => n.id === 1)?.inputs[0]?.link;
+    expect(targetInputLink).not.toBeNull();
+    const link = state.workflow?.links.find((l) => l[0] === targetInputLink);
+    expect(link?.[1]).toBe(newId); // origin is the new primitive node
+    expect(link?.[3]).toBe(1);     // target is the CLIP node
+  });
+
+  it('returns null for a non-poppable type (no matching primitive node type)', () => {
+    const target = makeNode(1, {
+      type: 'CLIPTextEncode',
+      inputs: [{ name: 'image', type: 'IMAGE', link: null }],
+      widgets_values: [],
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target], []),
+      nodeTypes: primitiveNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    const newId = useWorkflowStore
+      .getState()
+      .popWidgetToPrimitive(rootNodeHierarchicalKey(1), 'image', undefined);
+    expect(newId).toBeNull();
+  });
+
+  it.each([
+    ['legacy array combo', ['euler', 'ddim'] as unknown as string, undefined],
+    ['V3 COMBO', 'COMBO', { options: ['euler', 'ddim'] }],
+    ['V3 DynamicCombo', 'COMFY_DYNAMICCOMBO_V3', { options: [{ key: 'euler', inputs: {} }] }],
+  ])('returns null for a %s — no primitive equivalent', (_label, typeOrOptions, options) => {
+    const comboNodeTypes = {
+      ...primitiveNodeTypes,
+      ComboOnly: {
+        input: { required: { sampler: [typeOrOptions, options] } },
+        output: ['LATENT'],
+        output_name: ['LATENT'],
+        name: 'ComboOnly',
+        display_name: 'Combo Only',
+        description: '',
+        python_module: '',
+        category: 'test',
+      },
+    } as unknown as NodeTypes;
+
+    const target = makeNode(1, { type: 'ComboOnly', inputs: [], widgets_values: ['euler'] });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target], []),
+      nodeTypes: comboNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    expect(
+      useWorkflowStore.getState().popWidgetToPrimitive(rootNodeHierarchicalKey(1), 'sampler', 'euler')
+    ).toBeNull();
+    // and no stray node or slot was materialized on the way out
+    expect(useWorkflowStore.getState().workflow?.nodes).toHaveLength(1);
+    expect(useWorkflowStore.getState().workflow?.nodes[0].inputs).toHaveLength(0);
+  });
+
+  it('materializes the input slot when the widget-input is not in node.inputs', () => {
+    // Mirrors a CLIPTextEncode whose `text` widget was never converted to an
+    // input slot (only `clip` is present) — it should still pop out.
+    const target = makeNode(1, {
+      type: 'CLIPTextEncode',
+      inputs: [{ name: 'clip', type: 'CLIP', link: 11 }],
+      widgets_values: ['a photo of a dog'],
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target], []),
+      nodeTypes: primitiveNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+
+    const newId = useWorkflowStore
+      .getState()
+      .popWidgetToPrimitive(rootNodeHierarchicalKey(1), 'text', 'a photo of a dog');
+
+    expect(newId).not.toBeNull();
+    const state = useWorkflowStore.getState();
+    const targetNode = state.workflow?.nodes.find((n) => n.id === 1);
+    // The `text` input slot was created and now carries the link.
+    const textInput = targetNode?.inputs.find((inp) => inp.name === 'text');
+    expect(textInput).toBeTruthy();
+    expect(textInput?.link).not.toBeNull();
+    const created = state.workflow?.nodes.find((n) => n.id === newId);
+    expect(created?.type).toBe('PrimitiveString');
+    expect((created?.widgets_values as unknown[] | undefined)?.[0]).toBe('a photo of a dog');
+  });
+
+  describe('createGroupFromItems with a selected group', () => {
+    it('places the new group in the topmost selected item list slot', () => {
+      const nodes = [
+        makeNode(1, { pos: [0, 0] }),
+        makeNode(2, { pos: [300, 0] }),
+        makeNode(3, { pos: [600, 0] }),
+        makeNode(4, { pos: [900, 0] }),
+      ];
+      const workflow = makeWorkflow(nodes, []);
+      workflow.groups = [];
+      useWorkflowStore.setState({
+        workflow,
+        nodeTypes,
+        mobileLayout: {
+          root: nodes.map((node) => ({ type: 'node' as const, id: node.id })),
+          groups: {},
+          groupParents: {},
+          subgraphs: {},
+          hiddenBlocks: {},
+        },
+        scopeStack: [{ type: 'root' }],
+        ...rootNodeStableRegistry([1, 2, 3, 4]),
+      });
+
+      // Node 2 is the topmost selected item; node 4 is selected farther down.
+      useWorkflowStore.getState().createGroupFromItems([
+        rootNodeHierarchicalKey(4),
+        rootNodeHierarchicalKey(2),
+      ]);
+
+      const next = useWorkflowStore.getState();
+      const newGroupKey = makeLocationPointer({
+        type: 'group',
+        groupId: 1,
+        subgraphId: null,
+      });
+      expect(next.mobileLayout.root).toEqual([
+        { type: 'node', id: 1 },
+        { type: 'group', id: 1, subgraphId: null, itemKey: newGroupKey },
+        { type: 'node', id: 3 },
+      ]);
+      expect(next.mobileLayout.groups[newGroupKey]).toEqual([
+        { type: 'node', id: 2 },
+        { type: 'node', id: 4 },
+      ]);
+    });
+
+    it('replaces a nested selected item inside its existing list container', () => {
+      const inGroupA = makeNode(1, { pos: [120, 140] });
+      const inGroupB = makeNode(2, { pos: [140, 260] });
+      const loose = makeNode(3, { pos: [900, 900] });
+      const groupKey = makeLocationPointer({
+        type: 'group',
+        groupId: 10,
+        subgraphId: null,
+      });
+      useWorkflowStore.setState({
+        workflow: makeWorkflow([inGroupA, inGroupB, loose], []),
+        nodeTypes,
+        mobileLayout: {
+          root: [
+            { type: 'group', id: 10, subgraphId: null, itemKey: groupKey },
+            { type: 'node', id: 3 },
+          ],
+          groups: {
+            [groupKey]: [
+              { type: 'node', id: 1 },
+              { type: 'node', id: 2 },
+            ],
+          },
+          groupParents: { [groupKey]: { scope: 'root' } },
+          subgraphs: {},
+          hiddenBlocks: {},
+        },
+        scopeStack: [{ type: 'root' }],
+        ...rootNodeStableRegistry([1, 2, 3]),
+      });
+
+      useWorkflowStore.getState().createGroupFromItems([
+        rootNodeHierarchicalKey(2),
+      ]);
+
+      const next = useWorkflowStore.getState();
+      const newGroupKey = makeLocationPointer({
+        type: 'group',
+        groupId: 11,
+        subgraphId: null,
+      });
+      expect(next.mobileLayout.groups[groupKey]).toEqual([
+        { type: 'node', id: 1 },
+        { type: 'group', id: 11, subgraphId: null, itemKey: newGroupKey },
+      ]);
+      expect(next.mobileLayout.groups[newGroupKey]).toEqual([
+        { type: 'node', id: 2 },
+      ]);
+      expect(next.mobileLayout.groupParents?.[newGroupKey]).toEqual({
+        scope: 'group',
+        groupKey,
+      });
+    });
+
+    it('nests the selected group intact instead of pulling its members out', () => {
+      // Group 10 (from makeWorkflow) holds nodes 1 and 2; node 3 is loose.
+      const inGroupA = makeNode(1, { pos: [120, 140], size: [200, 100] });
+      const inGroupB = makeNode(2, { pos: [140, 260], size: [200, 100] });
+      const loose = makeNode(3, { pos: [900, 900], size: [200, 100] });
+      const groupKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+      useWorkflowStore.setState({
+        workflow: makeWorkflow([inGroupA, inGroupB, loose], []),
+        nodeTypes,
+        scopeStack: [{ type: 'root' }],
+        ...rootNodeStableRegistry([1, 2, 3]),
+      });
+
+      // The group and its members can all be selected explicitly, along with
+      // an unrelated loose node.
+      useWorkflowStore.getState().createGroupFromItems([
+        groupKey,
+        rootNodeHierarchicalKey(1),
+        rootNodeHierarchicalKey(2),
+        rootNodeHierarchicalKey(3),
+      ]);
+
+      const next = useWorkflowStore.getState();
+      const groups = next.workflow?.groups ?? [];
+      // The old group survives alongside the new one.
+      expect(groups.map((g) => g.id).sort()).toEqual([10, 11]);
+      const oldGroup = groups.find((g) => g.id === 10)!;
+      const newGroup = groups.find((g) => g.id === 11)!;
+
+      // The full tidy pass can rewrite offsets and sizes, but the old group's
+      // rect and member hierarchy remain intact inside the new group.
+      expect(oldGroup.bounding[0]).toBeGreaterThanOrEqual(newGroup.bounding[0]);
+      expect(oldGroup.bounding[1]).toBeGreaterThanOrEqual(newGroup.bounding[1]);
+      expect(oldGroup.bounding[0] + oldGroup.bounding[2]).toBeLessThanOrEqual(
+        newGroup.bounding[0] + newGroup.bounding[2],
+      );
+      expect(oldGroup.bounding[1] + oldGroup.bounding[3]).toBeLessThanOrEqual(
+        newGroup.bounding[1] + newGroup.bounding[3],
+      );
+
+      // Layout parents the old group under the new group.
+      const newGroupKey = makeLocationPointer({ type: 'group', groupId: 11, subgraphId: null });
+      expect(next.mobileLayout.groupParents?.[groupKey]).toEqual({
+        scope: 'group',
+        groupKey: newGroupKey,
+      });
+      // The loose node is a direct member of the new group.
+      const newGroupItems = next.mobileLayout.groups[newGroupKey] ?? [];
+      expect(newGroupItems.some((ref) => ref.type === 'node' && ref.id === 3)).toBe(true);
+      // Nodes 1/2 stay members of the old group, not the new one.
+      const oldGroupItems = next.mobileLayout.groups[groupKey] ?? [];
+      expect(oldGroupItems.filter((ref) => ref.type === 'node').map((ref) => ref.id).sort()).toEqual([1, 2]);
+      expect(newGroupItems.some((ref) => ref.type === 'node' && (ref.id === 1 || ref.id === 2))).toBe(false);
+    });
+
+    it('relocates every nested group and node when only the outer group is selected', () => {
+      const parentKey = makeLocationPointer({ type: 'group', groupId: 10, subgraphId: null });
+      const childKey = makeLocationPointer({ type: 'group', groupId: 20, subgraphId: null });
+      const grandchildKey = makeLocationPointer({ type: 'group', groupId: 30, subgraphId: null });
+      const parent: WorkflowGroup = {
+        id: 10,
+        itemKey: parentKey,
+        title: 'Parent',
+        bounding: [100, 100, 600, 600],
+        color: '#fff',
+        font_size: 24,
+        flags: {},
+      };
+      const child: WorkflowGroup = {
+        id: 20,
+        itemKey: childKey,
+        title: 'Child',
+        bounding: [160, 180, 400, 350],
+        color: '#fff',
+        font_size: 24,
+        flags: {},
+      };
+      const grandchild: WorkflowGroup = {
+        id: 30,
+        itemKey: grandchildKey,
+        title: 'Grandchild',
+        bounding: [220, 240, 220, 160],
+        color: '#fff',
+        font_size: 24,
+        flags: {},
+      };
+      const nodes = [
+        makeNode(1, { pos: [110, 130], size: [40, 40] }),
+        makeNode(2, { pos: [500, 450], size: [40, 40] }),
+        makeNode(3, { pos: [250, 280], size: [40, 40] }),
+      ];
+      const workflow = makeWorkflow(nodes, []);
+      workflow.groups = [parent, child, grandchild];
+      useWorkflowStore.setState({
+        workflow,
+        nodeTypes,
+        scopeStack: [{ type: 'root' }],
+        ...rootNodeStableRegistry([1, 2, 3]),
+      });
+
+      useWorkflowStore.getState().createGroupFromItems([parentKey]);
+
+      const next = useWorkflowStore.getState();
+      const nextGroups = next.workflow?.groups ?? [];
+      const newGroupKey = makeLocationPointer({ type: 'group', groupId: 31, subgraphId: null });
+      expect(next.mobileLayout.groupParents?.[parentKey]).toEqual({
+        scope: 'group',
+        groupKey: newGroupKey,
+      });
+      expect(next.mobileLayout.groupParents?.[childKey]).toEqual({
+        scope: 'group',
+        groupKey: parentKey,
+      });
+      expect(next.mobileLayout.groupParents?.[grandchildKey]).toEqual({
+        scope: 'group',
+        groupKey: childKey,
+      });
+
+      // Creation now performs the same whole-graph geometry pass as a move.
+      // Committing the unchanged layout (the move-away/move-back workaround)
+      // must therefore be a no-op for every node and group coordinate.
+      const geometryBeforeReposition = {
+        nodes: next.workflow!.nodes.map((node) => ({
+          id: node.id,
+          pos: node.pos,
+          size: node.size,
+          collapsed: node.flags?.collapsed,
+        })),
+        groups: nextGroups.map((group) => ({
+          id: group.id,
+          bounding: group.bounding,
+        })),
+      };
+      useWorkflowStore.getState().commitRepositionLayout(next.mobileLayout);
+      const settled = useWorkflowStore.getState().workflow!;
+      expect({
+        nodes: settled.nodes.map((node) => ({
+          id: node.id,
+          pos: node.pos,
+          size: node.size,
+          collapsed: node.flags?.collapsed,
+        })),
+        groups: (settled.groups ?? []).map((group) => ({
+          id: group.id,
+          bounding: group.bounding,
+        })),
+      }).toEqual(geometryBeforeReposition);
+    });
+  });
+
+  describe('primitive value write-back on delete/disconnect', () => {
+    // Two CLIPTextEncode targets fed by one PrimitiveString (fan-out).
+    const setupFanOut = (primitiveWidgets: unknown) => {
+      const primitive = makeNode(9, {
+        type: 'PrimitiveString',
+        widgets_values: primitiveWidgets as string[],
+        outputs: [{ name: 'STRING', type: 'STRING', links: [70, 71] }],
+      });
+      const targetA = makeNode(1, {
+        type: 'CLIPTextEncode',
+        inputs: [{ name: 'text', type: 'STRING', widget: { name: 'text' }, link: 70 }],
+        widgets_values: ['stale a'],
+      });
+      const targetB = makeNode(2, {
+        type: 'CLIPTextEncode',
+        inputs: [{ name: 'text', type: 'STRING', widget: { name: 'text' }, link: 71 }],
+        widgets_values: ['stale b'],
+      });
+      useWorkflowStore.setState({
+        workflow: makeWorkflow(
+          [primitive, targetA, targetB],
+          [
+            [70, 9, 0, 1, 0, 'STRING'],
+            [71, 9, 0, 2, 0, 'STRING'],
+          ],
+        ),
+        nodeTypes: primitiveNodeTypes,
+        ...rootNodeStableRegistry([1, 2, 9]),
+      });
+    };
+    const widgetsOf = (id: number) =>
+      useWorkflowStore.getState().workflow?.nodes.find((n) => n.id === id)
+        ?.widgets_values as unknown[] | undefined;
+
+    it('deleting a primitive writes its current value into every widget it fed', () => {
+      setupFanOut(['edited prompt']);
+      useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(9), false);
+
+      expect(widgetsOf(1)).toEqual(['edited prompt']);
+      expect(widgetsOf(2)).toEqual(['edited prompt']);
+      const nodes = useWorkflowStore.getState().workflow?.nodes ?? [];
+      expect(nodes.find((n) => n.id === 1)?.inputs[0]?.link).toBeNull();
+    });
+
+    it('disconnecting one input writes back only that target', () => {
+      setupFanOut(['edited prompt']);
+      useWorkflowStore.getState().disconnectInput(rootNodeHierarchicalKey(1), 0);
+
+      expect(widgetsOf(1)).toEqual(['edited prompt']);
+      expect(widgetsOf(2)).toEqual(['stale b']); // still connected
+      const nodes = useWorkflowStore.getState().workflow?.nodes ?? [];
+      expect(nodes.find((n) => n.id === 2)?.inputs[0]?.link).toBe(71);
+    });
+
+    it('handles the legacy record widgets_values form on the primitive', () => {
+      setupFanOut({ value: 'record form' });
+      useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(9), false);
+      expect(widgetsOf(1)).toEqual(['record form']);
+    });
+
+    it('pads sparse widgets_values so the value lands at the right index', () => {
+      // Target whose widget sits at index 2 (two widget inputs before it) but
+      // whose widgets_values array is empty.
+      const nodeTypesWide: NodeTypes = {
+        ...primitiveNodeTypes,
+        Wide: {
+          input: {
+            required: {
+              a: ['STRING', {}],
+              b: ['STRING', {}],
+              text: ['STRING', {}],
+            },
+          },
+          output: [],
+          output_name: [],
+          name: 'Wide',
+          display_name: 'Wide',
+          description: '',
+          python_module: '',
+          category: '',
+        },
+      };
+      const primitive = makeNode(9, {
+        type: 'PrimitiveString',
+        widgets_values: ['deep value'],
+        outputs: [{ name: 'STRING', type: 'STRING', links: [70] }],
+      });
+      const target = makeNode(1, {
+        type: 'Wide',
+        inputs: [
+          { name: 'a', type: 'STRING', widget: { name: 'a' }, link: null },
+          { name: 'b', type: 'STRING', widget: { name: 'b' }, link: null },
+          { name: 'text', type: 'STRING', widget: { name: 'text' }, link: 70 },
+        ],
+        widgets_values: [],
+      });
+      useWorkflowStore.setState({
+        workflow: makeWorkflow([primitive, target], [[70, 9, 0, 1, 2, 'STRING']]),
+        nodeTypes: nodeTypesWide,
+        ...rootNodeStableRegistry([1, 9]),
+      });
+
+      useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(9), false);
+      expect(widgetsOf(1)).toEqual([null, null, 'deep value']);
+    });
+
+    it('skips pure connection slots (no widget) and non-primitive sources', () => {
+      const source = makeNode(9, {
+        type: 'CLIPTextEncode', // not a primitive
+        widgets_values: ['not written'],
+        outputs: [{ name: 'CONDITIONING', type: 'CONDITIONING', links: [70] }],
+      });
+      const target = makeNode(1, {
+        type: 'CLIPTextEncode',
+        inputs: [{ name: 'cond', type: 'CONDITIONING', link: 70 }],
+        widgets_values: ['stale'],
+      });
+      useWorkflowStore.setState({
+        workflow: makeWorkflow([source, target], [[70, 9, 0, 1, 0, 'CONDITIONING']]),
+        nodeTypes: primitiveNodeTypes,
+        ...rootNodeStableRegistry([1, 9]),
+      });
+      useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(9), false);
+      expect(widgetsOf(1)).toEqual(['stale']);
+    });
+
+    it('writes into a subgraph placeholder promoted widget (per-instance values)', () => {
+      const primitive = makeNode(9, {
+        type: 'PrimitiveString',
+        widgets_values: ['from primitive'],
+        outputs: [{ name: 'STRING', type: 'STRING', links: [70] }],
+      });
+      const placeholder = makeNode(1, {
+        type: 'SG-DEF',
+        inputs: [
+          { name: 'image', type: 'IMAGE', link: null },
+          { name: 'prompt', type: 'STRING', widget: { name: 'prompt' }, link: 70 },
+        ],
+        widgets_values: ['stale promoted'],
+      });
+      useWorkflowStore.setState({
+        workflow: {
+          ...makeWorkflow([primitive, placeholder], [[70, 9, 0, 1, 1, 'STRING']]),
+          definitions: {
+            subgraphs: [{ id: 'SG-DEF', nodes: [], links: [] }],
+          },
+        },
+        nodeTypes: primitiveNodeTypes,
+        ...rootNodeStableRegistry([1, 9]),
+      });
+
+      useWorkflowStore.getState().deleteNode(rootNodeHierarchicalKey(9), false);
+      // 'prompt' is the placeholder's first (and only) promoted input → index 0.
+      expect(widgetsOf(1)).toEqual(['from primitive']);
+    });
+
+    it('bulk delete via deleteSelectedItems inherits the write-back', () => {
+      setupFanOut(['bulk value']);
+      useWorkflowStore.getState().deleteSelectedItems([rootNodeHierarchicalKey(9)]);
+      expect(widgetsOf(1)).toEqual(['bulk value']);
+      expect(widgetsOf(2)).toEqual(['bulk value']);
+    });
+  });
+
+  it('ensureWidgetInputSlot returns the existing index or materializes a new slot', () => {
+    const target = makeNode(1, {
+      type: 'CLIPTextEncode',
+      inputs: [
+        { name: 'clip', type: 'CLIP', link: 11 },
+        { name: 'text', type: 'STRING', widget: { name: 'text' }, link: null },
+      ],
+      widgets_values: ['hi'],
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target], []),
+      nodeTypes: primitiveNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+    // Existing materialized slot → its index.
+    expect(
+      useWorkflowStore.getState().ensureWidgetInputSlot(rootNodeHierarchicalKey(1), 'text', 'STRING'),
+    ).toBe(1);
+
+    // Absent slot → created at the end and returned.
+    const target2 = makeNode(1, {
+      type: 'CLIPTextEncode',
+      inputs: [{ name: 'clip', type: 'CLIP', link: 11 }],
+      widgets_values: ['hi'],
+    });
+    useWorkflowStore.setState({
+      workflow: makeWorkflow([target2], []),
+      nodeTypes: primitiveNodeTypes,
+      ...rootNodeStableRegistry([1]),
+    });
+    const idx = useWorkflowStore.getState().ensureWidgetInputSlot(rootNodeHierarchicalKey(1), 'text', 'STRING');
+    expect(idx).toBe(1);
+    const node = useWorkflowStore.getState().workflow?.nodes.find((n) => n.id === 1);
+    expect(node?.inputs[1]).toMatchObject({ name: 'text', type: 'STRING', link: null });
+  });
+
+  it('renameSetGetNode renames a SetNode and syncs the Gets reading its old name', () => {
+    useWorkflowStore.setState({
+      workflow: makeWorkflow(
+        [
+          makeNode(2, { type: 'SetNode', widgets_values: ['oldname'] }),
+          makeNode(3, { type: 'GetNode', widgets_values: ['oldname'] }),
+          makeNode(4, { type: 'GetNode', widgets_values: ['other'] }),
+        ],
+        [],
+      ),
+      ...rootNodeStableRegistry([2, 3, 4]),
+    });
+
+    useWorkflowStore.getState().renameSetGetNode(rootNodeHierarchicalKey(2), 'newname');
+
+    const nodes = useWorkflowStore.getState().workflow?.nodes ?? [];
+    const nameOf = (id: number) =>
+      (nodes.find((n) => n.id === id)?.widgets_values as unknown[] | undefined)?.[0];
+    // Set + the Get reading the old name both move to the new name.
+    expect(nameOf(2)).toBe('newname');
+    expect(nameOf(3)).toBe('newname');
+    // An unrelated Get (different name) is untouched.
+    expect(nameOf(4)).toBe('other');
+  });
+});

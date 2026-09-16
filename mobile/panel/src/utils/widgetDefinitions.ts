@@ -1,0 +1,1363 @@
+import type { WorkflowInput, WorkflowLink, WorkflowNode, NodeTypes, NodeTypeDefinition, NodeInputEntry, Workflow, WorkflowSubgraphLink, WorkflowSubgraphDefinition } from '@/api/types';
+import { getDefaultWidgetValue, getNodePropertyWidgetIndexMap, getWidgetValue, isComboType, isV3ComboType, isWidgetInputType, getComboOptions, getDynamicComboSubInputs, occupiesWidgetSlot, skipImplicitSeedControlSlot } from '@/utils/workflowInputs';
+import { findLoraListIndex, isLoraList, isLoraManagerNodeType, isPowerLoraLoaderNodeType } from '@/utils/loraManager';
+import { isPowerPuterNodeType, readPowerPuterWidgets, POWER_PUTER_MAX_OUTPUTS, POWER_PUTER_OUTPUT_TYPES } from '@/utils/powerPuter';
+import { modelWidgetKind } from '@/utils/modelWidgetKind';
+import {
+  extractTriggerWordList,
+  extractTriggerWordListLoose,
+  findTriggerWordListIndex,
+  isTriggerWordToggleNodeType
+} from '@/utils/triggerWordToggle';
+import { SUBGRAPH_INPUT_NODE_ID, getInstanceNumber, getLinkId, getLinkOriginId, getLinkOriginSlot, getMobileDefMeta } from '@/utils/canonicalWorkflowOps';
+import { interpolateInstanceLabel } from '@/utils/subgraphInstanceLabels';
+import { collectSubgraphInstances, getInstanceProxyLabel, getInstanceSlotLabel } from '@/utils/boundarySlotLabels';
+
+export interface WidgetDefinition {
+  name: string;
+  /** Canonical schema/socket name; differs from `name` for DynamicCombo children. */
+  inputName?: string;
+  type: string;
+  options?: Record<string, unknown> | unknown[];
+  value: unknown;
+  widgetIndex: number;
+  isCombo: boolean;
+  connected: boolean;
+  inputIndex: number;
+}
+
+function getNodeTypeDefinition(
+  nodeTypes: NodeTypes | null,
+  nodeType: string
+): NodeTypeDefinition | null {
+  if (!nodeTypes) return null;
+  return nodeTypes[nodeType] || null;
+}
+
+function getStandardLoraOptions(nodeTypes: NodeTypes | null): unknown[] {
+  if (!nodeTypes) return [];
+  const standardLoraNode = getNodeTypeDefinition(nodeTypes, 'LoraLoader');
+  const inputDef = standardLoraNode?.input?.required?.['lora_name'];
+  if (!inputDef) return [];
+  const [typeOrOptions, inputOptions] = inputDef;
+  // LoraLoader is still a legacy array combo in current ComfyUI, but read it
+  // through getComboOptions so the lora picker keeps working if it moves to the
+  // V3 string form — an empty list here silently drops every choice.
+  if (!isComboType(typeOrOptions)) return [];
+  return getComboOptions(typeOrOptions, inputOptions);
+}
+
+function buildLoraManagerWidgetDefinitions(
+  node: WorkflowNode,
+  nodeTypes: NodeTypes | null
+): WidgetDefinition[] {
+  if (!Array.isArray(node.widgets_values)) return [];
+  const listIndex = findLoraListIndex(node);
+  if (listIndex === null) return [];
+  const rawList = node.widgets_values[listIndex];
+  if (!isLoraList(rawList)) return [];
+
+  const loraOptions = getStandardLoraOptions(nodeTypes);
+  const definitions: WidgetDefinition[] = [];
+  const list = rawList;
+
+  if (list.length > 0) {
+    definitions.push({
+      name: 'Loras',
+      type: 'LM_LORA_HEADER',
+      options: undefined,
+      value: list.every((entry) => entry?.active !== false),
+      widgetIndex: listIndex,
+      isCombo: false,
+      connected: false,
+      inputIndex: -1
+    });
+  }
+
+  list.forEach((entry, index) => {
+    definitions.push({
+      name: entry?.name || 'Lora',
+      type: 'LM_LORA',
+      options: {
+        entryIndex: index,
+        choices: loraOptions.length > 0 ? loraOptions : undefined
+      },
+      value: entry,
+      widgetIndex: listIndex,
+      isCombo: false,
+      connected: false,
+      inputIndex: -1
+    });
+  });
+
+  definitions.push({
+    name: 'Add Lora',
+    type: 'LM_LORA_ADD',
+    options: { choices: loraOptions.length > 0 ? loraOptions : undefined },
+    value: null,
+    widgetIndex: listIndex,
+    isCombo: false,
+    connected: false,
+    inputIndex: -1
+  });
+
+  return definitions;
+}
+
+function buildTriggerWordToggleWidgetDefinitions(
+  node: WorkflowNode,
+  allowStrengthAdjustment: boolean,
+  preferredListIndex?: number | null
+): WidgetDefinition[] {
+  if (!Array.isArray(node.widgets_values)) return [];
+  const listIndex = preferredListIndex ?? findTriggerWordListIndex(node);
+  if (listIndex === null) return [];
+  if (listIndex < 0 || listIndex >= node.widgets_values.length) return [];
+
+  const rawList = node.widgets_values[listIndex];
+  const list = extractTriggerWordList(rawList) ?? extractTriggerWordListLoose(rawList);
+  if (!Array.isArray(list) || list.length === 0) return [];
+
+  return list.map((entry, index) => ({
+    name: entry?.text || 'Trigger Word',
+    type: 'TW_WORD',
+    options: {
+      entryIndex: index,
+      allowStrengthAdjustment
+    },
+    value: entry,
+    widgetIndex: listIndex,
+    isCombo: false,
+    connected: false,
+    inputIndex: -1
+  }));
+}
+
+function collectWidgetDefinitions(
+  nodeTypes: NodeTypes | null,
+  node: WorkflowNode
+): WidgetDefinition[] {
+  try {
+    // Handle PrimitiveNode specially - it's a frontend-only node type
+    if (node.type === 'PrimitiveNode') {
+      const outputType = node.outputs?.[0]?.type;
+      if (!outputType) return [];
+
+      const normalizedType = String(outputType).toUpperCase();
+      const value = Array.isArray(node.widgets_values) ? node.widgets_values[0] : undefined;
+
+      // Determine widget name from the output name or connected target
+      const outputName = node.outputs?.[0]?.name || 'value';
+
+      return [{
+        name: outputName,
+        type: normalizedType,
+        options: undefined,
+        value,
+        widgetIndex: 0,
+        isCombo: false,
+        connected: false,
+        inputIndex: -1
+      }];
+    }
+
+    // Handle Power Puter (rgthree) specially. Neither of its widgets appears in
+    // object_info -- see the note in `@/utils/powerPuter` -- so without this the
+    // card renders as a node with no parameters at all.
+    if (isPowerPuterNodeType(node.type)) {
+      const { outputs, outputsIndex, codeIndex, code } = readPowerPuterWidgets(node);
+      // Where a widget slot is missing entirely (a node saved before the
+      // outputs widget existed, or one whose code was never touched), fall back
+      // to the slot upstream would have written, so the first edit lands in the
+      // right place instead of appending a stray value.
+      const resolvedOutputsIndex = outputsIndex ?? 0;
+      const resolvedCodeIndex = codeIndex ?? (resolvedOutputsIndex === 0 ? 1 : 0);
+      return [
+        {
+          name: 'outputs',
+          type: 'POWER_PUTER_OUTPUTS',
+          options: {
+            choices: [...POWER_PUTER_OUTPUT_TYPES],
+            maxOutputs: POWER_PUTER_MAX_OUTPUTS,
+          },
+          value: outputs,
+          widgetIndex: resolvedOutputsIndex,
+          isCombo: false,
+          connected: false,
+          inputIndex: -1
+        },
+        {
+          name: 'code',
+          type: 'STRING',
+          options: { multiline: true },
+          value: code,
+          widgetIndex: resolvedCodeIndex,
+          isCombo: false,
+          connected: false,
+          inputIndex: -1
+        }
+      ];
+    }
+
+    // Handle Power Lora Loader (rgthree) specially
+    if (isPowerLoraLoaderNodeType(node.type)) {
+      const definitions: WidgetDefinition[] = [];
+
+      const showSeparate = node.properties?.['Show Strengths'] === 'Separate Model & Clip';
+
+      // Try to get Lora options from the standard LoraLoader if available
+      const loraOptions = getStandardLoraOptions(nodeTypes);
+
+      if (Array.isArray(node.widgets_values)) {
+        const widgetValues = node.widgets_values;
+        const loraIndices: number[] = [];
+        widgetValues.forEach((value, index) => {
+          if (
+            typeof value === 'object' &&
+            value !== null &&
+            'lora' in value &&
+            'strength' in value
+          ) {
+            loraIndices.push(index);
+          }
+        });
+
+        if (loraIndices.length > 0) {
+          // Add Toggle All header
+          definitions.push({
+            name: 'Loras',
+            type: 'POWER_LORA_HEADER',
+            options: { loraIndices },
+            value: null,
+            widgetIndex: -1,
+            isCombo: false,
+            connected: false,
+            inputIndex: -1
+          });
+
+          loraIndices.forEach((index) => {
+            const value = widgetValues[index];
+            definitions.push({
+              name: 'Lora',
+              type: 'POWER_LORA',
+              options: {
+                choices: loraOptions.length > 0 ? loraOptions : undefined,
+                showSeparate
+              },
+              value,
+              widgetIndex: index,
+              isCombo: false,
+              connected: false,
+              inputIndex: -1
+            });
+          });
+        }
+
+        // Add the "Add Lora" button at the end
+        definitions.push({
+          name: 'Add Lora',
+          type: 'POWER_LORA_ADD',
+          options: undefined,
+          value: null,
+          widgetIndex: node.widgets_values.length,
+          isCombo: false,
+          connected: false,
+          inputIndex: -1
+        });
+      }
+      return definitions;
+    }
+
+    const typeDef = getNodeTypeDefinition(nodeTypes, node.type);
+    if (!typeDef?.input) {
+      const loraManagerDefs = isLoraManagerNodeType(node.type)
+        ? buildLoraManagerWidgetDefinitions(node, nodeTypes)
+        : [];
+      if (loraManagerDefs.length > 0) {
+        return loraManagerDefs;
+      }
+      const triggerWordDefs = isTriggerWordToggleNodeType(node.type)
+        ? buildTriggerWordToggleWidgetDefinitions(node, false)
+        : [];
+      if (triggerWordDefs.length > 0) {
+        return triggerWordDefs;
+      }
+      const hasSeedOutput = node.outputs?.some((output) =>
+        String(output.name || '').toLowerCase().includes('seed') &&
+        String(output.type || '').toUpperCase().includes('INT')
+      );
+      if (hasSeedOutput && Array.isArray(node.widgets_values) && node.widgets_values.length > 0) {
+        return [{
+          name: 'seed',
+          type: 'INT',
+          options: undefined,
+          value: node.widgets_values[0],
+          widgetIndex: 0,
+          isCombo: false,
+          connected: false,
+          inputIndex: -1
+        }];
+      }
+      return [];
+    }
+
+    const requiredOrder = typeDef.input_order?.required || Object.keys(typeDef.input.required || {});
+    const optionalOrder = typeDef.input_order?.optional || Object.keys(typeDef.input.optional || {});
+    const definitions: WidgetDefinition[] = [];
+    const propertyWidgetIndexMap = getNodePropertyWidgetIndexMap(node);
+    let widgetIndex = 0;
+
+    const processInput = (
+      name: string,
+      qualifiedName: string,
+      input: [string | unknown[], Record<string, unknown>?],
+    ) => {
+      if (!input) return; // Defensive check
+      const [typeOrOptions, inputOptions] = input;
+      const typeSignature = Array.isArray(typeOrOptions)
+        ? typeOrOptions.map((entry) => String(entry)).join(',')
+        : String(typeOrOptions);
+      const typeSignatureUpper = typeSignature.toUpperCase();
+      const normalizedType = String(typeOrOptions);
+      const isAutocompleteLoras = typeSignatureUpper.includes('AUTOCOMPLETE_TEXT_LORAS');
+      const isAutocompletePrompt = typeSignatureUpper.includes('AUTOCOMPLETE_TEXT_PROMPT');
+      const isLoraManagerTextInput =
+        isLoraManagerNodeType(node.type) && name === 'text';
+      const isAutocompleteTextInput =
+        isAutocompleteLoras || isAutocompletePrompt || isLoraManagerTextInput;
+      const inputIndex = node.inputs.findIndex((i) => i.name === qualifiedName);
+      const inputEntry = inputIndex >= 0 ? node.inputs[inputIndex] : undefined;
+      const isConnected = inputEntry?.link != null;
+      const isWidgetType = occupiesWidgetSlot(
+        node,
+        qualifiedName,
+        typeOrOptions,
+        inputOptions,
+      );
+      const isCombo = isComboType(typeOrOptions) && !isAutocompleteTextInput;
+      const resolvedWidgetIndex = propertyWidgetIndexMap?.[qualifiedName]
+        ?? (qualifiedName === name ? propertyWidgetIndexMap?.[name] : undefined)
+        ?? widgetIndex;
+      const comboOptions: Record<string, unknown> = isCombo
+        ? { ...(inputOptions ?? {}), options: getComboOptions(typeOrOptions, inputOptions) }
+        : { ...(inputOptions ?? {}) };
+      // PrimitiveString holds free text (often popped out of a multiline widget
+      // like CLIP text) — render it as a multiline textarea, not a one-line box.
+      const isPrimitiveStringValue =
+        node.type === 'PrimitiveString' && String(typeOrOptions).toUpperCase() === 'STRING';
+      if (isAutocompleteTextInput || isPrimitiveStringValue) {
+        comboOptions.multiline = true;
+      }
+      if (isWidgetType) {
+        const value = getWidgetValue(node, qualifiedName, resolvedWidgetIndex);
+        definitions.push({
+          name,
+          inputName: qualifiedName,
+          type: isCombo ? 'COMBO' : (isAutocompleteTextInput ? 'STRING' : normalizedType),
+          options: comboOptions,
+          value,
+          widgetIndex: resolvedWidgetIndex,
+          isCombo,
+          connected: Boolean(isConnected),
+          inputIndex
+        });
+      }
+
+      if (isWidgetType) {
+        widgetIndex = Math.max(widgetIndex + 1, resolvedWidgetIndex + 1);
+        if (String(typeOrOptions) === 'INT' && (name === 'seed' || name === 'noise_seed')) {
+          // ComfyUI auto-adds a control_after_generate widget after every INT
+          // seed input. Some custom nodes (Efficient KSampler family) strip it
+          // on the JS side, so widgets_values may be one slot shorter — or
+          // keep the slot but leave it null. Skip past the slot only when it
+          // doesn't look like a real subsequent widget value; bump for
+          // strings ('fixed'/'randomize'/etc.), null, and out-of-bounds
+          // (slot absent entirely), but NOT for numbers/booleans/objects
+          // which would be the value of the next real widget.
+          if (skipImplicitSeedControlSlot(node, resolvedWidgetIndex + 1)) {
+            widgetIndex = Math.max(widgetIndex, resolvedWidgetIndex + 2);
+          }
+        }
+        // COMFY_DYNAMICCOMBO_V3: the selected option exposes conditional
+        // sub-inputs (e.g. width/height/crop) that appear as additional
+        // widgets in widgets_values right after the combo value.
+        // Process them recursively so they show up as widget definitions.
+        if (String(typeOrOptions).toUpperCase() === 'COMFY_DYNAMICCOMBO_V3') {
+          const lastDef = definitions[definitions.length - 1];
+          const subInputs = getDynamicComboSubInputs(
+            typeOrOptions,
+            inputOptions,
+            lastDef?.value ?? getDefaultWidgetValue(typeOrOptions, inputOptions),
+            qualifiedName,
+          );
+          for (const { name: subName, qualifiedName: subQualifiedName, inputDef: subInputDef } of subInputs) {
+            processInput(subName, subQualifiedName, subInputDef);
+          }
+        }
+      }
+    };
+
+    for (const name of requiredOrder) {
+      const input = typeDef.input.required?.[name];
+      if (input) processInput(name, name, input);
+    }
+
+    for (const name of optionalOrder) {
+      const input = typeDef.input.optional?.[name];
+      if (input) processInput(name, name, input);
+    }
+
+    if (isLoraManagerNodeType(node.type)) {
+      definitions.push(...buildLoraManagerWidgetDefinitions(node, nodeTypes));
+    }
+
+    if (isTriggerWordToggleNodeType(node.type)) {
+      const allowStrengthValue = definitions.find(
+        (def) => def.name === 'allow_strength_adjustment'
+      )?.value;
+      const mappedListIndex = definitions.find(
+        (def) => def.name === 'toggle_trigger_words'
+      )?.widgetIndex;
+      definitions.push(
+        ...buildTriggerWordToggleWidgetDefinitions(
+          node,
+          Boolean(allowStrengthValue),
+          mappedListIndex ?? null
+        )
+      );
+    }
+
+    return definitions;
+  } catch (e) {
+    console.error(`Error collecting widget definitions for node ${node.id} (${node.type}):`, e);
+    return []; // Return empty array on error to prevent crash
+  }
+}
+
+export function getWidgetDefinitions(
+  nodeTypes: NodeTypes | null,
+  node: WorkflowNode
+): Array<{ name: string; inputName?: string; type: string; options?: Record<string, unknown>; value: unknown; widgetIndex: number; connected: boolean; inputIndex: number }> {
+  return collectWidgetDefinitions(nodeTypes, node)
+    .filter((def) => !def.isCombo)
+    .map((def) => ({
+      name: def.name,
+      inputName: def.inputName,
+      type: def.type,
+      options: def.options as Record<string, unknown> | undefined,
+      value: def.value,
+      widgetIndex: def.widgetIndex,
+      connected: def.connected,
+      inputIndex: def.inputIndex
+    }));
+}
+
+export function getInputWidgetDefinitions(
+  nodeTypes: NodeTypes | null,
+  node: WorkflowNode
+): Array<{ name: string; inputName?: string; type: string; value: unknown; options: Record<string, unknown> | unknown[]; widgetIndex: number; connected: boolean; inputIndex: number }> {
+  return collectWidgetDefinitions(nodeTypes, node)
+    .filter((def) => def.isCombo)
+    .map((def) => ({
+      name: def.name,
+      inputName: def.inputName,
+      type: def.type,
+      value: def.value,
+      options: def.options as Record<string, unknown> | unknown[],
+      widgetIndex: def.widgetIndex,
+      connected: def.connected,
+      inputIndex: def.inputIndex
+    }));
+}
+
+/**
+ * widgetIndex offset applied to proxy widget indices to avoid collisions with
+ * input.widget promoted widget indices.
+ */
+export const PROXY_INDEX_OFFSET = 10000;
+
+/**
+ * Fallback widget-ness test for a boundary input whose interior link cannot be
+ * followed (no `linkIds`, a dangling link id, or an inner node whose serialized
+ * `inputs[]` is itself truncated). Mirrors the widget/socket split ComfyUI
+ * applies to node schema types.
+ */
+function boundaryTypeLooksLikeWidget(type: unknown): boolean {
+  const typeName = String(type ?? '');
+  return isWidgetInputType(typeName) || isV3ComboType(typeName);
+}
+
+/**
+ * Does a subgraph boundary input carry a widget, as ComfyUI decides it?
+ *
+ * Stock follows the boundary slot's link into the subgraph and keeps the input
+ * only when the inner node's target input carries `widget` -- see
+ * `SubgraphNode._resolveInputWidget` (which sets `input.widgetId`) and
+ * `SubgraphInput.getConnectedWidgets`. The declared boundary type is NOT the
+ * test: `COMFY_DYNAMICCOMBO_V3` boundary inputs are widgets, and a `STRING`
+ * boundary feeding a `forceInput` socket is not.
+ *
+ * Link resolution wins when it is conclusive; the type test is only a fallback
+ * for boundary inputs whose link cannot be followed.
+ */
+function boundaryInputHasWidget(
+  subgraph: WorkflowSubgraphDefinition,
+  boundaryInputIndex: number,
+): boolean {
+  const input = subgraph.inputs?.[boundaryInputIndex];
+  if (!input) return false;
+
+  let resolvedAnyLink = false;
+  for (const linkId of input.linkIds ?? []) {
+    const link = (subgraph.links ?? []).find((candidate) => candidate.id === linkId);
+    if (!link) continue;
+    const innerNode = (subgraph.nodes ?? []).find((node) => node.id === link.target_id);
+    const targetInput = innerNode?.inputs?.[link.target_slot];
+    if (!targetInput) continue;
+    // Stock iterates every link and takes the first that yields a widget.
+    if (targetInput.widget != null) return true;
+    resolvedAnyLink = true;
+  }
+
+  // A link resolved to a real socket input: definitively not a widget.
+  if (resolvedAnyLink) return false;
+  return boundaryTypeLooksLikeWidget(input.type);
+}
+
+/**
+ * Return the widgets_values index for a subgraph boundary input slot.
+ *
+ * ComfyUI stores placeholder widgets_values in the order of every widget-backed
+ * boundary input, including boundary widgets that are omitted from the
+ * placeholder node's shorter inputs[] array. Consequently this index cannot be
+ * derived from a visible/promoted input's position on the placeholder.
+ */
+export function getSubgraphBoundaryWidgetIndexForSlot(
+  subgraph: WorkflowSubgraphDefinition | undefined,
+  boundaryInputIndex: number,
+): number | null {
+  if (!subgraph) return null;
+  const inputs = subgraph.inputs ?? [];
+  if (boundaryInputIndex < 0 || boundaryInputIndex >= inputs.length) return null;
+  if (!boundaryInputHasWidget(subgraph, boundaryInputIndex)) return null;
+
+  let widgetIndex = 0;
+  for (let index = 0; index < boundaryInputIndex; index += 1) {
+    if (boundaryInputHasWidget(subgraph, index)) widgetIndex += 1;
+  }
+  return widgetIndex;
+}
+
+/**
+ * The subgraph's boundary inputs that back a widget, paired with the
+ * widgets_values index each one owns.
+ */
+export function getSubgraphBoundaryWidgetSlots(
+  subgraph: WorkflowSubgraphDefinition | undefined,
+): Array<{ boundarySlot: number; widgetIndex: number }> {
+  const slots: Array<{ boundarySlot: number; widgetIndex: number }> = [];
+  if (!subgraph) return slots;
+  (subgraph.inputs ?? []).forEach((_input, boundarySlot) => {
+    if (!boundaryInputHasWidget(subgraph, boundarySlot)) return;
+    slots.push({ boundarySlot, widgetIndex: slots.length });
+  });
+  return slots;
+}
+
+/**
+ * Which slot of a placeholder's `widgets_values` holds a boundary input's value.
+ *
+ * Two orders exist and they are not the same one.
+ *
+ * `subgraph.inputs` is the boundary: sockets, in socket order. A frontend that
+ * promotes widgets onto the placeholder also writes
+ * `properties.proxyWidgets` — the placeholder's WIDGET list, in the order the
+ * widgets are drawn — and serializes `widgets_values` in that order. The two
+ * lists diverge as soon as proxyWidgets carries an entry the boundary does not:
+ * a widget reached straight inside a node (`["3", "seed"]`) rather than through
+ * a boundary input (`["-1", "unet_name"]`).
+ *
+ * ComfyUI's own Z Image Turbo template does exactly that, and every value from
+ * the divergence onwards lands one or more slots off — the card showed
+ * `unet_name: 8` (the steps value) and `/prompt` refused it with "Value not in
+ * list". So when a proxyWidgets list is present it decides, and the boundary
+ * order stays the answer for the older shape that has no such list.
+ */
+export function getPlaceholderValueIndexForBoundarySlot(
+  placeholderNode: WorkflowNode | undefined,
+  subgraph: WorkflowSubgraphDefinition | undefined,
+  boundarySlot: number,
+): number | null {
+  const boundaryWidgetIndex = getSubgraphBoundaryWidgetIndexForSlot(subgraph, boundarySlot);
+  if (boundaryWidgetIndex === null) return null;
+
+  const name = (subgraph?.inputs ?? [])[boundarySlot]?.name;
+  const proxyIndex = findProxyWidgetIndex(placeholderNode, name);
+  return proxyIndex ?? boundaryWidgetIndex;
+}
+
+/** Position of a boundary-routed (`-1`) entry in `properties.proxyWidgets`. */
+function findProxyWidgetIndex(
+  placeholderNode: WorkflowNode | undefined,
+  widgetName: string | undefined,
+): number | null {
+  if (!placeholderNode || !widgetName) return null;
+  const proxyWidgets = (placeholderNode.properties as Record<string, unknown> | undefined)
+    ?.proxyWidgets;
+  if (!Array.isArray(proxyWidgets) || proxyWidgets.length === 0) return null;
+  const index = (proxyWidgets as unknown[]).findIndex(
+    (entry) =>
+      Array.isArray(entry)
+      && String(entry[0]) === '-1'
+      && entry[1] === widgetName,
+  );
+  return index === -1 ? null : index;
+}
+
+function getSubgraphBoundaryWidgetIndexForInput(
+  subgraph: WorkflowSubgraphDefinition | undefined,
+  input: WorkflowInput,
+): number | null {
+  if (!subgraph) return null;
+  const boundaryInputIndex = (subgraph.inputs ?? []).findIndex(
+    (boundaryInput) => boundaryInput.name === input.name,
+  );
+  return boundaryInputIndex === -1
+    ? null
+    : getSubgraphBoundaryWidgetIndexForSlot(subgraph, boundaryInputIndex);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export interface LinkedWidgetRoute {
+  subgraphId: string | null;
+  nodeId: number;
+  widgetIndex: number;
+  widgetName?: string;
+  itemKey?: string;
+}
+
+function resolvePlaceholderInlineWidgetValue(
+  placeholderNode: WorkflowNode,
+  input: WorkflowNode['inputs'][number],
+  widgetIndex: number,
+): unknown {
+  const values = placeholderNode.widgets_values;
+  const widgetName = input.widget?.name;
+  if (Array.isArray(values)) {
+    return widgetIndex >= 0 && widgetIndex < values.length
+      ? values[widgetIndex]
+      : undefined;
+  }
+  if (isRecord(values)) {
+    if (widgetName && values[widgetName] !== undefined) return values[widgetName];
+    if (values[input.name] !== undefined) return values[input.name];
+    if (input.localized_name && values[input.localized_name] !== undefined) {
+      return values[input.localized_name];
+    }
+  }
+  return undefined;
+}
+
+function resolvePlaceholderParentScope(
+  placeholderNode: WorkflowNode,
+  canonical: Workflow,
+): {
+  subgraphId: string | null;
+  nodes: WorkflowNode[];
+  links: Array<WorkflowLink | WorkflowSubgraphLink>;
+} | null {
+  // An itemKey match only means anything when there IS one: comparing two
+  // absent keys puts every node of an unannotated workflow in the root scope.
+  const holds = (node: WorkflowNode) =>
+    node === placeholderNode
+    || (placeholderNode.itemKey != null && node.itemKey === placeholderNode.itemKey);
+
+  if ((canonical.nodes ?? []).some(holds)) {
+    return { subgraphId: null, nodes: canonical.nodes ?? [], links: canonical.links ?? [] };
+  }
+
+  for (const subgraph of canonical.definitions?.subgraphs ?? []) {
+    if ((subgraph.nodes ?? []).some(holds)) {
+      return {
+        subgraphId: subgraph.id,
+        nodes: subgraph.nodes ?? [],
+        links: subgraph.links ?? [],
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Which instance each definition is being read through, as a set of placeholder
+ * node ids — normally the scope stack the user navigated in by.
+ *
+ * A definition's interior is shared, so a promoted widget fed from outside has
+ * as many values as the type has instances. The stack says which one the view
+ * means; without it, only a lone instance is unambiguous.
+ */
+export type InstanceHint = ReadonlySet<number> | null | undefined;
+
+/** Subgraphs cannot nest infinitely; this only guards against a malformed file. */
+const MAX_BOUNDARY_HOPS = 32;
+
+/**
+ * Step out through a subgraph's input boundary to whatever actually holds the
+ * value.
+ *
+ * A promoted widget on a nested placeholder is fed from the enclosing scope, so
+ * the link it carries ends at the input sentinel rather than at a node with a
+ * value — and every such widget renders blank. Reading it means finding the
+ * placeholder that instantiates this definition and looking at ITS input for
+ * the same boundary slot: either a value typed onto that placeholder, or
+ * another link, which may cross another boundary in turn.
+ *
+ * With several instances to choose between, `hint` names the one being read
+ * through. Failing that a lone instance is taken, since there is nothing else
+ * it could mean; anything more ambiguous resolves to nothing rather than to an
+ * arbitrary sibling's value.
+ */
+function resolveBoundaryInputSource(
+  canonical: Workflow,
+  subgraphId: string,
+  boundarySlot: number,
+  hint: InstanceHint,
+  hops: number,
+): { route: LinkedWidgetRoute; value: unknown } | null {
+  if (hops >= MAX_BOUNDARY_HOPS) return null;
+  const instances = collectSubgraphInstances(canonical, subgraphId);
+  const chosen =
+    instances.find((entry) => hint?.has(entry.node.id))
+    ?? (instances.length === 1 ? instances[0] : null);
+  if (!chosen) return null;
+
+  const outerInput = chosen.node.inputs?.[boundarySlot];
+  if (!outerInput) return null;
+  if (outerInput.link != null) {
+    return resolveLinkedWidgetRoute(chosen.node, outerInput, canonical, hint, hops + 1);
+  }
+
+  // Nothing feeds it out there either, so the value is the one typed onto the
+  // placeholder itself.
+  const outerDef = canonical.definitions?.subgraphs?.find((sg) => sg.id === chosen.node.type);
+  const outerSlot = (outerDef?.inputs ?? []).findIndex((slot) => slot.name === outerInput.name);
+  const widgetIndex =
+    (outerSlot === -1
+      ? null
+      : getPlaceholderValueIndexForBoundarySlot(chosen.node, outerDef, outerSlot))
+    ?? getSubgraphBoundaryWidgetIndexForInput(outerDef, outerInput);
+  if (widgetIndex == null) return null;
+  const value = resolvePlaceholderInlineWidgetValue(chosen.node, outerInput, widgetIndex);
+  if (value === undefined) return null;
+  return {
+    route: {
+      subgraphId: chosen.parentSubgraphId,
+      nodeId: chosen.node.id,
+      widgetIndex,
+      widgetName: outerInput.widget?.name,
+      itemKey: chosen.node.itemKey,
+    },
+    value,
+  };
+}
+
+function resolveLinkedWidgetRoute(
+  placeholderNode: WorkflowNode,
+  input: WorkflowNode['inputs'][number],
+  canonical: Workflow,
+  hint?: InstanceHint,
+  hops = 0,
+): { route: LinkedWidgetRoute; value: unknown } | null {
+  if (input.link == null) return null;
+  const parentScope = resolvePlaceholderParentScope(placeholderNode, canonical);
+  if (!parentScope) return null;
+  const link = parentScope.links.find((candidate) => getLinkId(candidate) === input.link);
+  if (!link) return null;
+
+  const originNodeId = getLinkOriginId(link);
+  const originSlot = getLinkOriginSlot(link);
+  if (originNodeId === SUBGRAPH_INPUT_NODE_ID && parentScope.subgraphId) {
+    return resolveBoundaryInputSource(
+      canonical,
+      parentScope.subgraphId,
+      originSlot,
+      hint,
+      hops,
+    );
+  }
+  if (originNodeId < 0) return null;
+  const sourceNode = parentScope.nodes.find((node) => node.id === originNodeId);
+  if (!sourceNode) return null;
+
+  const widgetName = sourceNode.outputs?.[originSlot]?.name ?? input.widget?.name;
+  const value =
+    getWidgetValue(sourceNode, widgetName ?? '', originSlot) ??
+    (originSlot !== 0 ? getWidgetValue(sourceNode, widgetName ?? '', 0) : undefined);
+
+  return {
+    route: {
+      subgraphId: parentScope.subgraphId,
+      nodeId: sourceNode.id,
+      widgetIndex: originSlot,
+      widgetName,
+      itemKey: sourceNode.itemKey,
+    },
+    value,
+  };
+}
+
+/**
+ * Resolve the actual inner node + widget name a subgraph boundary input
+ * feeds, by walking its link rather than matching the boundary's own name
+ * against inner node schemas directly.
+ *
+ * ComfyUI appends a numeric suffix to a boundary port name when two promoted
+ * widgets share the same underlying name -- e.g. two separate VAELoader
+ * nodes (an image vae and an audio vae) each expose a widget literally named
+ * `vae_name`, so the second one's boundary port becomes `vae_name_1` to stay
+ * unique. That suffixed name never matches any real object_info schema key
+ * (VAELoader's schema only ever has `vae_name`), so looking up options or
+ * type info keyed directly by the boundary name silently comes back empty --
+ * the widget renders with no choices at all, as if the model files were
+ * missing, even though they're installed.
+ */
+export function resolveInnerWidgetForBoundaryName(
+  sg: WorkflowSubgraphDefinition | undefined,
+  boundaryInputName: string,
+): { innerNode: WorkflowNode; widgetName: string } | null {
+  if (!sg) return null;
+  const boundaryInput = (sg.inputs ?? []).find((i) => i.name === boundaryInputName);
+  const linkId = boundaryInput?.linkIds?.[0];
+  if (linkId === undefined) return null;
+  const link = (sg.links ?? []).find((l) => l.id === linkId);
+  if (!link) return null;
+  const innerNode = (sg.nodes ?? []).find((n) => n.id === link.target_id);
+  if (!innerNode) return null;
+  const widgetName = innerNode.inputs?.[link.target_slot]?.widget?.name;
+  if (!widgetName) return null;
+  return { innerNode, widgetName };
+}
+
+/**
+ * Look up a widget's type-info entry (options/bounds) from object_info,
+ * preferring the specific inner node + real widget name a boundary input's
+ * link resolves to, and falling back to a broad by-name search across all
+ * inner nodes only when link resolution isn't possible (e.g. no linkIds
+ * recorded). The broad search is what silently breaks on a disambiguated
+ * name like `vae_name_1` -- see resolveInnerWidgetForBoundaryName.
+ */
+function findInnerWidgetTypeEntry(
+  sg: WorkflowSubgraphDefinition | undefined,
+  boundaryInputName: string,
+  nodeTypes: NodeTypes | null,
+): NodeInputEntry | undefined {
+  if (!sg || !nodeTypes) return undefined;
+
+  const resolved = resolveInnerWidgetForBoundaryName(sg, boundaryInputName);
+  if (resolved) {
+    const typeDef = nodeTypes[resolved.innerNode.type];
+    const entry =
+      typeDef?.input?.required?.[resolved.widgetName] ??
+      typeDef?.input?.optional?.[resolved.widgetName];
+    if (entry) return entry;
+  }
+
+  for (const innerNode of sg.nodes ?? []) {
+    const typeDef = nodeTypes[innerNode.type];
+    if (!typeDef) continue;
+    const entry =
+      typeDef.input?.required?.[boundaryInputName] ?? typeDef.input?.optional?.[boundaryInputName];
+    if (entry) return entry;
+  }
+  return undefined;
+}
+
+function getComboEntryOptions(
+  entry: NodeInputEntry | undefined,
+): Record<string, unknown> | undefined {
+  if (!entry || !isComboType(entry[0])) return undefined;
+  const [typeOrOptions, inputOptions] = entry;
+  return {
+    ...(inputOptions ?? {}),
+    options: getComboOptions(typeOrOptions, inputOptions),
+  };
+}
+
+/**
+ * Resolve all promoted widget definitions (both COMBO and non-COMBO) for a
+ * subgraph placeholder node in a single pass.
+ *
+ * Promoted widgets appear as placeholder inputs with `input.widget: { name }` set.
+ * Their values are usually stored in `placeholderNode.widgets_values[]` in
+ * promoted-input order. When ComfyUI serializes the promoted input as a linked
+ * primitive/control node, values live on that linked source instead.
+ */
+function resolveAllSubgraphPlaceholderWidgetDefs(
+  placeholderNode: WorkflowNode,
+  canonical: Workflow,
+  nodeTypes: NodeTypes | null,
+  instances?: InstanceHint,
+): { widgets: ReturnType<typeof getWidgetDefinitions>; inputWidgets: ReturnType<typeof getInputWidgetDefinitions> } {
+  const promotedInputs = (placeholderNode.inputs ?? []).filter((inp) => inp.widget != null);
+  if (promotedInputs.length === 0) return { widgets: [], inputWidgets: [] };
+
+  const sg = canonical.definitions?.subgraphs?.find((s) => s.id === placeholderNode.type);
+  const instanceNumber = getInstanceNumber(placeholderNode);
+
+  const widgets: ReturnType<typeof getWidgetDefinitions> = [];
+  const inputWidgets: ReturnType<typeof getInputWidgetDefinitions> = [];
+
+  promotedInputs.forEach((inp, promotedIndex) => {
+    const typeName = String(inp.type);
+    const isCombo = isV3ComboType(typeName);
+    const widgetName = inp.widget!.name;
+    // `label` is the template author's explicit display override (e.g.
+    // "audio_vae" for a second vae_name_1 input, "duration" for value_1) --
+    // it takes priority over localized_name/name, which are often just the
+    // raw internal widget identifier.
+    //
+    // A label edited in this app sits above both, at whichever level it was
+    // edited: THIS instance's override (properties, see boundarySlotLabels)
+    // first, then the DEFINITION's boundary slot, shared by every instance.
+    // Either may carry the {n} instance token.
+    //
+    // The definition's label outranks the one on the placeholder's own slot,
+    // which is a CACHE of it — `applyBoundaryPresentation` overwrites that from
+    // the boundary on every normalization. Reading the cache first meant
+    // renaming a shared type's slot changed nothing on the cards until
+    // something happened to re-seat them.
+    const defSlot =
+      sg?.inputs?.find((slot) => slot.name === inp.name) ?? undefined;
+    const instanceLabel = getInstanceSlotLabel(placeholderNode, 'input', inp.name);
+    const rawName =
+      instanceLabel || defSlot?.label || inp.label || inp.localized_name || inp.name;
+    const name = interpolateInstanceLabel(rawName ?? '', instanceNumber) || inp.name;
+    const linkedSource = resolveLinkedWidgetRoute(placeholderNode, inp, canonical, instances);
+    // `name` above is the display label -- an instance override, the boundary
+    // slot's label, `{n}`-interpolated. `inputName` is the canonical schema
+    // name of the widget the boundary actually drives, which is what a caller
+    // matching against ComfyUI input names (e.g. "image") has to compare
+    // against. Ordinary defs from getInputWidgetDefinitions carry it; these did
+    // not, so any such match silently missed every relabelled promotion.
+    const inputName =
+      resolveInnerWidgetForBoundaryName(sg, inp.name)?.widgetName
+      ?? inp.widget?.name
+      ?? inp.name;
+    const boundarySlot = (sg?.inputs ?? []).findIndex((b) => b.name === inp.name);
+    const widgetIndex = (boundarySlot === -1
+      ? null
+      : getPlaceholderValueIndexForBoundarySlot(placeholderNode, sg, boundarySlot))
+      ?? getSubgraphBoundaryWidgetIndexForInput(sg, inp)
+      ?? promotedIndex;
+    const inlineValue = resolvePlaceholderInlineWidgetValue(placeholderNode, inp, widgetIndex);
+    const value = inlineValue !== undefined ? inlineValue : linkedSource?.value;
+    const inputIndex = placeholderNode.inputs.indexOf(inp);
+    // A promoted widget whose value is populated by a connection (the input has
+    // a link) is not an editable widget — it must render as a connection button
+    // only, never a widget control, whether or not a value resolves through the
+    // link. Only an unlinked promoted widget is editable on the placeholder.
+    const connected = inp.link != null;
+
+    if (isCombo) {
+      let options: Record<string, unknown> | unknown[] = [];
+      const entry = findInnerWidgetTypeEntry(sg, inp.name, nodeTypes);
+      options = getComboEntryOptions(entry) ?? options;
+      // The promoted widget is shown under its display label (e.g. "Checkpoint"),
+      // but the rich model picker is detected from the ComfyUI input name. Carry
+      // the kind detected from the inner widget name (e.g. ckpt_name) so the
+      // picker still appears on the promoted widget.
+      const modelKind = modelWidgetKind(widgetName);
+      const extraMeta: Record<string, unknown> = {};
+      if (linkedSource) extraMeta.__linkedSource = linkedSource.route;
+      if (modelKind) extraMeta.__modelKind = modelKind;
+      inputWidgets.push({
+        name,
+        inputName,
+        type: 'COMBO',
+        value,
+        options: Object.keys(extraMeta).length
+          ? { ...(Array.isArray(options) ? { options } : options), ...extraMeta }
+          : options,
+        widgetIndex,
+        connected,
+        inputIndex,
+      });
+    } else {
+      let options: Record<string, unknown> | undefined = undefined;
+      const entry = findInnerWidgetTypeEntry(sg, inp.name, nodeTypes);
+      if (entry && !isComboType(entry[0])) {
+        options = entry[1] as Record<string, unknown> | undefined;
+      }
+      widgets.push({
+        name,
+        inputName,
+        type: typeName,
+        options: linkedSource
+          ? { ...(options ?? {}), __linkedSource: linkedSource.route }
+          : options,
+        value,
+        widgetIndex,
+        connected,
+        inputIndex,
+      });
+    }
+  });
+
+  return { widgets, inputWidgets };
+}
+
+/**
+ * widgets_values index for a subgraph placeholder's input slot. With canonical
+ * workflow context this follows the full widget-typed boundary order; the
+ * promoted-input position is retained only as a legacy fallback. Returns null
+ * when the slot isn't a promoted widget (pure connection, proxy- or boundary-fed).
+ */
+export function getPlaceholderWidgetIndexForInput(
+  placeholderNode: WorkflowNode,
+  inputIndex: number,
+  canonical?: Workflow,
+): number | null {
+  const inputs = placeholderNode.inputs ?? [];
+  const input = inputs[inputIndex];
+  if (!input || input.widget == null) return null;
+
+  const subgraph = canonical?.definitions?.subgraphs?.find(
+    (candidate) => candidate.id === placeholderNode.type,
+  );
+  const boundarySlot = (subgraph?.inputs ?? []).findIndex((b) => b.name === input.name);
+  const valueIndex = boundarySlot === -1
+    ? null
+    : getPlaceholderValueIndexForBoundarySlot(placeholderNode, subgraph, boundarySlot);
+  if (valueIndex !== null) return valueIndex;
+  const boundaryWidgetIndex = getSubgraphBoundaryWidgetIndexForInput(subgraph, input);
+  if (boundaryWidgetIndex !== null) return boundaryWidgetIndex;
+
+  let widgetIndex = 0;
+  for (let i = 0; i < inputIndex; i += 1) {
+    if (inputs[i].widget != null) widgetIndex += 1;
+  }
+  return widgetIndex;
+}
+
+/**
+ * True when a placeholder's promoted widget input is populated by a connection
+ * (it has a link) rather than being an editable widget. Such inputs render as a
+ * connection button only — never a widget control — regardless of whether a
+ * value resolves through the link. Kept in sync with the `connected` flag
+ * computed in resolveAllSubgraphPlaceholderWidgetDefs.
+ */
+export function isPlaceholderPromotedConnection(
+  inp: WorkflowInput,
+): boolean {
+  return inp.widget != null && inp.link != null;
+}
+
+/** Resolve non-COMBO promoted widget definitions for a subgraph placeholder node. */
+export function resolveSubgraphPlaceholderWidgetDefs(
+  placeholderNode: WorkflowNode,
+  canonical: Workflow,
+  nodeTypes: NodeTypes | null,
+  instances?: InstanceHint,
+): ReturnType<typeof getWidgetDefinitions> {
+  return resolveAllSubgraphPlaceholderWidgetDefs(placeholderNode, canonical, nodeTypes, instances).widgets;
+}
+
+/** Resolve COMBO promoted widget definitions for a subgraph placeholder node. */
+export function resolveSubgraphPlaceholderInputWidgetDefs(
+  placeholderNode: WorkflowNode,
+  canonical: Workflow,
+  nodeTypes: NodeTypes | null,
+  instances?: InstanceHint,
+): ReturnType<typeof getInputWidgetDefinitions> {
+  return resolveAllSubgraphPlaceholderWidgetDefs(placeholderNode, canonical, nodeTypes, instances).inputWidgets;
+}
+
+/**
+ * Routing metadata embedded in options for proxy widget definitions.
+ * Used by NodeCard to route updates to the correct inner subgraph node.
+ */
+export interface ProxyWidgetRoute {
+  subgraphId: string;
+  innerNodeId: number;
+  innerWidgetIndex: number;
+  /** Canonical schema name, qualified for nested DynamicCombo children. */
+  innerWidgetName?: string;
+}
+
+const SEED_CONTROL_MODES = ['fixed', 'randomize', 'increment', 'decrement'];
+
+/**
+ * Resolve all widget definitions (both COMBO and non-COMBO) for a subgraph
+ * placeholder node using the `proxyWidgets` mechanism in a single pass.
+ *
+ * `properties.proxyWidgets` is an array of [innerNodeId, widgetName] pairs referencing
+ * inner subgraph nodes' widgets. Values are stored in those inner nodes' widgets_values.
+ * The sentinel "-1" means the widget is handled by the input.widget slot-promotion mechanism.
+ *
+ * Returns widgetIndex values offset by PROXY_INDEX_OFFSET to avoid collisions.
+ * Options include a `__proxy` key with ProxyWidgetRoute routing metadata.
+ */
+export function resolveAllSubgraphProxyWidgetDefs(
+  placeholderNode: WorkflowNode,
+  canonical: Workflow,
+  nodeTypes: NodeTypes | null
+): { widgets: ReturnType<typeof getWidgetDefinitions>; inputWidgets: ReturnType<typeof getInputWidgetDefinitions> } {
+  const proxyWidgets = (placeholderNode.properties as Record<string, unknown>)?.proxyWidgets;
+  if (!Array.isArray(proxyWidgets) || proxyWidgets.length === 0) return { widgets: [], inputWidgets: [] };
+
+  const sg = canonical.definitions?.subgraphs?.find((s) => s.id === placeholderNode.type);
+  if (!sg) return { widgets: [], inputWidgets: [] };
+  const instanceNumber = getInstanceNumber(placeholderNode);
+  const proxyLabels = getMobileDefMeta(sg).proxyLabels ?? {};
+
+  const widgets: ReturnType<typeof getWidgetDefinitions> = [];
+  const inputWidgets: ReturnType<typeof getInputWidgetDefinitions> = [];
+
+  (proxyWidgets as [string, string][]).forEach(([innerNodeIdStr, widgetName], proxyIndex) => {
+    if (innerNodeIdStr === '-1') return; // Handled by input.widget mechanism
+    const innerNodeId = Number(innerNodeIdStr);
+    const innerNode = (sg.nodes ?? []).find((n) => n.id === innerNodeId);
+    if (!innerNode) return;
+
+    // A custom label wins over the derived "Node title: widget" default, at
+    // whichever level it was set: THIS instance's override first, then the
+    // definition-shared one. Either may carry the {n} instance token.
+    const customLabel =
+      getInstanceProxyLabel(placeholderNode, innerNodeId, widgetName) ||
+      proxyLabels[`${innerNodeId}:${widgetName}`];
+    const nodeTitle = (innerNode as { title?: string }).title;
+    const defaultName = nodeTitle ? `${nodeTitle}: ${widgetName}` : widgetName;
+    const displayName =
+      interpolateInstanceLabel(customLabel || defaultName, instanceNumber) || widgetName;
+    const proxy: ProxyWidgetRoute = {
+      subgraphId: placeholderNode.type,
+      innerNodeId,
+      innerWidgetIndex: -1, // set below per branch
+    };
+
+    // Try non-COMBO first. proxyWidgets entries may use either the bare child
+    // name or the qualified DynamicCombo name (desktop serializes the latter,
+    // e.g. "resize_type.multiplier").
+    const matchesWidgetName = (def: { name: string; inputName?: string }) =>
+      def.name === widgetName || def.inputName === widgetName;
+    const innerWidgetDef = getWidgetDefinitions(nodeTypes, innerNode).find(matchesWidgetName);
+    if (innerWidgetDef) {
+      proxy.innerWidgetIndex = innerWidgetDef.widgetIndex;
+      proxy.innerWidgetName = innerWidgetDef.inputName ?? innerWidgetDef.name;
+      widgets.push({
+        ...innerWidgetDef,
+        name: displayName,
+        widgetIndex: PROXY_INDEX_OFFSET + proxyIndex,
+        options: {
+          ...(innerWidgetDef.options as Record<string, unknown> ?? {}),
+          __proxy: proxy,
+        },
+        inputIndex: -1,
+      });
+      return;
+    }
+
+    // Try COMBO
+    const innerInputWidgetDef = getInputWidgetDefinitions(nodeTypes, innerNode).find(matchesWidgetName);
+    if (innerInputWidgetDef) {
+      proxy.innerWidgetIndex = innerInputWidgetDef.widgetIndex;
+      proxy.innerWidgetName = innerInputWidgetDef.inputName ?? innerInputWidgetDef.name;
+      // Proxy widgets are shown under "Node: widget" labels, so carry the model
+      // picker kind detected from the real inner widget name (e.g. lora_name).
+      const modelKind = modelWidgetKind(widgetName);
+      inputWidgets.push({
+        ...innerInputWidgetDef,
+        name: displayName,
+        widgetIndex: PROXY_INDEX_OFFSET + proxyIndex,
+        options: {
+          ...(innerInputWidgetDef.options as Record<string, unknown> ?? {}),
+          __proxy: proxy,
+          ...(modelKind ? { __modelKind: modelKind } : {}),
+        },
+        inputIndex: -1,
+      });
+      return;
+    }
+
+    // Some seed helper nodes (for example EasySeed) expose seed only as an INT
+    // output and store control_after_generate in widgets_values[seedIndex + 1],
+    // so object_info has no COMBO input definition for the control. If the
+    // workflow explicitly proxies that control, synthesize the missing combo so
+    // placeholder cards read/write the actual inner node value.
+    if (widgetName === 'control_after_generate') {
+      const seedWidgetDef = getWidgetDefinitions(nodeTypes, innerNode).find(
+        (def) => def.name === 'seed' || def.name === 'noise_seed',
+      );
+      if (!seedWidgetDef) return;
+
+      const controlWidgetIndex = seedWidgetDef.widgetIndex + 1;
+      const widgetValues = Array.isArray(innerNode.widgets_values)
+        ? innerNode.widgets_values
+        : [];
+      const controlValue = widgetValues[controlWidgetIndex];
+      if (typeof controlValue !== 'string') return;
+
+      proxy.innerWidgetIndex = controlWidgetIndex;
+      proxy.innerWidgetName = 'control_after_generate';
+      inputWidgets.push({
+        name: displayName,
+        type: 'COMBO',
+        value: controlValue,
+        widgetIndex: PROXY_INDEX_OFFSET + proxyIndex,
+        connected: false,
+        inputIndex: -1,
+        options: {
+          options: SEED_CONTROL_MODES.includes(controlValue)
+            ? SEED_CONTROL_MODES
+            : [...SEED_CONTROL_MODES, controlValue],
+          __proxy: proxy,
+        },
+      });
+    }
+  });
+
+  return { widgets, inputWidgets };
+}
+
+/** Resolve non-COMBO proxy widget definitions for a subgraph placeholder node. */
+export function resolveSubgraphProxyWidgetDefs(
+  placeholderNode: WorkflowNode,
+  canonical: Workflow,
+  nodeTypes: NodeTypes | null
+): ReturnType<typeof getWidgetDefinitions> {
+  return resolveAllSubgraphProxyWidgetDefs(placeholderNode, canonical, nodeTypes).widgets;
+}
+
+/** Resolve COMBO proxy widget definitions for a subgraph placeholder node. */
+export function resolveSubgraphProxyInputWidgetDefs(
+  placeholderNode: WorkflowNode,
+  canonical: Workflow,
+  nodeTypes: NodeTypes | null
+): ReturnType<typeof getInputWidgetDefinitions> {
+  return resolveAllSubgraphProxyWidgetDefs(placeholderNode, canonical, nodeTypes).inputWidgets;
+}
+
+/**
+ * Resolve promoted widget definitions for a subgraph placeholder node that
+ * are exposed ONLY through the subgraph definition's own boundary `inputs[]`
+ * list — i.e. neither given a placeholder-level socket entry with
+ * `input.widget` set (the `resolveAllSubgraphPlaceholderWidgetDefs` slot
+ * mechanism) nor listed in `properties.proxyWidgets` (the
+ * `resolveAllSubgraphProxyWidgetDefs` mechanism).
+ *
+ * A subgraph template author can promote a widget to the boundary without
+ * exposing it as a connectable socket on the placeholder card at all — the
+ * value still lives in `placeholderNode.widgets_values[]`, positionally
+ * aligned with the subgraph definition's widget-typed boundary inputs, but
+ * the placeholder's own `inputs[]` array has no entry for it whatsoever. The
+ * two existing mechanisms only look at `placeholderNode.inputs[]` and
+ * `properties.proxyWidgets`, so they never see these — leaving widgets like a
+ * promoted seed completely unreachable (findSeedWidgetIndex returns null,
+ * and the whole seed control section silently disappears from the UI).
+ *
+ * Reads and writes both work off the resolved `widgetIndex` alone (no
+ * `__proxy`/`__linkedSource` routing is attached), because these values are
+ * genuinely stored directly on the placeholder's own `widgets_values`.
+ *
+ * Mostly a safety net now: `normalizeSubgraphPlaceholders` gives every loaded
+ * placeholder its full boundary slot list, so the slot mechanism above covers
+ * these and this returns nothing. It still fires for placeholders assembled
+ * in memory that have not been through a load or a persistence pass.
+ */
+export function resolveAllSubgraphBoundaryWidgetDefs(
+  placeholderNode: WorkflowNode,
+  canonical: Workflow,
+  nodeTypes: NodeTypes | null
+): { widgets: ReturnType<typeof getWidgetDefinitions>; inputWidgets: ReturnType<typeof getInputWidgetDefinitions> } {
+  const sg = canonical.definitions?.subgraphs?.find((s) => s.id === placeholderNode.type);
+  if (!sg) return { widgets: [], inputWidgets: [] };
+
+  const boundaryWidgetSlots = getSubgraphBoundaryWidgetSlots(sg);
+  if (boundaryWidgetSlots.length === 0) return { widgets: [], inputWidgets: [] };
+
+  // Names already resolved via slot promotion — skip those to avoid duplicates.
+  const alreadyCovered = new Set<string>();
+  for (const inp of placeholderNode.inputs ?? []) {
+    if (inp.widget?.name) alreadyCovered.add(inp.widget.name);
+  }
+
+  const widgets: ReturnType<typeof getWidgetDefinitions> = [];
+  const inputWidgets: ReturnType<typeof getInputWidgetDefinitions> = [];
+
+  // widgetIndex is the boundary input's position among the widget-backed
+  // boundary inputs — the same order ComfyUI writes widgets_values in,
+  // regardless of which of those also got a placeholder-level socket entry.
+  boundaryWidgetSlots.forEach(({ boundarySlot, widgetIndex }) => {
+    const boundaryInput = sg.inputs?.[boundarySlot];
+    const boundaryName = boundaryInput?.name;
+    if (!boundaryInput || !boundaryName || alreadyCovered.has(boundaryName)) return;
+
+    const typeName = String(boundaryInput.type);
+    const isCombo = isV3ComboType(typeName);
+    const name =
+      interpolateInstanceLabel(
+        boundaryInput.label || boundaryInput.localized_name || boundaryName,
+        getInstanceNumber(placeholderNode),
+      ) || boundaryName;
+    const value = Array.isArray(placeholderNode.widgets_values)
+      ? placeholderNode.widgets_values[widgetIndex]
+      : undefined;
+
+    if (isCombo) {
+      let options: Record<string, unknown> | unknown[] = [];
+      const entry = findInnerWidgetTypeEntry(sg, boundaryName, nodeTypes);
+      options = getComboEntryOptions(entry) ?? options;
+      const modelKind = modelWidgetKind(boundaryName);
+      inputWidgets.push({
+        name,
+        type: 'COMBO',
+        value,
+        options: modelKind
+          ? { ...(Array.isArray(options) ? { options } : options), __modelKind: modelKind }
+          : options,
+        widgetIndex,
+        connected: false,
+        inputIndex: -1,
+      });
+    } else {
+      let options: Record<string, unknown> | undefined;
+      const entry = findInnerWidgetTypeEntry(sg, boundaryName, nodeTypes);
+      if (entry && !isComboType(entry[0])) {
+        options = entry[1] as Record<string, unknown> | undefined;
+      }
+      widgets.push({
+        name,
+        type: typeName,
+        options,
+        value,
+        widgetIndex,
+        connected: false,
+        inputIndex: -1,
+      });
+    }
+  });
+
+  return { widgets, inputWidgets };
+}
+
+/** Resolve non-COMBO boundary-only widget definitions for a subgraph placeholder node. */
+export function resolveSubgraphBoundaryWidgetDefs(
+  placeholderNode: WorkflowNode,
+  canonical: Workflow,
+  nodeTypes: NodeTypes | null
+): ReturnType<typeof getWidgetDefinitions> {
+  return resolveAllSubgraphBoundaryWidgetDefs(placeholderNode, canonical, nodeTypes).widgets;
+}
+
+/** Resolve COMBO boundary-only widget definitions for a subgraph placeholder node. */
+export function resolveSubgraphBoundaryInputWidgetDefs(
+  placeholderNode: WorkflowNode,
+  canonical: Workflow,
+  nodeTypes: NodeTypes | null
+): ReturnType<typeof getInputWidgetDefinitions> {
+  return resolveAllSubgraphBoundaryWidgetDefs(placeholderNode, canonical, nodeTypes).inputWidgets;
+}

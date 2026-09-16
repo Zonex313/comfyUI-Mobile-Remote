@@ -1,0 +1,2106 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useTextareaFocus } from '@/hooks/useTextareaFocus';
+import { useBodyScrollLock } from '@/hooks/useBodyScrollLock';
+import { useWorkflowStore } from '@/hooks/useWorkflow';
+import { useImageViewerStore } from '@/hooks/useImageViewer';
+import { useI18n } from '@/i18n';
+import { usePinnedWidgetStore } from '@/hooks/usePinnedWidget';
+import { useIsDesktop } from '@/hooks/useIsDesktop';
+import type { ViewerImage } from '@/utils/viewerImages';
+import type { DownloadOutcome } from '@/utils/downloads';
+import { MediaViewerHeader } from './MediaViewer/Header';
+import { classifySwipe } from './swipeGesture';
+import { compareClipPath, DEFAULT_COMPARE_CLIP } from './compareClip';
+import { MediaViewerActions } from './MediaViewer/Actions';
+import { MediaViewerMetadata } from './MediaViewer/Metadata';
+import { VideoPlaybackControls } from './MediaViewer/VideoPlaybackControls';
+import { PlaybackSpeedControls } from './MediaViewer/PlaybackSpeedControls';
+import { CloseButton } from '@/components/buttons/CloseButton';
+import { OverlayCircleButton } from '@/components/buttons/OverlayCircleButton';
+import { HeartIcon, RejectedIcon, SpeakerWaveIcon, SpeakerXIcon } from '@/components/icons';
+import { MenuIcon } from '@/components/icons/MenuIcon';
+import { extractMetadata } from '@/utils/metadata';
+import { isVideoFilename } from '@/utils/media';
+import { canSaveToPhotosInNativeApp } from '@/utils/nativeSave';
+import {
+  getImageMetadata,
+  getMediaThumbnailUrlFromAssetUrl,
+  getPlayableVideoUrl,
+} from '@/api/client';
+import { resolveFilePath, resolveFileSource } from '@/utils/workflowOperations';
+import {
+  getCachedWorkflowAvailability,
+  probeWorkflowAvailability,
+} from '@/utils/workflowAvailability';
+import { reportVideoPlaybackIssue } from '@/utils/mediaDiagnostics';
+
+interface MediaViewerProps {
+  open: boolean;
+  items: ViewerImage[];
+  index: number;
+  onIndexChange: (index: number) => void;
+  onClose: () => void;
+  onDelete: (item: ViewerImage) => void;
+  onLoadWorkflow: (item: ViewerImage) => void;
+  onLoadInWorkflow: (item: ViewerImage) => void;
+  /**
+   * Outputs select mode, driven from the panel behind the viewer. Strips the
+   * action row back, pins the chrome open, frames a selected image, and shows
+   * the running tally in the header.
+   */
+  selectionMode?: boolean;
+  isSelected?: (item: ViewerImage) => boolean;
+  onToggleSelection?: (item: ViewerImage) => void;
+  selectedCount?: number;
+  // Favoriting is sticky: this fires for the `f` key and the heart button and
+  // should *enter* the favorited state (never unfavorite). Unfavoriting is the
+  // reject affordance's job (see onReject).
+  onToggleFavorite?: (item: ViewerImage) => void;
+  isFavorited?: (item: ViewerImage) => boolean;
+  // The `x` affordance: callers unfavorite if the item is favorited, otherwise
+  // toggle the rejected state (the two states are mutually exclusive).
+  onReject?: (item: ViewerImage) => void;
+  isRejected?: (item: ViewerImage) => boolean;
+  onDownload?: (item: ViewerImage) => Promise<DownloadOutcome | undefined> | void;
+  /**
+   * An offer to hand the item on screen back to whatever opened the viewer —
+   * the input picker's "use this". Absent for an ordinary viewing session, and
+   * hidden for an item the picker reports it cannot accept.
+   */
+  pickAction?: {
+    label: string;
+    canPick?: (item: ViewerImage) => boolean;
+    onPick: (item: ViewerImage) => void;
+  } | null;
+  showMetadataToggle?: boolean;
+  showLoadingPlaceholder?: boolean;
+  // Live latent preview painted behind the placeholder's progress bar while a
+  // run is in flight and there is no output to show yet. Each frame is a fresh
+  // blob URL, so swapping `src` on one reused <img> keeps the previous frame
+  // painted until the next decodes.
+  loadingPreviewSrc?: string | null;
+  loadingProgress?: number;
+  loadingLabel?: string;
+  loadWorkflowProgress?: number | null;
+  initialScale?: number;
+  initialTranslate?: { x: number; y: number };
+  onTransformChange?: (scale: number, translate: { x: number; y: number }) => void;
+  zoomResetKey?: string | number | null;
+}
+
+const DEFAULT_TRANSLATE = { x: 0, y: 0 };
+/**
+ * Exported so overlays that must appear ABOVE the viewer can derive their own
+ * layer from it rather than hard-coding a number that silently stops clearing
+ * it if this one ever moves.
+ */
+export const MEDIA_VIEWER_Z_INDEX = 2100;
+const MEDIA_VIEWER_OVERLAY_Z_INDEX = MEDIA_VIEWER_Z_INDEX + 10;
+const PRELOAD_IMAGE_COUNT_PER_SIDE = 2;
+const PRELOAD_RETENTION_INDEX_BUFFER = 3;
+// Cap the "already decoded" hint map so a long browse over a huge folder doesn't
+// grow it unbounded. It only suppresses a spinner flash, so resetting on overflow
+// is harmless (at worst a brief spinner if a dropped image is revisited).
+const LOADED_SRCS_MAX = 256;
+// How long the viewer must rest on a file before its workflow-availability
+// probe fires. Long enough that flicking through a folder skips the files
+// passed over, short enough to feel immediate once the user stops.
+const WORKFLOW_PROBE_SETTLE_MS = 300;
+
+function isEditableElement(element: HTMLElement | null): boolean {
+  if (!element) return false;
+  const tag = element.tagName.toLowerCase();
+  return element.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select';
+}
+
+function getFullScreenImageSrc(item: ViewerImage): string {
+  const name = item.filename ?? item.file?.name ?? item.src;
+  return /\.jpe?g(?:$|[?#])/i.test(name) ? item.src : (item.displaySrc ?? item.src);
+}
+
+function isViewerVideo(item: ViewerImage): boolean {
+  const name = item.filename ?? item.file?.name ?? item.alt ?? item.src ?? '';
+  return Boolean(
+    item.mediaType === 'video' ||
+    item.file?.type === 'video' ||
+    (name && isVideoFilename(name))
+  );
+}
+
+/**
+ * The intrinsic size a media element is currently reporting, or null before it
+ * knows one. Videos answer with `videoWidth/Height` (set at `loadedmetadata`),
+ * images with `naturalWidth/Height` (set at decode).
+ */
+function readMediaNaturalSize(
+  media: HTMLImageElement | HTMLVideoElement | null,
+): { width: number; height: number } | null {
+  if (!media) return null;
+  const width = media instanceof HTMLVideoElement ? media.videoWidth : media.naturalWidth;
+  const height = media instanceof HTMLVideoElement ? media.videoHeight : media.naturalHeight;
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+export function MediaViewer({
+  open,
+  items,
+  index,
+  onIndexChange,
+  onClose,
+  onDelete,
+  onLoadWorkflow,
+  onLoadInWorkflow,
+  selectionMode = false,
+  isSelected,
+  onToggleSelection,
+  selectedCount = 0,
+  onToggleFavorite,
+  isFavorited,
+  onReject,
+  isRejected,
+  onDownload,
+  pickAction,
+  showMetadataToggle = false,
+  showLoadingPlaceholder = false,
+  loadingPreviewSrc = null,
+  loadingProgress = 0,
+  loadingLabel,
+  loadWorkflowProgress,
+  initialScale = 1,
+  initialTranslate = DEFAULT_TRANSLATE,
+  onTransformChange,
+  zoomResetKey,
+}: MediaViewerProps) {
+  const { t } = useI18n();
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+  // Overlay (image A) in comparison mode. Driven directly during gestures so it
+  // zooms/pans in lockstep with the base image instead of catching up on render.
+  const compareImageRef = useRef<HTMLImageElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const naturalSizeRef = useRef<{ width: number; height: number } | null>(null);
+  const adjacentPreloadsRef = useRef<
+    Map<string, { image: HTMLImageElement; itemIndex: number }>
+  >(new Map());
+  // MediaViewer remounts whenever the viewer opens (ImageViewer returns null
+  // when closed), so initializing from props is sufficient — no useLayoutEffect
+  // needed to re-sync. Re-syncing on every initialScale/initialTranslate prop
+  // change creates a feedback loop with onTransformChange: store updates
+  // produce new object refs for initialTranslate, the effect calls
+  // setTranslate(newRef), state changes, onTransformChange sends it back to
+  // the store, which produces another new ref, and so on.
+  const [scale, setScale] = useState(initialScale);
+  const [translate, setTranslate] = useState(initialTranslate);
+  const scaleRef = useRef(initialScale);
+  const translateRef = useRef(initialTranslate);
+
+  const dragRef = useRef<{ x: number; y: number } | null>(null);
+  const swipeRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const pinchRef = useRef<{
+    distance: number;
+    scale: number;
+    centerX: number;
+    centerY: number;
+    imagePoint?: { x: number; y: number };
+  } | null>(null);
+  const lastTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
+  const transformGestureRef = useRef(false);
+  const [baseSize, setBaseSize] = useState<{ width: number; height: number } | null>(null);
+  const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null);
+  const [isIdle, setIsIdle] = useState(false);
+  // In-viewer download toast (Saving / Saved / failed). Lives inside the
+  // viewer so it only shows when the viewer is open and so it can be
+  // positioned right above the action-button row, close to where the user
+  // just tapped, rather than at the system bottom edge.
+  const [downloadToast, setDownloadToast] = useState<{
+    message: string;
+    tone: 'info' | 'success' | 'error';
+  } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+  }, []);
+  const showDownloadToast = useCallback(
+    (message: string, tone: 'info' | 'success' | 'error', autoDismissMs: number | null) => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = null;
+      }
+      setDownloadToast({ message, tone });
+      if (autoDismissMs != null) {
+        toastTimerRef.current = setTimeout(() => {
+          toastTimerRef.current = null;
+          setDownloadToast(null);
+        }, autoDismissMs);
+      }
+    },
+    [],
+  );
+  // A/B comparison wipe divider, as a 0..1 fraction of the container width (a
+  // screen-fixed divider: image A shows to its left, B to its right). The image
+  // pans/zooms beneath it and the clip is recomputed from the transform, so the
+  // two images stay in sync even when zoomed.
+  const [comparePos, setComparePos] = useState(0.5);
+  const [compareHandleTop, setCompareHandleTop] = useState(0.5);
+  const [showMetadata, setShowMetadata] = useState(false);
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const targetZoomModeRef = useRef<'fit' | 'cover'>('fit');
+  const [metadataById, setMetadataById] = useState<Record<string, ReturnType<typeof extractMetadata> | null>>({});
+  const [metadataLoading, setMetadataLoading] = useState<Record<string, boolean>>({});
+  const [workflowAvailableById, setWorkflowAvailableById] = useState<Record<string, boolean>>({});
+  const [videoError, setVideoError] = useState(false);
+  const [videoPlaying, setVideoPlaying] = useState(true);
+  const [videoMuted, setVideoMuted] = useState(true);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [playbackSpeedOpen, setPlaybackSpeedOpen] = useState(false);
+  // Pixel resolution of the currently displayed media, shown under the filename.
+  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
+  // Full-screen image srcs that have finished decoding at least once (current
+  // swap-preloads + adjacent preloads both report in). Drives the loading
+  // spinner: it shows only while the *currently viewed* image isn't loaded yet,
+  // so swiping back to an already-loaded image hides it even though a
+  // swiped-past image keeps loading in the background.
+  const [loadedSrcs, setLoadedSrcs] = useState<Record<string, true>>({});
+  // The src whose load failed, so the viewer can say so instead of showing an
+  // empty frame. Compared against the current src, which clears it on swipe.
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const markLoaded = useCallback((src: string | null | undefined) => {
+    if (!src) return;
+    setLoadedSrcs((prev) => {
+      if (prev[src]) return prev;
+      if (Object.keys(prev).length >= LOADED_SRCS_MAX) return { [src]: true };
+      return { ...prev, [src]: true };
+    });
+  }, []);
+  // Items whose media is gone from disk, so navigation can step over them
+  // instead of parking the viewer on "Unable to load this image" — deleting an
+  // output leaves its history entry (and therefore its viewer slot) behind.
+  // Keyed by the item's canonical `src`, and only ever filled in by a probe
+  // that came back 404: a transient failure (offline, server restarting, 5xx)
+  // must leave the slot alone rather than silently hiding half the queue.
+  const [missingSrcs, setMissingSrcs] = useState<Record<string, true>>({});
+  const probedSrcsRef = useRef<Set<string>>(new Set());
+  const probeMissingMedia = useCallback((item: ViewerImage | null | undefined) => {
+    const key = item?.src;
+    if (!key || typeof fetch !== 'function') return;
+    if (probedSrcsRef.current.has(key)) return;
+    probedSrcsRef.current.add(key);
+    const probeUrl = isViewerVideo(item)
+      ? getPlayableVideoUrl(item.src)
+      : getFullScreenImageSrc(item);
+    void fetch(probeUrl, { method: 'HEAD', cache: 'no-store' })
+      .then((response) => {
+        if (response.status === 404 || response.status === 410) {
+          setMissingSrcs((prev) => (prev[key] ? prev : { ...prev, [key]: true }));
+          return;
+        }
+        // Still there (or an error that says nothing about the file) — forget the
+        // probe so a later failure on the same item can ask again.
+        probedSrcsRef.current.delete(key);
+      })
+      .catch(() => {
+        probedSrcsRef.current.delete(key);
+      });
+  }, []);
+  const isMissingItem = useCallback(
+    (item: ViewerImage | null | undefined) => Boolean(item?.src && missingSrcs[item.src]),
+    [missingSrcs],
+  );
+  // First index from `from` (inclusive) travelling in `direction` whose media
+  // still exists; -1 when there is nothing left to show that way.
+  const findViewableIndex = useCallback(
+    (from: number, direction: 1 | -1) => {
+      for (let i = from; i >= 0 && i < items.length; i += direction) {
+        if (!isMissingItem(items[i])) return i;
+      }
+      return -1;
+    },
+    [items, isMissingItem],
+  );
+  // Which way the user was last travelling, so an item that turns out to be
+  // deleted hands the viewer on in the same direction rather than bouncing back.
+  const lastStepDirectionRef = useRef<1 | -1>(1);
+  const stepIndex = useCallback(
+    (direction: 1 | -1) => {
+      lastStepDirectionRef.current = direction;
+      const target = findViewableIndex(index + direction, direction);
+      if (target < 0) return false;
+      const workflowState = useWorkflowStore.getState();
+      if (workflowState.followQueue) workflowState.setFollowQueue(false);
+      onIndexChange(target);
+      return true;
+    },
+    [findViewableIndex, index, onIndexChange],
+  );
+  const { isInputFocused } = useTextareaFocus();
+  const setViewerState = useImageViewerStore((s) => s.setViewerState);
+  const videoPlaybackRate = useImageViewerStore((s) => s.videoPlaybackRate);
+  const setVideoPlaybackRate = useImageViewerStore((s) => s.setVideoPlaybackRate);
+  const setFollowQueue = useWorkflowStore((s) => s.setFollowQueue);
+  const followQueue = useWorkflowStore((s) => s.followQueue);
+  const pinnedWidget = usePinnedWidgetStore((s) => s.pinnedWidget);
+  const pinOverlayOpen = usePinnedWidgetStore((s) => s.pinOverlayOpen);
+  const togglePinOverlay = usePinnedWidgetStore((s) => s.togglePinOverlay);
+  const isDesktop = useIsDesktop();
+  // The pinned widget modal docks to the right 25% on desktop. Push only the
+  // right-side overlay controls inward by that much so they stay visible (the
+  // header/center and left controls don't move).
+  const rightControlsInset = pinOverlayOpen && isDesktop ? '25vw' : undefined;
+
+  const currentItem = index >= 0 ? (items[index] ?? items[0] ?? null) : null;
+  const isVideo = Boolean(currentItem && isViewerVideo(currentItem));
+
+  // Double-buffered display: keep the previously rendered item visible until the
+  // next image is decoded, then swap atomically with its computed transform so
+  // there's no black flash or top-left jump between images.
+  const [displayedItem, setDisplayedItem] = useState<ViewerImage | null>(
+    () => (index >= 0 ? (items[index] ?? items[0] ?? null) : null),
+  );
+  const displayedItemRef = useRef<ViewerImage | null>(null);
+  useEffect(() => {
+    displayedItemRef.current = displayedItem;
+  }, [displayedItem]);
+  // When there is no previous item to preserve (initial display, or follow-queue
+  // arriving from an empty state) render the current item directly to avoid a
+  // one-render-gap black frame before the swap effect fires.
+  const renderItem = displayedItem ?? currentItem;
+
+  // Show a centered loading spinner while the *currently viewed* image hasn't
+  // finished decoding yet (these full-res outputs can be tens of MB). A short
+  // delay keeps fast/cached images from flashing a spinner.
+  const currentFullSrc =
+    currentItem && !isViewerVideo(currentItem)
+      ? getFullScreenImageSrc(currentItem)
+      : null;
+  const isCurrentImageLoading = Boolean(
+    open && currentFullSrc && !loadedSrcs[currentFullSrc],
+  );
+  const [showImageSpinner, setShowImageSpinner] = useState(false);
+  useEffect(() => {
+    if (!isCurrentImageLoading) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- syncing debounced spinner visibility to a derived flag
+      setShowImageSpinner(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShowImageSpinner(true), 200);
+    return () => window.clearTimeout(timer);
+  }, [isCurrentImageLoading]);
+  const renderIsVideo = Boolean(renderItem && isViewerVideo(renderItem));
+  // A/B comparison mode: when the item carries a `comparison`, render both images
+  // sharing one transform with a wipe divider. The item's `src` is image B (the
+  // base that drives sizing/load), so the existing load machinery is untouched;
+  // image A is the clipped overlay. `isComparisonMode` (off currentItem) gates
+  // the overlay to just the X button.
+  const renderComparison = !renderIsVideo ? renderItem?.comparison ?? null : null;
+  const isComparisonMode = Boolean(currentItem?.comparison);
+  const renderFullSrc = renderItem && !renderIsVideo ? getFullScreenImageSrc(renderItem) : null;
+  const fileId = currentItem?.file?.id ?? null;
+  const fetchedMetadata = fileId ? metadataById[fileId] : undefined;
+  // A video file carries no readable generation metadata of its own; what the
+  // metadata endpoint returns for one is read out of a same-basename image
+  // beside it — another file's metadata. Only run-sourced metadata (attached
+  // by the queue/history list builders from the run's own prompt) is honestly
+  // the video's, so a video never shows fetched metadata.
+  const metadata = currentItem?.metadata
+    ?? (isVideo ? null : fetchedMetadata === undefined ? undefined : fetchedMetadata);
+  const durationLabel = formatDuration(currentItem?.durationSeconds);
+  const displayName = currentItem?.filename || currentItem?.alt || t('Output');
+  /**
+   * Whether the chrome is faded out.
+   *
+   * Derived rather than forced into `isIdle`, so entering select mode while the
+   * chrome had already faded brings it straight back — and leaving select mode
+   * resumes wherever the timer had got to.
+   */
+  const chromeIdle = isIdle && !selectionMode;
+  const showMetadataOverlay = showMetadata && !chromeIdle;
+  // On a video the toggle exists only when the item carries its own run's
+  // metadata; with nothing honest to show, a video gets no metadata UI at all
+  // (no button, no overlay) rather than a "no metadata" placeholder for a
+  // sibling image's data it refuses to claim.
+  const metadataToggleAvailable = showMetadataToggle && (!isVideo || Boolean(currentItem?.metadata));
+  const canToggleMetadata = metadataToggleAvailable;
+  const metadataIsLoading = fileId ? Boolean(metadataLoading[fileId]) : false;
+  const workflowAvailabilityKnown = fileId ? Object.prototype.hasOwnProperty.call(workflowAvailableById, fileId) : false;
+  const canLoadWorkflow = Boolean(currentItem?.workflow)
+    || (fileId ? Boolean(workflowAvailableById[fileId]) : false);
+
+  const resetIdleTimer = useCallback(() => {
+    setIsIdle(false);
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+    }
+    // Select mode keeps the chrome up: the checkbox and the running tally are
+    // the point of being here, and fading them out mid-selection would hide
+    // the state the user is actively building.
+    if (selectionMode) return;
+    idleTimerRef.current = setTimeout(() => {
+      setPlaybackSpeedOpen(false);
+      setIsIdle(true);
+    }, 3000);
+  }, [selectionMode]);
+
+  const currentIsSelected = Boolean(currentItem && isSelected?.(currentItem));
+
+  const handleToggleSelectionClick = useCallback(() => {
+    if (!currentItem) return;
+    resetIdleTimer();
+    onToggleSelection?.(currentItem);
+  }, [currentItem, onToggleSelection, resetIdleTimer]);
+
+  const handleToggleMetadata = useCallback(() => {
+    resetIdleTimer();
+    setShowMetadata((prev) => !prev);
+  }, [resetIdleTimer]);
+
+  const handleDeleteClick = useCallback(() => {
+    if (!currentItem) return;
+    resetIdleTimer();
+    onDelete(currentItem);
+  }, [currentItem, onDelete, resetIdleTimer]);
+
+  const handleLoadWorkflowClick = useCallback(() => {
+    if (!currentItem) return;
+    resetIdleTimer();
+    onLoadWorkflow(currentItem);
+  }, [currentItem, onLoadWorkflow, resetIdleTimer]);
+
+  const handleLoadInWorkflowClick = useCallback(() => {
+    if (!currentItem) return;
+    resetIdleTimer();
+    onLoadInWorkflow(currentItem);
+  }, [currentItem, onLoadInWorkflow, resetIdleTimer]);
+
+  const handleToggleFavoriteClick = useCallback(() => {
+    if (!currentItem) return;
+    resetIdleTimer();
+    onToggleFavorite?.(currentItem);
+  }, [currentItem, onToggleFavorite, resetIdleTimer]);
+
+  const handleRejectClick = useCallback(() => {
+    if (!currentItem) return;
+    resetIdleTimer();
+    onReject?.(currentItem);
+  }, [currentItem, onReject, resetIdleTimer]);
+
+  const handlePickClick = useCallback(() => {
+    if (!currentItem || !pickAction) return;
+    resetIdleTimer();
+    pickAction.onPick(currentItem);
+  }, [currentItem, pickAction, resetIdleTimer]);
+
+  const handleDownloadClick = useCallback(() => {
+    if (!currentItem) return undefined;
+    resetIdleTimer();
+    const result = onDownload?.(currentItem);
+    if (!result || typeof (result as Promise<unknown>).then !== 'function') {
+      return undefined;
+    }
+    // Drive the in-viewer toast from the outcome. The "info" toast stays up for
+    // the duration; the success/error states auto-dismiss after a beat. The
+    // DownloadButton still uses the same returned Promise to hold its spinner —
+    // we just also tap it for the toast lifecycle.
+    return (result as Promise<DownloadOutcome | undefined>).then(
+      (outcome) => {
+        if (!outcome) {
+          setDownloadToast(null);
+          return;
+        }
+        // Each route claims only what it can observe. The native app writes the
+        // asset itself and reports the real result, so "Saved to Photos." is a
+        // fact. The browser route only knows the anchor click happened — whether
+        // the file landed on disk is not knowable from here, so a definite
+        // "Downloaded." would be a guess the user may act on.
+        if (outcome.route === 'photos') {
+          if (outcome.ok) {
+            showDownloadToast(t('Saved to Photos.'), 'success', 2500);
+          } else {
+            showDownloadToast(t("Couldn't save to Photos."), 'error', 3000);
+          }
+        } else if (outcome.started) {
+          showDownloadToast(t('Download started.'), 'success', 2000);
+        } else {
+          showDownloadToast(t('Download failed.'), 'error', 3000);
+        }
+      },
+      () => showDownloadToast(t('Download failed.'), 'error', 3000),
+    );
+  }, [currentItem, onDownload, resetIdleTimer, showDownloadToast, t]);
+
+  // Show an in-flight message right when loading begins (DownloadButton
+  // signals via onLoadingChange). Only the native-iOS path saves to Photos —
+  // a slow web download (large video, slow proxy) must not claim it's
+  // "Saving to Photos", and neither must an app session that has the UA
+  // marker but no savePhoto bridge (it falls back to the web download too).
+  const handleDownloadLoadingChange = useCallback(
+    (loading: boolean) => {
+      if (loading) {
+        if (idleTimerRef.current) {
+          clearTimeout(idleTimerRef.current);
+          idleTimerRef.current = null;
+        }
+        setIsIdle(false);
+        // Keep info-toast persistent — the result handler clears or
+        // replaces it once the promise settles.
+        showDownloadToast(
+          canSaveToPhotosInNativeApp()
+            ? t('Saving to Photos…')
+            : t('Downloading…'),
+          'info',
+          null,
+        );
+      } else {
+        // Give the user time to read the completed toast, then return to the
+        // viewer's normal chrome auto-hide behavior.
+        resetIdleTimer();
+      }
+    },
+    [resetIdleTimer, showDownloadToast, t],
+  );
+
+  const handleToggleVideoPlayback = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    resetIdleTimer();
+    if (video.paused) {
+      void video.play().catch(() => setVideoPlaying(false));
+    } else {
+      video.pause();
+    }
+  }, [resetIdleTimer]);
+
+  const handleToggleVideoMuted = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = !video.muted;
+    setVideoMuted(video.muted);
+    resetIdleTimer();
+  }, [resetIdleTimer]);
+
+  const handleVideoSeek = useCallback((seconds: number) => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(seconds)) return;
+    const duration = Number.isFinite(video.duration) ? video.duration : seconds;
+    const nextTime = Math.max(0, Math.min(seconds, duration));
+    video.currentTime = nextTime;
+    setVideoCurrentTime(nextTime);
+  }, []);
+
+  const handleVideoPause = useCallback(() => {
+    setVideoPlaying(false);
+    // A paused video must leave its resume button reachable instead of hiding
+    // the custom controls on the normal three-second chrome timer.
+    setIsIdle(false);
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+  }, []);
+
+  const handleVideoPlay = useCallback(() => {
+    setVideoPlaying(true);
+    resetIdleTimer();
+  }, [resetIdleTimer]);
+
+  const handlePlaybackSpeedInteractionStart = useCallback(() => {
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+    }
+    setIsIdle(false);
+  }, []);
+
+  const handlePlaybackSpeedInteractionEnd = useCallback(() => {
+    // An expanded slider is an active control, so it pins the chrome open until
+    // the user explicitly clicks away. Releasing its thumb should hide only the
+    // floating percentage readout, not start the overlay's idle countdown.
+    if (playbackSpeedOpen) {
+      handlePlaybackSpeedInteractionStart();
+      return;
+    }
+    resetIdleTimer();
+  }, [handlePlaybackSpeedInteractionStart, playbackSpeedOpen, resetIdleTimer]);
+
+  const handlePlaybackSpeedOpenChange = useCallback((nextOpen: boolean) => {
+    setPlaybackSpeedOpen(nextOpen);
+    if (nextOpen) {
+      handlePlaybackSpeedInteractionStart();
+    } else {
+      resetIdleTimer();
+    }
+  }, [handlePlaybackSpeedInteractionStart, resetIdleTimer]);
+
+  const handlePlaybackRateChange = useCallback((rate: number) => {
+    setVideoPlaybackRate(rate);
+  }, [setVideoPlaybackRate]);
+
+  const shouldIgnoreViewerKeyboard = useCallback(() => {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return false;
+    if (!isEditableElement(active)) return false;
+    if (overlayRef.current?.contains(active)) return true;
+    if (pinOverlayOpen) return true;
+    if (active.closest('[data-dialog-root="true"], [role="dialog"]')) return true;
+    return false;
+  }, [pinOverlayOpen]);
+
+  const currentIsFavorited = Boolean(
+    currentItem && isFavorited && isFavorited(currentItem),
+  );
+  const currentIsRejected = Boolean(
+    currentItem && isRejected && isRejected(currentItem),
+  );
+
+  const renderedVideoWidth = useMemo(() => {
+    if (!isVideo || !containerSize || !naturalSize || naturalSize.width <= 0 || naturalSize.height <= 0) {
+      return undefined;
+    }
+    const fit = Math.min(
+      containerSize.width / naturalSize.width,
+      containerSize.height / naturalSize.height,
+    );
+    return naturalSize.width * fit;
+  }, [isVideo, containerSize, naturalSize]);
+
+  // Re-centre the comparison wipe when navigating to a different item.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- resetting UI state on item change
+    setComparePos(0.5);
+    setCompareHandleTop(0.5);
+  }, [index]);
+
+  // Drag the comparison divider. Lives on the handle (which captures the pointer
+  // and stops propagation) so it never triggers the container's pan/zoom.
+  const handleCompareDividerDown = useCallback((e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }, []);
+  const handleCompareDividerMove = useCallback((e: React.PointerEvent) => {
+    if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+    e.stopPropagation();
+    const container = containerRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    setComparePos(Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)));
+    const handleHalfPx = 24;
+    const minCenter = Math.min(handleHalfPx, rect.height / 2);
+    const maxCenter = Math.max(rect.height - handleHalfPx, rect.height / 2);
+    const centerY = Math.min(maxCenter, Math.max(minCenter, e.clientY - rect.top));
+    setCompareHandleTop(centerY / rect.height);
+  }, []);
+  const canFavoriteCurrent = Boolean(
+    currentItem?.file && onToggleFavorite,
+  );
+  const canRejectCurrent = Boolean(currentItem?.file && onReject);
+  const canDownloadCurrent = Boolean(currentItem?.src && onDownload);
+  const canPickCurrent = Boolean(
+    currentItem && pickAction && (pickAction.canPick?.(currentItem) ?? true),
+  );
+
+  useEffect(() => {
+    if (open) {
+      queueMicrotask(resetIdleTimer);
+    } else if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current);
+    }
+
+    return () => {
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current);
+      }
+    };
+  }, [open, resetIdleTimer]);
+
+  // Surface the idle/overlay-hidden state so siblings (the bottom bar) can fade
+  // in sync with the viewer overlays. Treat a closed viewer as not-idle so the
+  // bottom bar is fully visible again once the viewer leaves the screen.
+  useEffect(() => {
+    setViewerState({ viewerIdle: open && chromeIdle });
+  }, [open, chromeIdle, setViewerState]);
+
+  useEffect(() => {
+    return () => {
+      setViewerState({ viewerIdle: false });
+    };
+  }, [setViewerState]);
+
+  // Keyed on the ITEM, not only on the index.
+  //
+  // Zoom mode is a choice about the thing being looked at, and a double tap
+  // sets it to `cover`. Follow mode delivers each new generation at index 0, so
+  // when the viewer is already sitting there the index does not change and this
+  // never fired: the new arrival inherited the previous one's `cover`. For a
+  // portrait clip `cover` IS scale 1 — fit-to-width — so a tall video opened
+  // cropped to the screen's width rather than fitted to its height, but only
+  // once something had been double-tapped, which is what made it intermittent.
+  useEffect(() => {
+    if (!open) return;
+    targetZoomModeRef.current = 'fit';
+    dragRef.current = null;
+    swipeRef.current = null;
+    pinchRef.current = null;
+    lastTapRef.current = null;
+    transformGestureRef.current = false;
+  }, [open, index, currentItem?.src]);
+
+  // Leave a slot whose media has been deleted. Adjacent preloads usually mark
+  // one before the user reaches it (so the swipe steps straight over it), but
+  // the item the viewer opens on — or the first of a run longer than the
+  // preload window — is only found out once its own load fails. Keep going in
+  // the direction of travel, fall back to the other one, and stay put (showing
+  // the error) only when every remaining slot is dead.
+  useEffect(() => {
+    if (!open || index < 0) return;
+    if (!isMissingItem(items[index])) return;
+    const direction = lastStepDirectionRef.current;
+    const back: 1 | -1 = direction === 1 ? -1 : 1;
+    let target = findViewableIndex(index + direction, direction);
+    if (target < 0) target = findViewableIndex(index + back, back);
+    if (target >= 0 && target !== index) onIndexChange(target);
+  }, [open, index, items, isMissingItem, findViewableIndex, onIndexChange]);
+
+  useEffect(() => {
+    if (!open || index < 0 || items.length <= 1) {
+      adjacentPreloadsRef.current.clear();
+      return;
+    }
+
+    const preloadIndexes = new Set<number>();
+    for (const direction of [-1, 1]) {
+      let found = 0;
+      for (
+        let candidateIndex = index + direction;
+        candidateIndex >= 0 &&
+        candidateIndex < items.length &&
+        found < PRELOAD_IMAGE_COUNT_PER_SIDE;
+        candidateIndex += direction
+      ) {
+        const candidate = items[candidateIndex];
+        if (!candidate || isViewerVideo(candidate)) continue;
+        // A slot already known to be deleted is one the user will be stepped
+        // over, so preload past it rather than spending a slot on it.
+        if (isMissingItem(candidate)) continue;
+        preloadIndexes.add(candidateIndex);
+        found += 1;
+      }
+    }
+
+    const nextPreloads = new Map<
+      string,
+      { image: HTMLImageElement; itemIndex: number }
+    >();
+    const currentIndexBySrc = new Map<string, number>();
+    items.forEach((item, itemIndex) => {
+      if (isViewerVideo(item)) return;
+      currentIndexBySrc.set(getFullScreenImageSrc(item), itemIndex);
+    });
+    for (const [src, preload] of adjacentPreloadsRef.current) {
+      const currentItemIndex = currentIndexBySrc.get(src);
+      if (
+        currentItemIndex !== undefined &&
+        Math.abs(currentItemIndex - index) <= PRELOAD_RETENTION_INDEX_BUFFER
+      ) {
+        nextPreloads.set(src, { ...preload, itemIndex: currentItemIndex });
+      }
+    }
+
+    const currentSrc = currentItem ? getFullScreenImageSrc(currentItem) : null;
+    for (const itemIndex of preloadIndexes) {
+      const item = items[itemIndex];
+      if (!item) continue;
+      const src = getFullScreenImageSrc(item);
+      if (!src || src === currentSrc) continue;
+      const existing = adjacentPreloadsRef.current.get(src);
+      if (existing) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- recording an already-decoded preload into loadedSrcs
+        if (existing.image.complete && existing.image.naturalWidth > 0) markLoaded(src);
+        nextPreloads.set(src, { ...existing, itemIndex });
+        continue;
+      }
+      const preload = new Image();
+      // Report into loadedSrcs so the spinner clears the instant the user swipes
+      // onto a preloaded image. Treat error as settled too (don't hang a spinner).
+      preload.onload = () => markLoaded(src);
+      preload.onerror = () => {
+        markLoaded(src);
+        // Find out ahead of the user whether this one is gone, so the swipe that
+        // reaches it steps over it instead of landing on the error frame.
+        probeMissingMedia(item);
+      };
+      preload.src = src;
+      nextPreloads.set(src, { image: preload, itemIndex });
+    }
+    adjacentPreloadsRef.current = nextPreloads;
+  }, [open, index, items, currentItem, markLoaded, isMissingItem, probeMissingMedia]);
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!open) {
+      setDisplayedItem(null);
+      return;
+    }
+    if (!currentItem) {
+      setDisplayedItem(null);
+      return;
+    }
+
+    const displayed = displayedItemRef.current;
+    if (!displayed || currentItem.src === displayed.src) {
+      // No swap to preload here (initial open, or the displayed item is already
+      // current). The swap-preload below and the adjacent-preload effect both
+      // skip the current src, so the visible <img> itself is what clears the
+      // spinner — see handleImageLoad and the cached-complete effect below.
+      setDisplayedItem(currentItem);
+      return;
+    }
+
+    // Videos handle their own loading state via <video>; swap immediately.
+    const displayedIsVideoItem = isViewerVideo(displayed);
+    const currentIsVideoItem = isViewerVideo(currentItem);
+    if (displayedIsVideoItem || currentIsVideoItem) {
+      setDisplayedItem(currentItem);
+      return;
+    }
+
+    let cancelled = false;
+    const preload = new Image();
+    // JPEG orientation is commonly stored in EXIF. ComfyUI's on-the-fly WebP
+    // preview strips it, so JPEGs use the original while other formats retain
+    // the faster preview path.
+    const fullSrc = getFullScreenImageSrc(currentItem);
+    preload.src = fullSrc;
+
+    const finish = () => {
+      // Mark loaded even when cancelled: a swiped-past image that finishes in
+      // the background should count as loaded so returning to it shows no spinner.
+      markLoaded(fullSrc);
+      if (cancelled) return;
+
+      const container = containerRef.current;
+      if (container && preload.naturalWidth > 0) {
+        const containerWidth = container.clientWidth;
+        const containerHeight = container.clientHeight;
+        const ratio = containerWidth / preload.naturalWidth;
+        const newBaseSize = { width: containerWidth, height: preload.naturalHeight * ratio };
+        const newContainerSize = { width: containerWidth, height: containerHeight };
+
+        const fitHeightScale = containerHeight / newBaseSize.height;
+        const newFitScale = Math.min(1, fitHeightScale);
+        const newCoverScale = Math.max(1, fitHeightScale);
+        const targetScale = targetZoomModeRef.current === 'cover' ? newCoverScale : newFitScale;
+        const scaledWidth = newBaseSize.width * targetScale;
+        const scaledHeight = newBaseSize.height * targetScale;
+        // Mirror clampTranslate: translate is the pan offset, NOT the centering
+        // offset (getBaseOffset handles centering in the render). When the
+        // scaled image fits inside the container, pan is forced to 0; for cover
+        // mode we clamp the centered offset to keep the image within bounds.
+        const centeredX = (containerWidth - scaledWidth) / 2;
+        const centeredY = (containerHeight - scaledHeight) / 2;
+        const clampedTranslate = {
+          x: scaledWidth <= containerWidth
+            ? 0
+            : Math.max(containerWidth - scaledWidth, Math.min(0, centeredX)),
+          y: scaledHeight <= containerHeight
+            ? 0
+            : Math.max(containerHeight - scaledHeight, Math.min(0, centeredY)),
+        };
+
+        naturalSizeRef.current = { width: preload.naturalWidth, height: preload.naturalHeight };
+        scaleRef.current = targetScale;
+        translateRef.current = clampedTranslate;
+        setBaseSize(newBaseSize);
+        setContainerSize(newContainerSize);
+        setScale(targetScale);
+        setTranslate(clampedTranslate);
+      }
+
+      setDisplayedItem(currentItem);
+    };
+
+    // The failure half of both routes also probes: the swiped-to image being
+    // gone is what starts the hand-off to the next live slot, and starting it
+    // here rather than waiting for the visible <img> to fail shortens how long
+    // the dead frame is on screen.
+    const fail = () => {
+      probeMissingMedia(currentItem);
+      finish();
+    };
+    if (typeof preload.decode === 'function') {
+      preload.decode().then(finish, fail);
+    } else {
+      preload.onload = finish;
+      preload.onerror = fail;
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, currentItem, markLoaded, probeMissingMedia]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  // Runs for stills as well as videos. `currentItem.workflow` is only
+  // populated from the loaded history window, so an older image with embedded
+  // workflow metadata has no in-memory signal — without probing it, the Load
+  // Workflow control would be hidden on a file that can load perfectly well.
+  //
+  // Structure matters here, because two earlier shapes of this effect broke:
+  // - A `workflowIsLoading` state guard in the dependency array made the
+  //   effect abort itself: setting the flag re-ran the effect, whose cleanup
+  //   cancelled the request it had just issued. Re-entry is instead prevented
+  //   by the effect's own lifecycle — any dep change aborts the old probe
+  //   before a new one can start, so no in-flight bookkeeping is needed.
+  // - Caching a failed probe as `false` turned a transient server blip into a
+  //   permanently hidden Load Workflow button. Failures now write nothing, so
+  //   the next view of the file retries.
+  useEffect(() => {
+    if (!open) return;
+    if (currentItem?.workflow) return;
+    const file = currentItem?.file;
+    const id = fileId;
+    if (!file || !id) return;
+    if (workflowAvailabilityKnown) return;
+
+    const cached = getCachedWorkflowAvailability(file);
+    if (cached !== undefined) {
+      setWorkflowAvailableById((prev) => ({ ...prev, [id]: cached }));
+      return;
+    }
+
+    // Wait for the swipe to settle before asking: each probe makes the server
+    // parse the file's embedded metadata, so a fast flick through a large
+    // folder must not fire one request per file passed over. Files swiped
+    // past never issue a request at all — cleanup cancels the timer.
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      probeWorkflowAvailability(file, undefined, { signal: controller.signal })
+        .then((available) => {
+          setWorkflowAvailableById((prev) => ({ ...prev, [id]: available }));
+        })
+        .catch(() => {
+          // Aborted (user moved on) or failed (server blip): the answer is
+          // unknown, not "no" — leave both caches untouched so a later view
+          // of this file can ask again.
+        });
+    }, WORKFLOW_PROBE_SETTLE_MS);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [open, currentItem, fileId, workflowAvailabilityKnown]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setVideoError(false);
+    setVideoPlaying(true);
+    setVideoMuted(true);
+    setVideoCurrentTime(0);
+    setVideoDuration(0);
+    if (renderIsVideo) {
+      naturalSizeRef.current = null;
+      setBaseSize(null);
+    }
+    // Clear the resolution subtitle until the new media reports its dimensions.
+    setNaturalSize(null);
+  }, [renderItem?.src, renderIsVideo]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // The playback rate lives in the viewer store rather than on an individual
+  // video element. Apply that one shared value to whichever clip is currently
+  // mounted, including immediately after a swipe replaces the element.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !renderIsVideo) return;
+    video.playbackRate = videoPlaybackRate;
+  }, [renderIsVideo, renderItem?.src, videoPlaybackRate]);
+
+  useBodyScrollLock(open);
+
+  useEffect(() => {
+    if (!open) return;
+    if (!onTransformChange) return;
+    onTransformChange(scale, translate);
+  }, [open, scale, translate, onTransformChange]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        // The pinned widget modal owns Escape while it's open (it closes
+        // itself) — don't also close the viewer underneath it.
+        if (pinOverlayOpen) return;
+        onClose();
+        return;
+      }
+      if (shouldIgnoreViewerKeyboard()) return;
+      // Modifier-keyed shortcuts (Ctrl+F find, Cmd+R reload, etc.) should not
+      // be intercepted as viewer shortcuts.
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      switch (event.key) {
+        case 'ArrowLeft':
+          if (index > 0) {
+            event.preventDefault();
+            resetIdleTimer();
+            stepIndex(-1);
+          }
+          return;
+        case 'ArrowRight':
+          if (index < items.length - 1) {
+            event.preventDefault();
+            resetIdleTimer();
+            stepIndex(1);
+          }
+          return;
+        case ' ':
+          if (isVideo) {
+            event.preventDefault();
+            handleToggleVideoPlayback();
+          }
+          return;
+        case 'Delete':
+        case 'Backspace':
+          // Favorited items are protected from deletion (mirrors the disabled
+          // delete button).
+          if (currentItem && !currentIsFavorited) {
+            event.preventDefault();
+            handleDeleteClick();
+          }
+          return;
+        case 'f':
+        case 'F':
+          if (canFavoriteCurrent) {
+            event.preventDefault();
+            handleToggleFavoriteClick();
+          }
+          return;
+        case 'x':
+        case 'X':
+          // Unfavorite if favorited, otherwise toggle rejected — the caller
+          // resolves which (the two states are mutually exclusive).
+          if (canRejectCurrent) {
+            event.preventDefault();
+            handleRejectClick();
+          }
+          return;
+        case 'w':
+        case 'W':
+          if (canLoadWorkflow) {
+            event.preventDefault();
+            handleLoadWorkflowClick();
+          }
+          return;
+        case 'u':
+        case 'U':
+          if (!isVideo && currentItem) {
+            event.preventDefault();
+            handleLoadInWorkflowClick();
+          }
+          return;
+        case 'i':
+        case 'I':
+          if (showMetadataToggle && canToggleMetadata) {
+            event.preventDefault();
+            handleToggleMetadata();
+          }
+          return;
+        case 'd':
+        case 'D':
+          if (canDownloadCurrent) {
+            event.preventDefault();
+            handleDownloadClick();
+          }
+          return;
+        case 'q':
+        case 'Q':
+          event.preventDefault();
+          setFollowQueue(!followQueue);
+          return;
+        case 'p':
+        case 'P':
+          if (pinnedWidget) {
+            event.preventDefault();
+            const willOpen = !pinOverlayOpen;
+            togglePinOverlay();
+            if (willOpen) {
+              // The pinned-widget overlay renders via createPortal at the
+              // bottom of the document, so the textarea/input we want to
+              // focus is the most recently mounted text input. Place the
+              // caret at the end so typing appends.
+              setTimeout(() => {
+                const inputs = document.querySelectorAll<
+                  HTMLTextAreaElement | HTMLInputElement
+                >('textarea[data-swipe-nav-ignore="true"], input[data-swipe-nav-ignore="true"]');
+                const target = inputs[inputs.length - 1];
+                if (!target) return;
+                target.focus();
+                const value = target.value ?? '';
+                try {
+                  target.setSelectionRange(value.length, value.length);
+                } catch {
+                  // Some input types (number, etc.) don't support setSelectionRange.
+                }
+              }, 0);
+            }
+          }
+          return;
+      }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [
+    open,
+    onClose,
+    shouldIgnoreViewerKeyboard,
+    index,
+    items.length,
+    stepIndex,
+    currentItem,
+    currentIsFavorited,
+    isVideo,
+    canFavoriteCurrent,
+    canRejectCurrent,
+    canLoadWorkflow,
+    showMetadataToggle,
+    canToggleMetadata,
+    resetIdleTimer,
+    handleDeleteClick,
+    handleToggleFavoriteClick,
+    handleRejectClick,
+    handleLoadWorkflowClick,
+    handleLoadInWorkflowClick,
+    handleToggleMetadata,
+    canDownloadCurrent,
+    handleDownloadClick,
+    handleToggleVideoPlayback,
+    followQueue,
+    setFollowQueue,
+    pinnedWidget,
+    pinOverlayOpen,
+    togglePinOverlay,
+  ]);
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!open || !showMetadataToggle) return;
+    if (!currentItem?.file) return;
+    if (currentItem.metadata) return;
+    // Never fetch for a video: the endpoint answers with the same-basename
+    // sibling image's metadata, which is not this file's to show.
+    if (isViewerVideo(currentItem)) return;
+    if (!fileId) return;
+    if (metadata !== undefined || metadataIsLoading) return;
+
+    const source = resolveFileSource(currentItem.file);
+    const path = resolveFilePath(currentItem.file, source);
+    setMetadataLoading((prev) => ({ ...prev, [fileId]: true }));
+    getImageMetadata(path, source)
+      .then((data) => {
+        const parsed = data?.prompt ? extractMetadata(data.prompt) : null;
+        const next = parsed && Object.keys(parsed).length > 0 ? parsed : null;
+        setMetadataById((prev) => ({ ...prev, [fileId]: next }));
+      })
+      .catch(() => {
+        setMetadataById((prev) => ({ ...prev, [fileId]: null }));
+      })
+      .finally(() => {
+        setMetadataLoading((prev) => ({ ...prev, [fileId]: false }));
+      });
+  }, [open, showMetadataToggle, currentItem, fileId, metadata, metadataIsLoading]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const fitHeightScale = useMemo(() => {
+    if (!baseSize || !containerSize) return null;
+    return containerSize.height / baseSize.height;
+  }, [baseSize, containerSize]);
+
+  const fitScale = useMemo(() => {
+    if (fitHeightScale === null) return 1;
+    return Math.min(1, fitHeightScale);
+  }, [fitHeightScale]);
+
+  const coverScale = useMemo(() => {
+    if (fitHeightScale === null) return 1;
+    return Math.max(1, fitHeightScale);
+  }, [fitHeightScale]);
+
+  const getBaseOffset = (nextScale = scale, baseOverride: { width: number; height: number } | null = baseSize) => {
+    if (!baseOverride || !containerSize) return { x: 0, y: 0 };
+    const scaledWidth = baseOverride.width * nextScale;
+    const scaledHeight = baseOverride.height * nextScale;
+    return {
+      x: scaledWidth < containerSize.width ? (containerSize.width - scaledWidth) / 2 : 0,
+      y: scaledHeight < containerSize.height ? (containerSize.height - scaledHeight) / 2 : 0,
+    };
+  };
+
+  const clampTranslate = useCallback((next: { x: number; y: number }, nextScale = scale) => {
+    if (!baseSize || !containerSize) return next;
+    const containerWidth = containerSize.width;
+    const containerHeight = containerSize.height;
+    const scaledWidth = baseSize.width * nextScale;
+    const scaledHeight = baseSize.height * nextScale;
+
+    const clampedX = scaledWidth <= containerWidth
+      ? 0
+      : Math.max(containerWidth - scaledWidth, Math.min(0, next.x));
+    const clampedY = scaledHeight <= containerHeight
+      ? 0
+      : Math.max(containerHeight - scaledHeight, Math.min(0, next.y));
+    return { x: clampedX, y: clampedY };
+  }, [baseSize, containerSize, scale]);
+
+  const clampTranslateRef = useRef(clampTranslate);
+
+  const applyZoomMode = useCallback((mode: 'fit' | 'cover') => {
+    let targetScale = fitScale;
+    switch (mode) {
+      case 'cover':
+        targetScale = coverScale;
+        break;
+      case 'fit':
+      default:
+        targetScale = fitScale;
+        break;
+    }
+    targetZoomModeRef.current = mode;
+    scaleRef.current = targetScale;
+    setScale(targetScale);
+    if (!baseSize || !containerSize) {
+      translateRef.current = { x: 0, y: 0 };
+      setTranslate({ x: 0, y: 0 });
+    } else {
+      const scaledWidth = baseSize.width * targetScale;
+      const scaledHeight = baseSize.height * targetScale;
+      const centered = {
+        x: (containerSize.width - scaledWidth) / 2,
+        y: (containerSize.height - scaledHeight) / 2,
+      };
+      const clamped = clampTranslate(centered, targetScale);
+      translateRef.current = clamped;
+      setTranslate(clamped);
+    }
+  }, [baseSize, clampTranslate, containerSize, coverScale, fitScale]);
+
+  const applyZoomModeRef = useRef(applyZoomMode);
+
+  useEffect(() => {
+    clampTranslateRef.current = clampTranslate;
+  }, [clampTranslate]);
+
+  useEffect(() => {
+    applyZoomModeRef.current = applyZoomMode;
+  }, [applyZoomMode]);
+
+  const handleImageError = () => {
+    // An error is "settled" too. The visible <img> is the only thing that marks
+    // the current src loaded, so without this a src that 404s leaves the
+    // spinner running forever — which is exactly what a moved output does: its
+    // old URL is still in the item list and answers 404 immediately.
+    // The adjacent-preload path has treated error as settled all along; this is
+    // the same rule for the image actually on screen.
+    const src = renderItem ? getFullScreenImageSrc(renderItem) : null;
+    markLoaded(src);
+    setFailedSrc(src ?? null);
+    // A deleted output answers 404 here; confirming that moves the viewer on
+    // instead of leaving the user parked on the error frame.
+    probeMissingMedia(renderItem);
+  };
+
+  const handleImageLoad = (event: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = event.currentTarget;
+    // The visible <img> is the only thing that marks the *current* src loaded on
+    // the no-swap path (initial open / follow-queue). Key off the same helper the
+    // spinner uses, not img.src, so the absolute-resolved URL doesn't mismatch.
+    markLoaded(renderItem ? getFullScreenImageSrc(renderItem) : null);
+    naturalSizeRef.current = { width: img.naturalWidth, height: img.naturalHeight };
+    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+    }
+    const container = containerRef.current;
+    if (!container || img.naturalWidth === 0) return;
+    const containerWidth = container.clientWidth;
+    const containerHeight = container.clientHeight;
+    const ratio = containerWidth / img.naturalWidth;
+    setBaseSize({ width: containerWidth, height: img.naturalHeight * ratio });
+    setContainerSize({ width: containerWidth, height: containerHeight });
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const img = imageRef.current;
+    const media = renderIsVideo ? videoRef.current : img;
+    const container = containerRef.current;
+    if (!media || !container) return;
+
+    // An already-cached image may be `complete` before React attaches onLoad, so
+    // handleImageLoad never fires — mark it loaded here so the spinner clears.
+    if (!renderIsVideo && img && renderFullSrc && img.complete && img.naturalWidth > 0) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- recording an already-decoded image into loadedSrcs
+      markLoaded(renderFullSrc);
+      setNaturalSize({ width: img.naturalWidth, height: img.naturalHeight });
+    }
+
+    const updateSizes = () => {
+      const natural = naturalSizeRef.current ?? readMediaNaturalSize(media);
+      naturalSizeRef.current = natural;
+      const containerWidth = container.clientWidth;
+      const containerHeight = container.clientHeight;
+      setContainerSize({ width: containerWidth, height: containerHeight });
+      if (!natural || natural.width === 0) return;
+      const ratio = containerWidth / natural.width;
+      const height = natural.height * ratio;
+      setBaseSize({ width: containerWidth, height });
+      const clamped = clampTranslateRef.current(translateRef.current);
+      translateRef.current = clamped;
+      setTranslate(clamped);
+    };
+
+    updateSizes();
+    const observer = new ResizeObserver(updateSizes);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [open, renderFullSrc, renderItem?.src, renderIsVideo, markLoaded]);
+
+  useEffect(() => {
+    if (!open || !baseSize || !containerSize) return;
+    applyZoomModeRef.current(targetZoomModeRef.current);
+  }, [open, renderItem?.src, baseSize, containerSize]);
+
+  useEffect(() => {
+    if (!open) return;
+    if (zoomResetKey === undefined) return;
+    applyZoomModeRef.current(targetZoomModeRef.current);
+  }, [open, zoomResetKey]);
+
+  const applyTransformToDOM = () => {
+    const media = imageRef.current ?? videoRef.current;
+    if (!media) return;
+    const s = scaleRef.current;
+    const t = translateRef.current;
+    const offset = getBaseOffset(s);
+    const transform = `translate3d(${offset.x + t.x}px, ${offset.y + t.y}px, 0) scale(${s})`;
+    media.style.transform = transform;
+    // In comparison mode, drive the A overlay with the same transform so both
+    // images zoom/pan together. Its clip tracks the screen-fixed divider, so it
+    // must be recomputed here too — otherwise the wipe boundary drifts off the
+    // divider as the image scales mid-gesture (the clip is a fraction of the
+    // image's own, now-larger, width).
+    const overlay = compareImageRef.current;
+    if (overlay && baseSize && containerSize) {
+      overlay.style.transform = transform;
+      overlay.style.clipPath = compareClipPath({
+        dividerX: comparePos * containerSize.width,
+        imageLeft: offset.x + t.x,
+        scaledWidth: baseSize.width * s,
+      });
+    }
+  };
+
+  const handlePointerDown = (event: React.PointerEvent) => {
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+
+    const pointers = getActivePointers(containerRef.current);
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (pointers.size === 1) {
+      transformGestureRef.current = false;
+      swipeRef.current = { x: event.clientX, y: event.clientY, time: Date.now() };
+      dragRef.current = { x: event.clientX - translateRef.current.x, y: event.clientY - translateRef.current.y };
+
+      const media = imageRef.current ?? videoRef.current;
+      if (media) media.style.transition = 'none';
+      if (compareImageRef.current) compareImageRef.current.style.transition = 'none';
+    } else if (pointers.size === 2) {
+      transformGestureRef.current = true;
+      const [a, b] = Array.from(pointers.values());
+      const distance = Math.hypot(b.x - a.x, b.y - a.y);
+      const centerX = (a.x + b.x) / 2;
+      const centerY = (a.y + b.y) / 2;
+      const rect = containerRef.current?.getBoundingClientRect();
+      const s = scaleRef.current;
+      const t = translateRef.current;
+      const baseOffset = getBaseOffset(s);
+      const imagePoint = rect
+        ? {
+            x: (centerX - rect.left - baseOffset.x - t.x) / s,
+            y: (centerY - rect.top - baseOffset.y - t.y) / s,
+          }
+        : undefined;
+      pinchRef.current = { distance, scale: s, centerX, centerY, imagePoint };
+    }
+  };
+
+  const handlePointerMove = (event: React.PointerEvent) => {
+    const pointers = getActivePointers(containerRef.current);
+    if (!pointers.has(event.pointerId)) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+
+    if (pointers.size === 2 && pinchRef.current) {
+      const pinch = pinchRef.current;
+      const [a, b] = Array.from(pointers.values());
+      const nextDistance = Math.hypot(b.x - a.x, b.y - a.y);
+      const minScale = fitScale;
+      const nextScale = Math.max(minScale, Math.min(5, pinch.scale * (nextDistance / pinch.distance)));
+      if (Math.abs(nextScale - pinch.scale) > 0.001) transformGestureRef.current = true;
+      scaleRef.current = nextScale;
+      const rect = containerRef.current?.getBoundingClientRect();
+      const centerX = (a.x + b.x) / 2;
+      const centerY = (a.y + b.y) / 2;
+      if (rect && pinch.imagePoint) {
+        const nextBaseOffset = getBaseOffset(nextScale);
+        const nextTranslate = {
+          x: centerX - rect.left - nextBaseOffset.x - pinch.imagePoint.x * nextScale,
+          y: centerY - rect.top - nextBaseOffset.y - pinch.imagePoint.y * nextScale,
+        };
+        translateRef.current = clampTranslate(nextTranslate, nextScale);
+      } else {
+        translateRef.current = clampTranslate(translateRef.current, nextScale);
+      }
+      applyTransformToDOM();
+      return;
+    }
+
+    if (pointers.size === 1) {
+      const s = scaleRef.current;
+      const canPan = s > 1 || (baseSize && containerRef.current && baseSize.height * s > containerRef.current.clientHeight + 1);
+      if (canPan && dragRef.current) {
+        const nextTranslate = clampTranslate({ x: event.clientX - dragRef.current.x, y: event.clientY - dragRef.current.y }, s);
+        if (
+          Math.abs(nextTranslate.x - translateRef.current.x) > 0.5
+          || Math.abs(nextTranslate.y - translateRef.current.y) > 0.5
+        ) {
+          transformGestureRef.current = true;
+        }
+        translateRef.current = nextTranslate;
+        applyTransformToDOM();
+      }
+    }
+  };
+
+  const handlePointerUp = (event: React.PointerEvent) => {
+    const pointers = getActivePointers(containerRef.current);
+    pointers.delete(event.pointerId);
+
+    if (pointers.size < 2) {
+      if (pointers.size === 1 && pinchRef.current) {
+        // Transitioning from pinch to single-finger drag — update drag offset
+        const [remaining] = Array.from(pointers.values());
+        dragRef.current = { x: remaining.x - translateRef.current.x, y: remaining.y - translateRef.current.y };
+      }
+      pinchRef.current = null;
+    }
+
+    if (pointers.size === 0) {
+      // Restore CSS transition before state updates so double-tap animates
+
+      const media = imageRef.current ?? videoRef.current;
+      if (media) media.style.transition = 'transform 0.05s linear';
+      if (compareImageRef.current) compareImageRef.current.style.transition = 'transform 0.05s linear';
+
+      if (transformGestureRef.current) {
+        transformGestureRef.current = false;
+        lastTapRef.current = null;
+        setScale(scaleRef.current);
+        setTranslate(translateRef.current);
+        dragRef.current = null;
+        return;
+      }
+
+      const now = Date.now();
+      const lastTap = lastTapRef.current;
+      const dxTap = lastTap ? event.clientX - lastTap.x : 0;
+      const dyTap = lastTap ? event.clientY - lastTap.y : 0;
+      const isDoubleTap = Boolean(
+        lastTap &&
+        now - lastTap.time < 300 &&
+        Math.hypot(dxTap, dyTap) < 24
+      );
+
+      if (isDoubleTap) {
+        lastTapRef.current = null;
+        const currentMode = targetZoomModeRef.current;
+        applyZoomMode(currentMode === 'fit' ? 'cover' : 'fit');
+        resetIdleTimer();
+      } else {
+        lastTapRef.current = { time: now, x: event.clientX, y: event.clientY };
+        const swipe = swipeRef.current;
+        if (!isInputFocused && swipe) {
+          const s = scaleRef.current;
+          const gesture = classifySwipe({
+            dx: event.clientX - swipe.x,
+            dy: event.clientY - swipe.y,
+            durationMs: Date.now() - swipe.time,
+            isFitOrCover:
+              Math.abs(s - fitScale) < 0.05 || Math.abs(s - coverScale) < 0.05,
+            canPanVertically: Boolean(
+              baseSize && containerSize && baseSize.height * s > containerSize.height + 1,
+            ),
+          });
+          if (gesture === 'next') {
+            if (index < items.length - 1) stepIndex(1);
+          } else if (gesture === 'previous') {
+            if (index > 0) stepIndex(-1);
+          } else if (gesture === 'close') {
+            onClose();
+          } else if (gesture === 'tap') {
+            if (chromeIdle) {
+              resetIdleTimer();
+            } else if (!selectionMode) {
+              if (idleTimerRef.current) {
+                clearTimeout(idleTimerRef.current);
+                idleTimerRef.current = null;
+              }
+              setIsIdle(true);
+            }
+          }
+        }
+        // Sync gesture state to React for rendering
+        setScale(scaleRef.current);
+        setTranslate(translateRef.current);
+      }
+
+      dragRef.current = null;
+    }
+  };
+
+  const handleWheel = useCallback((event: WheelEvent) => {
+    // No modifier: pan with the scroll wheel / trackpad (desktop). clampTranslate
+    // keeps a fit image centered, so this only moves the image when zoomed in.
+    if (!event.ctrlKey) {
+      event.preventDefault();
+      const next = clampTranslate(
+        {
+          x: translateRef.current.x - event.deltaX,
+          y: translateRef.current.y - event.deltaY,
+        },
+        scaleRef.current,
+      );
+      translateRef.current = next;
+      setTranslate(next);
+      return;
+    }
+
+    // Ctrl-scroll / trackpad pinch: zoom, anchored at the cursor so the image
+    // point under the pointer stays fixed on screen. The rendered transform is
+    //   screen = baseOffset(scale) + translate + localPx * scale   (origin top-left)
+    // so invert it at the old scale, then solve for the translate that keeps that
+    // point under the cursor at the new scale.
+    event.preventDefault();
+    const prevScale = scaleRef.current;
+    const delta = -event.deltaY * 0.005;
+    const nextScale = Math.max(fitScale, Math.min(5, prevScale + delta));
+    if (nextScale === prevScale) return;
+
+    // Anchor the zoom at the cursor: keep the image point currently under the
+    // pointer fixed on screen. The rendered transform is
+    //   screen = baseOffset(scale) + translate + localPx * scale   (origin top-left)
+    // so invert it at the old scale to get the local point, then solve for the
+    // translate that keeps it under the cursor at the new scale.
+    const container = containerRef.current;
+    const prevTranslate = translateRef.current;
+    let nextTranslate = prevTranslate;
+    if (container && baseSize && containerSize) {
+      const rect = container.getBoundingClientRect();
+      const cx = event.clientX - rect.left;
+      const cy = event.clientY - rect.top;
+      const baseOffset = (s: number) => {
+        const w = baseSize.width * s;
+        const h = baseSize.height * s;
+        return {
+          x: w < containerSize.width ? (containerSize.width - w) / 2 : 0,
+          y: h < containerSize.height ? (containerSize.height - h) / 2 : 0,
+        };
+      };
+      const prevOffset = baseOffset(prevScale);
+      const localX = (cx - prevOffset.x - prevTranslate.x) / prevScale;
+      const localY = (cy - prevOffset.y - prevTranslate.y) / prevScale;
+      const nextOffset = baseOffset(nextScale);
+      nextTranslate = {
+        x: cx - nextOffset.x - localX * nextScale,
+        y: cy - nextOffset.y - localY * nextScale,
+      };
+    }
+
+    scaleRef.current = nextScale;
+    setScale(nextScale);
+    const clamped = clampTranslate(nextTranslate, nextScale);
+    translateRef.current = clamped;
+    setTranslate(clamped);
+  }, [clampTranslate, fitScale, baseSize, containerSize]);
+
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    overlay.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      overlay.removeEventListener('wheel', handleWheel);
+    };
+  }, [handleWheel]);
+
+  if (!open) return null;
+
+  if (!currentItem && !showLoadingPlaceholder) {
+    return createPortal(
+      <div
+        className="fixed inset-0 bg-black flex flex-col items-center justify-center text-white"
+        style={{ zIndex: MEDIA_VIEWER_Z_INDEX }}
+        role="dialog"
+        aria-modal="true"
+      >
+        <CloseButton
+          onClick={onClose}
+          buttonSize={9}
+          iconSize={6}
+          zIndex={MEDIA_VIEWER_OVERLAY_Z_INDEX}
+        />
+        <p className="text-slate-300 mb-2">{t('No images to display')}</p>
+        <p className="text-slate-500 text-sm">images: {items.length}, index: {index}</p>
+      </div>,
+      document.body
+    );
+  }
+
+  // Shared zoom/pan transform — applied identically to both comparison images so
+  // they stay in sync, and to the single image otherwise.
+  const baseOffsetNow = getBaseOffset(scale);
+  const imageTransform = `translate3d(${baseOffsetNow.x + translate.x}px, ${baseOffsetNow.y + translate.y}px, 0) scale(${scale})`;
+  // Comparison divider geometry: a screen-fixed vertical line at `comparePos` of
+  // the container; image A is clipped to everything left of it. Converting the
+  // divider's screen X into a fraction of the (transformed) image width keeps the
+  // wipe consistent on the image content as it zooms/pans.
+  const compareDividerX = containerSize ? comparePos * containerSize.width : 0;
+  const compareClip = baseSize && containerSize
+    ? compareClipPath({
+        dividerX: compareDividerX,
+        imageLeft: baseOffsetNow.x + translate.x,
+        scaledWidth: baseSize.width * scale,
+      })
+    : DEFAULT_COMPARE_CLIP;
+
+  return createPortal(
+    <div
+      ref={overlayRef}
+      id="media-viewer-overlay"
+      className="fixed inset-0 bg-black"
+      style={{ zIndex: MEDIA_VIEWER_Z_INDEX }}
+    >
+      <div
+        ref={containerRef}
+        className="absolute inset-x-0 top-0 overflow-hidden touch-none"
+        style={{ overscrollBehavior: 'contain', height: 'calc(100vh - var(--bottom-bar-offset, 0px))', zIndex: 1 }}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+      >
+        {showLoadingPlaceholder ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-white">
+            {loadingPreviewSrc && (
+              <img
+                src={loadingPreviewSrc}
+                alt={t('Live preview')}
+                draggable={false}
+                className="latent-preview-image absolute inset-0 w-full h-full object-contain select-none"
+              />
+            )}
+            {/* With a preview behind it the spinner would just obscure the image,
+                so the progress bar alone sits in a legible chip near the bottom. */}
+            <div
+              className={loadingPreviewSrc
+                ? 'absolute bottom-24 flex flex-col items-center rounded-xl bg-slate-950/70 px-4 py-3 backdrop-blur-sm'
+                : 'flex flex-col items-center'}
+            >
+              {!loadingPreviewSrc && (
+                <div className="w-12 h-12 mb-4 border-4 border-slate-700 border-t-cyan-300 rounded-full animate-spin" />
+              )}
+              <div className="w-48 h-2 rounded-full bg-slate-800 overflow-hidden">
+                <div
+                  className="h-full bg-cyan-400 transition-all duration-300"
+                  style={{ width: `${Math.min(100, Math.max(0, loadingProgress))}%` }}
+                />
+              </div>
+              <div className="mt-2 text-sm text-slate-300">
+                {loadingLabel ?? `${Math.min(100, Math.max(0, loadingProgress))}%`}
+              </div>
+            </div>
+          </div>
+        ) : renderItem && (
+          <>
+            {renderIsVideo ? (
+              <>
+                <video
+                  // Key by src so swiping to another video remounts the element
+                  // and releases the previous decoder, instead of reusing one
+                  // element whose old (looping, autoplaying) stream keeps decoding.
+                  key={renderItem.src}
+                  ref={videoRef}
+                  src={getPlayableVideoUrl(renderItem.src)}
+                  poster={getMediaThumbnailUrlFromAssetUrl(renderItem.src)}
+                  autoPlay
+                  loop
+                  muted={videoMuted}
+                  playsInline
+                  preload="auto"
+                  className="w-full h-auto block select-none relative"
+                  style={{
+                    transform: imageTransform,
+                    transformOrigin: 'top left',
+                    willChange: 'transform',
+                    backfaceVisibility: 'hidden',
+                    WebkitBackfaceVisibility: 'hidden',
+                  }}
+                  onDragStart={(event) => event.preventDefault()}
+                  onError={(event) => {
+                    reportVideoPlaybackIssue('media viewer', 'error', event.currentTarget);
+                    setVideoError(true);
+                    probeMissingMedia(renderItem);
+                  }}
+                  onStalled={(event) => {
+                    reportVideoPlaybackIssue('media viewer', 'stalled', event.currentTarget);
+                  }}
+                  onLoadedMetadata={(event) => {
+                    const { videoWidth, videoHeight, duration, currentTime } = event.currentTarget;
+                    event.currentTarget.playbackRate = videoPlaybackRate;
+                    if (videoWidth > 0 && videoHeight > 0) {
+                      naturalSizeRef.current = { width: videoWidth, height: videoHeight };
+                      setNaturalSize({ width: videoWidth, height: videoHeight });
+                      const container = containerRef.current;
+                      if (container) {
+                        const containerWidth = container.clientWidth;
+                        const containerHeight = container.clientHeight;
+                        const ratio = containerWidth / videoWidth;
+                        setBaseSize({ width: containerWidth, height: videoHeight * ratio });
+                        setContainerSize({ width: containerWidth, height: containerHeight });
+                      }
+                    }
+                    setVideoDuration(Number.isFinite(duration) ? duration : 0);
+                    setVideoCurrentTime(Number.isFinite(currentTime) ? currentTime : 0);
+                  }}
+                  onDurationChange={(event) => {
+                    const duration = event.currentTarget.duration;
+                    setVideoDuration(Number.isFinite(duration) ? duration : 0);
+                  }}
+                  onTimeUpdate={(event) => setVideoCurrentTime(event.currentTarget.currentTime)}
+                  onPlay={handleVideoPlay}
+                  onPause={handleVideoPause}
+                  onVolumeChange={(event) => setVideoMuted(event.currentTarget.muted)}
+                />
+                {videoError && (
+                  <div className="absolute inset-0 flex items-center justify-center text-white text-sm bg-black/60">
+                    {t('Unable to play this video.')}
+                  </div>
+                )}
+              </>
+            ) : renderComparison ? (
+              <>
+                {/* Base (image B) — drives sizing/load and the shared transform. */}
+                <img
+                  ref={imageRef}
+                  src={getFullScreenImageSrc(renderItem)}
+                  alt={renderItem.alt || t('Comparison')}
+                  className="w-full h-auto block select-none relative"
+                  draggable={false}
+                  onLoad={handleImageLoad}
+                  onError={handleImageError}
+                  style={{
+                    transform: imageTransform,
+                    transformOrigin: 'top left',
+                    willChange: 'transform',
+                    backfaceVisibility: 'hidden',
+                    WebkitBackfaceVisibility: 'hidden',
+                  }}
+                />
+                {/* Overlay (image A) — same transform, clipped to the wipe. */}
+                <img
+                  ref={compareImageRef}
+                  src={renderComparison.aDisplaySrc ?? renderComparison.aSrc}
+                  alt={t('Comparison A')}
+                  className="absolute top-0 left-0 w-full h-auto block select-none pointer-events-none"
+                  draggable={false}
+                  style={{
+                    transform: imageTransform,
+                    transformOrigin: 'top left',
+                    clipPath: compareClip,
+                    willChange: 'transform',
+                    backfaceVisibility: 'hidden',
+                    WebkitBackfaceVisibility: 'hidden',
+                  }}
+                />
+              </>
+            ) : failedSrc && renderItem && failedSrc === getFullScreenImageSrc(renderItem) ? (
+              <div className="image-load-error flex flex-col items-center justify-center gap-1 p-8 text-center text-white/80">
+                <div className="text-sm">{t('Unable to load this image.')}</div>
+                <div className="text-xs text-white/50">
+                  {t('It may have been moved, renamed, or deleted.')}
+                </div>
+              </div>
+            ) : (
+              <img
+                ref={imageRef}
+                src={getFullScreenImageSrc(renderItem)}
+                alt={renderItem.alt || t('Generation')}
+                className="w-full h-auto block select-none relative"
+                draggable={false}
+                onLoad={handleImageLoad}
+                onError={handleImageError}
+                style={{
+                  transform: imageTransform,
+                  transformOrigin: 'top left',
+                  willChange: 'transform',
+                  backfaceVisibility: 'hidden',
+                  WebkitBackfaceVisibility: 'hidden',
+                }}
+              />
+            )}
+          </>
+        )}
+        {/* Comparison wipe divider + draggable handle (screen-fixed; the image
+            zooms/pans beneath it). The handle captures the pointer so dragging it
+            never pans the image. */}
+        {renderComparison && containerSize && (
+          <div
+            className="pointer-events-none absolute top-0 bottom-0 z-[3] w-0.5 -translate-x-1/2 bg-white/90"
+            style={{ left: compareDividerX }}
+          >
+            <div
+              className="pointer-events-auto absolute left-1/2 flex h-12 w-12 -translate-x-1/2 -translate-y-1/2 cursor-ew-resize touch-none items-center justify-center rounded-full bg-[#fff] text-slate-600 shadow-md"
+              style={{ top: `${compareHandleTop * 100}%` }}
+              onPointerDown={handleCompareDividerDown}
+              onPointerMove={handleCompareDividerMove}
+            >
+              <MenuIcon className="h-5 w-5 rotate-90" />
+            </div>
+          </div>
+        )}
+
+        {/* Loading spinner over the image while the current one decodes — mirrors
+            the server-restart overlay's dual-ring spinner. */}
+        {!showLoadingPlaceholder && showImageSpinner && (
+          <div
+            role="status"
+            aria-label={t('Loading image')}
+            className="image-loading-spinner pointer-events-none absolute inset-0 z-[2] flex items-center justify-center"
+          >
+            <div className="relative h-24 w-24">
+              <div className="absolute inset-0 rounded-full border-4 border-cyan-400/25" />
+              <div className="absolute inset-0 rounded-full border-4 border-transparent border-t-cyan-300 animate-spin" />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <CloseButton
+        onClick={onClose}
+        buttonSize={9}
+        iconSize={6}
+        isIdle={chromeIdle}
+        zIndex={MEDIA_VIEWER_OVERLAY_Z_INDEX}
+      />
+
+      {currentItem && !isComparisonMode && isVideo && (
+        <PlaybackSpeedControls
+          rate={videoPlaybackRate}
+          open={playbackSpeedOpen}
+          isIdle={chromeIdle}
+          zIndex={MEDIA_VIEWER_OVERLAY_Z_INDEX + 2}
+          rightInset={rightControlsInset}
+          onOpenChange={handlePlaybackSpeedOpenChange}
+          onRateChange={handlePlaybackRateChange}
+          onInteractionStart={handlePlaybackSpeedInteractionStart}
+          onInteractionEnd={handlePlaybackSpeedInteractionEnd}
+        />
+      )}
+
+      {/* Idle state badges: when the controls fade out, keep the favorite/reject
+          state visible by parking a bare icon in the viewer frame's bottom
+          corners — reject bottom-left, favorite bottom-right. Pinned to the
+          frame, not the image, so letterboxed media (landscape in portrait)
+          doesn't strand the icons mid-screen. Cross-fades with the action bar
+          (which shows the same state as buttons while active). */}
+      {(currentIsRejected || currentIsFavorited) && (
+        <div
+          className={`media-viewer-idle-state-badges absolute inset-x-0 top-0 pointer-events-none transition-opacity duration-300 ${
+            chromeIdle ? 'opacity-100' : 'opacity-0'
+          }`}
+          style={{
+            height: 'calc(100vh - var(--bottom-bar-offset, 0px))',
+            zIndex: MEDIA_VIEWER_OVERLAY_Z_INDEX,
+          }}
+        >
+          {/* 16px offsets centre the 28px icons on the same point as the
+              36px action-bar discs (12px inset), so the badge sits exactly
+              where the button circle fades out. */}
+          {currentIsRejected && (
+            <div className="absolute bottom-4 left-4">
+              <RejectedIcon className="w-7 h-7 drop-shadow-lg" />
+            </div>
+          )}
+          {currentIsFavorited && (
+            <div className="absolute bottom-4 right-4">
+              <HeartIcon className="w-7 h-7 text-red-500 drop-shadow-lg" />
+            </div>
+          )}
+        </div>
+      )}
+
+      <div
+        className={`absolute inset-0 pointer-events-none transition-opacity duration-300 ${
+          chromeIdle ? 'opacity-0' : 'opacity-100'
+        }`}
+        style={{ zIndex: MEDIA_VIEWER_OVERLAY_Z_INDEX }}
+      >
+        {/* In comparison mode the only chrome is the close button (rendered
+            separately above) — no header/actions/metadata. */}
+        {currentItem && !isComparisonMode && (
+          <>
+            {isVideo && (
+              <div
+                className="video-mute-toggle-container absolute top-14"
+                style={{ right: rightControlsInset ? `calc(0.75rem + ${rightControlsInset})` : '0.75rem' }}
+              >
+                <OverlayCircleButton
+                  onClick={handleToggleVideoMuted}
+                  ariaLabel={videoMuted ? t('Unmute') : t('Mute')}
+                  ariaPressed={videoMuted}
+                  className="text-white"
+                  icon={videoMuted
+                    ? <SpeakerXIcon className="h-5 w-5" />
+                    : <SpeakerWaveIcon className="h-5 w-5" />}
+                />
+              </div>
+            )}
+            <MediaViewerHeader
+              index={index}
+              total={items.length}
+              displayName={displayName}
+              resolution={naturalSize}
+              rightInset={rightControlsInset}
+              selectionCount={selectionMode ? selectedCount : null}
+            />
+            <MediaViewerActions
+              isVideo={isVideo}
+              canLoadWorkflow={canLoadWorkflow}
+              showMetadataToggle={metadataToggleAvailable}
+              canToggleMetadata={canToggleMetadata}
+              canFavorite={canFavoriteCurrent}
+              isFavorited={currentIsFavorited}
+              canReject={canRejectCurrent}
+              isRejected={currentIsRejected}
+              canDownload={canDownloadCurrent}
+              pickLabel={canPickCurrent ? pickAction?.label : undefined}
+              onPick={canPickCurrent ? handlePickClick : undefined}
+              // Favorited items can't be deleted — keep the button visible but
+              // disabled so the protection is discoverable.
+              deleteDisabled={currentIsFavorited}
+              loadWorkflowProgress={loadWorkflowProgress}
+              onDelete={handleDeleteClick}
+              onLoadWorkflow={handleLoadWorkflowClick}
+              onUseInWorkflow={handleLoadInWorkflowClick}
+              onToggleMetadata={handleToggleMetadata}
+              onToggleFavorite={handleToggleFavoriteClick}
+              onReject={handleRejectClick}
+              onDownload={handleDownloadClick}
+              downloadFileId={fileId}
+              onDownloadLoadingChange={handleDownloadLoadingChange}
+              rightInset={rightControlsInset}
+              selectionMode={selectionMode}
+              isSelected={currentIsSelected}
+              onToggleSelection={onToggleSelection ? handleToggleSelectionClick : undefined}
+            />
+            {isVideo && (
+              <VideoPlaybackControls
+                playing={videoPlaying}
+                currentTime={videoCurrentTime}
+                duration={videoDuration}
+                videoWidth={renderedVideoWidth}
+                isIdle={chromeIdle}
+                onTogglePlayback={handleToggleVideoPlayback}
+                onSeek={handleVideoSeek}
+                onInteractionStart={handlePlaybackSpeedInteractionStart}
+                onInteractionEnd={resetIdleTimer}
+              />
+            )}
+            <MediaViewerMetadata
+              isVideo={isVideo}
+              showMetadataToggle={metadataToggleAvailable}
+              showMetadataOverlay={showMetadataOverlay}
+              metadataIsLoading={metadataIsLoading}
+              metadata={metadata}
+              durationLabel={durationLabel}
+            />
+          </>
+        )}
+      </div>
+      {/* Selected-item frame. Rendered last and one layer above the rest of the
+          overlay so it reads as a frame AROUND the controls rather than
+          something they sit on top of.
+
+          The inner element's huge box-shadow spread paints everything outside
+          it, and the clipping parent trims that — so the outer edge meets the
+          viewer's corners squarely while the inner edge stays rounded, like the
+          ring on an outputs card. A plain border would round both. Height stops
+          at the bottom bar, since that is chrome outside the viewer. */}
+      {selectionMode && currentIsSelected && (
+        <div
+          className="media-viewer-selected-frame pointer-events-none absolute inset-x-0 top-0 overflow-hidden"
+          style={{
+            height: 'calc(100% - var(--bottom-bar-offset, 0px))',
+            zIndex: MEDIA_VIEWER_OVERLAY_Z_INDEX + 1,
+          }}
+          aria-hidden="true"
+        >
+          <div
+            className="absolute inset-[3px] rounded-lg"
+            style={{ boxShadow: '0 0 0 100vmax rgb(34 211 238)' }}
+          />
+        </div>
+      )}
+
+      {/* Download toast — anchored just above the action-button row so a tap
+          on Download sees its feedback right where the eye is. Created
+          inside the viewer's overlay portal so it auto-unmounts when the
+          viewer closes (the user can't end up watching a "Saving…" toast
+          for a viewer they already dismissed). */}
+      {downloadToast && (
+        <div
+          className={`absolute left-1/2 -translate-x-1/2 pointer-events-none px-4 py-2 rounded-lg text-sm font-medium shadow-lg backdrop-blur-md border border-white/10 ${
+            downloadToast.tone === 'success'
+              ? 'bg-emerald-900/85 text-emerald-50'
+              : downloadToast.tone === 'error'
+                ? 'bg-red-900/85 text-red-50'
+                : 'bg-slate-900/85 text-slate-100'
+          }`}
+          style={{
+            bottom: 'calc(var(--bottom-bar-offset, 0px) + 64px)',
+            zIndex: MEDIA_VIEWER_OVERLAY_Z_INDEX + 1,
+          }}
+        >
+          {downloadToast.message}
+        </div>
+      )}
+    </div>,
+    document.body
+  );
+}
+
+function getActivePointers(element: HTMLDivElement | null): Map<number, { x: number; y: number }> {
+  const anyElement = element as unknown as { __activePointers?: Map<number, { x: number; y: number }> } | null;
+  if (!anyElement) return new Map();
+  if (!anyElement.__activePointers) {
+    anyElement.__activePointers = new Map();
+  }
+  return anyElement.__activePointers;
+}
+
+function formatDuration(seconds?: number): string {
+  const safeSeconds = seconds === undefined || Number.isNaN(seconds) ? 0 : seconds;
+  if (safeSeconds === 0) return '';
+  if (safeSeconds < 10) return `${safeSeconds.toFixed(1)}s`;
+  return `${Math.round(safeSeconds)}s`;
+}

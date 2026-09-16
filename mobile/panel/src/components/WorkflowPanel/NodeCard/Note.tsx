@@ -1,0 +1,77 @@
+import type { RefObject } from 'react';
+import { TextareaActions } from '../../InputControls/TextareaActions';
+import { useI18n } from '@/i18n';
+
+interface NodeCardNoteProps {
+  noteText: string;
+  noteBody: React.ReactNode;
+  isMarkdown: boolean;
+  noteWidgetIndex: number | null;
+  isEditingNote: boolean;
+  setIsEditingNote: (next: boolean) => void;
+  onUpdateNote: (value: string) => void;
+  noteTextareaRef: RefObject<HTMLTextAreaElement | null>;
+  onNoteTap: () => void;
+}
+
+export function NodeCardNote({
+  noteText,
+  noteBody,
+  isMarkdown,
+  noteWidgetIndex,
+  isEditingNote,
+  setIsEditingNote,
+  onUpdateNote,
+  noteTextareaRef,
+  onNoteTap
+}: NodeCardNoteProps) {
+  const { t } = useI18n();
+  const handleNoteUpdate = (value: string) => {
+    if (noteWidgetIndex === null) return;
+    onUpdateNote(value);
+  };
+
+  const handleTextareaChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    if (noteWidgetIndex === null) return;
+    onUpdateNote(event.target.value);
+  };
+
+  return (
+    <div className="mb-3 group" data-textarea-root="true">
+      <div className="flex items-center justify-between mb-1.5" data-textarea-header="true">
+        <div className="text-xs text-slate-500 uppercase tracking-wide">
+          {t('Note')}
+        </div>
+        {isEditingNote && (
+          <TextareaActions
+            value={noteText}
+            onChange={handleNoteUpdate}
+            textareaRef={noteTextareaRef}
+            className="opacity-70 transition-opacity group-focus-within:opacity-100"
+          />
+        )}
+      </div>
+      {isEditingNote ? (
+        <textarea
+          ref={noteTextareaRef}
+          value={noteText}
+          onChange={handleTextareaChange}
+          onBlur={() => setIsEditingNote(false)}
+          data-swipe-nav-ignore="true"
+          className="w-full p-3 border rounded-lg text-base resize-none note-display"
+          rows={Math.min(8, Math.max(3, noteText.split('\n').length))}
+        />
+      ) : (
+        <div
+          className={`w-full p-3 border rounded-lg text-base break-words note-display${
+            isMarkdown ? ' note-markdown' : ' whitespace-pre-wrap'
+          }`}
+          onDoubleClick={() => setIsEditingNote(true)}
+          onTouchEnd={onNoteTap}
+        >
+          {noteBody}
+        </div>
+      )}
+    </div>
+  );
+}

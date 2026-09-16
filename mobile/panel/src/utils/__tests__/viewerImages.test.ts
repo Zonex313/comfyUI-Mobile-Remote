@@ -1,0 +1,206 @@
+import { describe, expect, it } from 'vitest';
+import {
+  buildOutputPreferredViewerImages,
+  buildViewerImages,
+  ensureViewerImageIdentity,
+  fileIdFromAssetUrl,
+  getHistoryImageFileId,
+  type HistoryImageItem,
+} from '../viewerImages';
+
+describe('buildViewerImages', () => {
+  const items: HistoryImageItem[] = [
+    {
+      outputs: {
+        images: [
+          { filename: 'saved-a.png', subfolder: 'out', type: 'output' },
+          { filename: 'preview-a.png', subfolder: 'tmp', type: 'temp' },
+          { filename: 'saved-b.png', subfolder: 'out', type: 'output' },
+        ],
+      },
+      prompt: {},
+    },
+  ];
+
+  it('includes preview/temp images by default and preserves source order', () => {
+    const images = buildViewerImages(items, { alt: 'Generation' });
+    expect(images.map((img) => img.filename)).toEqual([
+      'saved-a.png',
+      'preview-a.png',
+      'saved-b.png',
+    ]);
+  });
+
+  it('can filter to output-only images when requested', () => {
+    const images = buildViewerImages(items, { onlyOutput: true, alt: 'Generation' });
+    expect(images.map((img) => img.filename)).toEqual([
+      'saved-a.png',
+      'saved-b.png',
+    ]);
+  });
+
+  it('prefers output images and skips previews when outputs exist', () => {
+    const images = buildOutputPreferredViewerImages(items, { alt: 'Generation' });
+    expect(images.map((img) => img.filename)).toEqual([
+      'saved-a.png',
+      'saved-b.png',
+    ]);
+  });
+
+  it('falls back to previews when there are no output images', () => {
+    const previewOnlyItems: HistoryImageItem[] = [
+      {
+        outputs: {
+          images: [
+            { filename: 'preview-a.png', subfolder: 'tmp', type: 'temp' },
+            { filename: 'preview-b.png', subfolder: 'tmp', type: 'temp' },
+          ],
+        },
+        prompt: {},
+      },
+    ];
+
+    const images = buildOutputPreferredViewerImages(previewOnlyItems, { alt: 'Generation' });
+    expect(images.map((img) => img.filename)).toEqual([
+      'preview-a.png',
+      'preview-b.png',
+    ]);
+  });
+
+  it('preserves execution cache identity in viewer URLs', () => {
+    const [image] = buildViewerImages([{
+      outputs: {
+        images: [{
+          filename: 'reused.png',
+          subfolder: '',
+          type: 'output',
+          cacheToken: 'prompt-new',
+        }],
+      },
+      prompt: {},
+    }]);
+
+    expect(image.src).toContain('&cb=prompt-new');
+    expect(image.displaySrc).toContain('&cb=prompt-new');
+    expect(image.file?.fullUrl).toContain('&cb=prompt-new');
+  });
+
+  it('applies the output preference per item in a mixed history', () => {
+    const mixedItems: HistoryImageItem[] = [
+      {
+        outputs: {
+          images: [
+            { filename: 'newest-preview.png', subfolder: 'tmp', type: 'temp' },
+          ],
+        },
+        prompt: {},
+      },
+      {
+        outputs: {
+          images: [
+            { filename: 'older-saved.png', subfolder: 'out', type: 'output' },
+            { filename: 'older-preview.png', subfolder: 'tmp', type: 'temp' },
+          ],
+        },
+        prompt: {},
+      },
+    ];
+
+    const images = buildOutputPreferredViewerImages(mixedItems, { alt: 'Generation' });
+    expect(images.map((img) => img.filename)).toEqual([
+      'newest-preview.png',
+      'older-saved.png',
+    ]);
+  });
+});
+
+describe('getHistoryImageFileId', () => {
+  it('matches output favorite IDs for root files', () => {
+    expect(getHistoryImageFileId({
+      filename: 'image.png',
+      subfolder: '',
+      type: 'output',
+    })).toBe('output/image.png');
+  });
+
+  it('matches output favorite IDs for nested files', () => {
+    expect(getHistoryImageFileId({
+      filename: 'image.png',
+      subfolder: 'nested/folder',
+      type: 'output',
+    })).toBe('output/nested/folder/image.png');
+  });
+});
+
+describe('fileIdFromAssetUrl', () => {
+  it('derives the same id getHistoryImageFileId produces for /view URLs', () => {
+    const url = '/view?filename=image.png&subfolder=nested/folder&type=output';
+    expect(fileIdFromAssetUrl(url)).toBe('output/nested/folder/image.png');
+  });
+
+  it('handles a missing subfolder', () => {
+    const url = '/view?filename=image.png&type=output';
+    expect(fileIdFromAssetUrl(url)).toBe('output/image.png');
+  });
+
+  it('returns null for non-asset URLs', () => {
+    expect(fileIdFromAssetUrl('blob:https://example.com/abc')).toBeNull();
+    expect(fileIdFromAssetUrl('/view?type=output')).toBeNull();
+  });
+});
+
+describe('fileIdFromAssetUrl source parameter', () => {
+  it('reads the source from a thumbnail URL, which spells it `source`', () => {
+    // ComfyUI's /view uses `type`; this node's thumbnail/preview endpoints use
+    // `source`. Reading only `type` returned null for every grid thumbnail, so
+    // a download initiated from the grid was recorded against no id at all.
+    expect(fileIdFromAssetUrl('/mobile/api/thumbnail?filename=a.png&subfolder=&source=output'))
+      .toBe('output/a.png');
+    expect(fileIdFromAssetUrl('/mobile/api/thumbnail?filename=b.png&subfolder=run&source=temp'))
+      .toBe('temp/run/b.png');
+  });
+
+  it('still reads /view URLs, which spell it `type`', () => {
+    expect(fileIdFromAssetUrl('/view?filename=c.png&subfolder=&type=output'))
+      .toBe('output/c.png');
+  });
+});
+
+describe('ensureViewerImageIdentity', () => {
+  it('leaves an item that already knows which file it is exactly as it was', () => {
+    const item = {
+      src: '/view?filename=a.png&subfolder=&type=output',
+      filename: 'a.png',
+      file: { id: 'output/a.png', name: 'a.png', type: 'image' as const },
+    };
+    // Reference equality matters, not just deep equality: the viewer store's
+    // list-extension effects compare arrays by identity to avoid re-firing on
+    // their own writes.
+    expect(ensureViewerImageIdentity(item)).toBe(item);
+  });
+
+  it('derives filename and file from the asset URL when a producer forgot them', () => {
+    // Without this the viewer titles itself from the alt text ("Generation")
+    // and favourite, reject, delete and download all sit inert, because every
+    // one of them is gated on `file`.
+    const restored = ensureViewerImageIdentity({
+      src: '/view?filename=clip.mp4&subfolder=run&type=output',
+      alt: 'Generation',
+    });
+    expect(restored.filename).toBe('clip.mp4');
+    expect(restored.mediaType).toBe('video');
+    expect(restored.file).toEqual({
+      id: 'output/run/clip.mp4',
+      name: 'clip.mp4',
+      type: 'video',
+      fullUrl: '/view?filename=clip.mp4&subfolder=run&type=output',
+    });
+  });
+
+  it('invents nothing for a source that names no file', () => {
+    // A latent preview is a blob: URL with no file behind it; giving it an
+    // identity would point delete and favourite at something that isn't there.
+    const preview = { src: 'blob:http://localhost/abcd', alt: 'Live preview' };
+    expect(ensureViewerImageIdentity(preview)).toBe(preview);
+  });
+});

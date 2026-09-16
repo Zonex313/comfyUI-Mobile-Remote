@@ -1,0 +1,1236 @@
+import { describe, expect, it } from 'vitest';
+import type { NodeTypes, Workflow, WorkflowNode } from '@/api/types';
+import { expandWorkflowSubgraphs } from '@/utils/expandWorkflowSubgraphs';
+import {
+  getWidgetDefinitions,
+  getPlaceholderWidgetIndexForInput,
+  getSubgraphBoundaryWidgetIndexForSlot,
+  isPlaceholderPromotedConnection,
+  PROXY_INDEX_OFFSET,
+  resolveSubgraphPlaceholderInputWidgetDefs,
+  resolveSubgraphPlaceholderWidgetDefs,
+  resolveSubgraphProxyInputWidgetDefs,
+  resolveSubgraphProxyWidgetDefs,
+  resolveSubgraphBoundaryWidgetDefs,
+  resolveSubgraphBoundaryInputWidgetDefs,
+} from '../widgetDefinitions';
+
+function makeNode(id: number, type: string, widgetsValues: unknown[]): WorkflowNode {
+  return {
+    id,
+    itemKey: `sk-${id}`,
+    type,
+    pos: [0, 0],
+    size: [200, 100],
+    flags: {},
+    order: 0,
+    mode: 0,
+    inputs: [],
+    outputs: [],
+    properties: {},
+    widgets_values: widgetsValues,
+  };
+}
+
+describe('widgetDefinitions lora manager support', () => {
+  it('builds lora manager synthetic widgets with choices from LoraLoader', () => {
+    const nodeTypes: NodeTypes = {
+      LoraLoader: {
+        input: {
+          required: {
+            lora_name: ['COMBO', { choices: ['a.safetensors', 'b.safetensors'] }],
+          },
+        },
+        output: [],
+        output_name: [],
+        name: 'LoraLoader',
+        display_name: 'LoraLoader',
+        description: '',
+        python_module: '',
+        category: '',
+      },
+    };
+
+    const node = makeNode(1, 'Lora Loader (LoraManager)', [
+      'text',
+      [{ name: 'a.safetensors', strength: 1, active: true }],
+    ]);
+
+    const defs = getWidgetDefinitions(nodeTypes, node);
+    expect(defs.map((d) => d.type)).toContain('LM_LORA_HEADER');
+    expect(defs.map((d) => d.type)).toContain('LM_LORA');
+    expect(defs.map((d) => d.type)).toContain('LM_LORA_ADD');
+
+    const loraDef = defs.find((d) => d.type === 'LM_LORA');
+    expect(loraDef?.options).toMatchObject({ entryIndex: 0 });
+  });
+
+  it.each([
+    [
+      'legacy array combo',
+      ['a.safetensors', 'b.safetensors'] as unknown as string,
+      undefined as Record<string, unknown> | undefined,
+    ],
+    [
+      'V3 string-typed combo',
+      'COMBO',
+      { options: ['a.safetensors', 'b.safetensors'] },
+    ],
+  ])('reads LoraLoader choices from a %s', (_label, typeOrOptions, options) => {
+    const nodeTypes: NodeTypes = {
+      LoraLoader: {
+        input: { required: { lora_name: [typeOrOptions, options] } },
+        output: [],
+        output_name: [],
+        name: 'LoraLoader',
+        display_name: 'LoraLoader',
+        description: '',
+        python_module: '',
+        category: '',
+      },
+    } as unknown as NodeTypes;
+
+    const node = makeNode(1, 'Lora Loader (LoraManager)', [
+      'text',
+      [{ name: 'a.safetensors', strength: 1, active: true }],
+    ]);
+
+    const loraDef = getWidgetDefinitions(nodeTypes, node).find((d) => d.type === 'LM_LORA');
+    // An empty list here silently drops every choice from the lora picker.
+    expect(loraDef?.options).toMatchObject({
+      choices: ['a.safetensors', 'b.safetensors'],
+    });
+  });
+
+  it('uses LoRA Manager widget ids to skip metadata widgets', () => {
+    const nodeTypes: NodeTypes = {
+      'Lora Loader (LoraManager)': {
+        input: {
+          required: {
+            text: ['AUTOCOMPLETE_TEXT_LORAS', {}],
+          },
+          optional: {},
+        },
+        input_order: {
+          required: ['text'],
+          optional: [],
+        },
+        output: [],
+        output_name: [],
+        name: 'Lora Loader (LoraManager)',
+        display_name: 'Lora Loader (LoraManager)',
+        description: '',
+        python_module: '',
+        category: '',
+      },
+    };
+
+    const node = makeNode(1, 'Lora Loader (LoraManager)', [
+      { version: 1, textWidgetName: 'text' },
+      '<lora:a:1.00>',
+      [{ name: 'a', strength: 1, active: true }],
+    ]);
+    node.properties = {
+      __lm_widget_ids: ['__lm_autocomplete_meta_text', 'text', 'loras'],
+    };
+
+    const defs = getWidgetDefinitions(nodeTypes, node);
+    const textDef = defs.find((def) => def.name === 'text');
+    expect(textDef).toMatchObject({
+      value: '<lora:a:1.00>',
+      widgetIndex: 1,
+    });
+    expect(defs.find((def) => def.type === 'LM_LORA')).toMatchObject({
+      widgetIndex: 2,
+    });
+  });
+
+  it('does not synthesize a phantom lora list for LoRA Text Loader nodes without a list widget', () => {
+    const nodeTypes: NodeTypes = {
+      'LoRA Text Loader (LoraManager)': {
+        input: {
+          required: {
+            lora_syntax: ['STRING'],
+          },
+          optional: {},
+        },
+        input_order: {
+          required: ['lora_syntax'],
+          optional: [],
+        },
+        output: [],
+        output_name: [],
+        name: 'LoRA Text Loader (LoraManager)',
+        display_name: 'LoRA Text Loader (LoraManager)',
+        description: '',
+        python_module: '',
+        category: '',
+      },
+    };
+
+    const node = makeNode(11, 'LoRA Text Loader (LoraManager)', ['<lora:foo:0.8>']);
+    const defs = getWidgetDefinitions(nodeTypes, node);
+
+    expect(defs).toHaveLength(1);
+    expect(defs[0]).toMatchObject({
+      name: 'lora_syntax',
+      value: '<lora:foo:0.8>',
+      widgetIndex: 0,
+    });
+    expect(defs.some((def) => def.type === 'LM_LORA')).toBe(false);
+    expect(defs.some((def) => def.type === 'LM_LORA_ADD')).toBe(false);
+  });
+
+  it('builds trigger-word synthetic widgets and carries allowStrengthAdjustment', () => {
+    const nodeTypes: NodeTypes = {
+      'TriggerWord Toggle (LoraManager)': {
+        input: {
+          required: {
+            allow_strength_adjustment: ['BOOLEAN', {}],
+          },
+          optional: {},
+        },
+        input_order: {
+          required: ['allow_strength_adjustment'],
+          optional: [],
+        },
+        output: [],
+        output_name: [],
+        name: 'TriggerWord Toggle (LoraManager)',
+        display_name: 'TriggerWord Toggle (LoraManager)',
+        description: '',
+        python_module: '',
+        category: '',
+      },
+    };
+
+    const node = makeNode(2, 'TriggerWord Toggle (LoraManager)', [
+      true,
+      [{ text: 'foo', active: true, strength: 0.4 }],
+      'foo',
+    ]);
+
+    const defs = getWidgetDefinitions(nodeTypes, node);
+    const tw = defs.find((d) => d.type === 'TW_WORD');
+    expect(tw?.options).toMatchObject({ entryIndex: 0, allowStrengthAdjustment: true });
+  });
+
+  it('builds standard widget definitions for regular nodes', () => {
+    const nodeTypes: NodeTypes = {
+      TestNode: {
+        input: {
+          required: {
+            steps: ['INT', {}],
+          },
+          optional: {},
+        },
+        output: [],
+        output_name: [],
+        name: 'TestNode',
+        display_name: 'TestNode',
+        description: '',
+        python_module: '',
+        category: '',
+      },
+    };
+
+    const node = makeNode(3, 'TestNode', [20]);
+    const defs = getWidgetDefinitions(nodeTypes, node);
+    expect(defs).toHaveLength(1);
+    expect(defs[0]).toMatchObject({ name: 'steps', type: 'INT', value: 20 });
+  });
+
+  it('synthesizes proxied EasySeed control_after_generate from the inner seed control slot', () => {
+    const innerSeed = makeNode(915, 'easy seed', [123, 'randomize', null]);
+    innerSeed.title = 'EasySeed';
+    innerSeed.outputs = [{ name: 'seed', type: 'INT', links: [] }];
+
+    const placeholder = makeNode(911, 'subgraph-a', []);
+    placeholder.properties = {
+      proxyWidgets: [
+        ['915', 'seed'],
+        ['915', 'control_after_generate'],
+      ],
+    };
+
+    const workflow: Workflow = {
+      last_node_id: 915,
+      last_link_id: 0,
+      nodes: [placeholder],
+      links: [],
+      groups: [],
+      config: {},
+      version: 1,
+      definitions: {
+        subgraphs: [
+          {
+            id: 'subgraph-a',
+            nodes: [innerSeed],
+            links: [],
+            groups: [],
+            config: {},
+          },
+        ],
+      },
+    };
+
+    const inputDefs = resolveSubgraphProxyInputWidgetDefs(
+      placeholder,
+      workflow,
+      null,
+    );
+
+    expect(inputDefs).toHaveLength(1);
+    expect(inputDefs[0]).toMatchObject({
+      name: 'EasySeed: control_after_generate',
+      type: 'COMBO',
+      value: 'randomize',
+      widgetIndex: PROXY_INDEX_OFFSET + 1,
+      options: {
+        options: ['fixed', 'randomize', 'increment', 'decrement'],
+        __proxy: {
+          subgraphId: 'subgraph-a',
+          innerNodeId: 915,
+          innerWidgetIndex: 1,
+          innerWidgetName: 'control_after_generate',
+        },
+      },
+    });
+  });
+
+  it('resolves proxyWidgets entries that use qualified DynamicCombo child names', () => {
+    const dynTypes: NodeTypes = {
+      Resize: {
+        input: {
+          required: {
+            resize_type: ['COMFY_DYNAMICCOMBO_V3', {
+              options: [
+                { key: 'by factor', inputs: { required: { factor: ['FLOAT', { default: 2.0 }] } } },
+              ],
+            }],
+          },
+          optional: {},
+        },
+        output: [],
+        output_name: [],
+        name: 'Resize',
+        display_name: 'Resize',
+        description: '',
+        python_module: '',
+        category: '',
+      },
+    };
+
+    const inner = makeNode(21, 'Resize', ['by factor', 2.5]);
+    const placeholder = makeNode(20, 'subgraph-dyn', []);
+    // Desktop serializes dynamic children under their qualified names.
+    placeholder.properties = {
+      proxyWidgets: [['21', 'resize_type.factor']],
+    };
+
+    const workflow: Workflow = {
+      last_node_id: 21,
+      last_link_id: 0,
+      nodes: [placeholder],
+      links: [],
+      groups: [],
+      config: {},
+      version: 1,
+      definitions: {
+        subgraphs: [
+          {
+            id: 'subgraph-dyn',
+            nodes: [inner],
+            links: [],
+            groups: [],
+            config: {},
+          },
+        ],
+      },
+    };
+
+    const defs = resolveSubgraphProxyWidgetDefs(placeholder, workflow, dynTypes);
+
+    expect(defs).toHaveLength(1);
+    expect(defs[0]).toMatchObject({
+      value: 2.5,
+      widgetIndex: PROXY_INDEX_OFFSET,
+      options: {
+        __proxy: {
+          subgraphId: 'subgraph-dyn',
+          innerNodeId: 21,
+          innerWidgetIndex: 1,
+          innerWidgetName: 'resize_type.factor',
+        },
+      },
+    });
+  });
+
+  it('resolves promoted subgraph placeholder combo values from linked source nodes', () => {
+    const sourceNode = makeNode(100, 'PrimitiveNode', ['euler']);
+    sourceNode.outputs = [{ name: 'sampler_name', type: 'COMBO', links: [55] }];
+
+    const placeholder = makeNode(200, 'subgraph-a', []);
+    placeholder.inputs = [
+      {
+        name: 'sampler_name',
+        type: 'COMBO',
+        link: 55,
+        widget: { name: 'sampler_name' },
+      },
+    ];
+
+    const innerNode = makeNode(300, 'SamplerNode', []);
+    const workflow: Workflow = {
+      last_node_id: 300,
+      last_link_id: 55,
+      nodes: [sourceNode, placeholder],
+      links: [[55, sourceNode.id, 0, placeholder.id, 0, 'COMBO']],
+      groups: [],
+      config: {},
+      version: 1,
+      definitions: {
+        subgraphs: [
+          {
+            id: 'subgraph-a',
+            nodes: [innerNode],
+            links: [],
+            groups: [],
+            config: {},
+          },
+        ],
+      },
+    };
+    const nodeTypes: NodeTypes = {
+      SamplerNode: {
+        input: {
+          required: {
+            sampler_name: [['euler', 'dpmpp_2m'], {}],
+          },
+          optional: {},
+        },
+        output: [],
+        output_name: [],
+        name: 'SamplerNode',
+        display_name: 'SamplerNode',
+        description: '',
+        python_module: '',
+        category: '',
+      },
+    };
+
+    const inputDefs = resolveSubgraphPlaceholderInputWidgetDefs(
+      placeholder,
+      workflow,
+      nodeTypes,
+    );
+
+    expect(inputDefs).toHaveLength(1);
+    expect(inputDefs[0]).toMatchObject({
+      name: 'sampler_name',
+      type: 'COMBO',
+      value: 'euler',
+      widgetIndex: 0,
+      options: {
+        options: ['euler', 'dpmpp_2m'],
+        __linkedSource: {
+          subgraphId: null,
+          nodeId: sourceNode.id,
+          widgetIndex: 0,
+          widgetName: 'sampler_name',
+          itemKey: sourceNode.itemKey,
+        },
+      },
+    });
+  });
+
+  it('carries the model picker kind on a renamed promoted model-loader widget', () => {
+    const placeholder = makeNode(200, 'subgraph-ckpt', ['model.safetensors']);
+    placeholder.inputs = [
+      {
+        name: 'ckpt_name',
+        // Renamed promoted label — name-based detection would miss it.
+        localized_name: 'Checkpoint',
+        type: 'COMBO',
+        link: null,
+        widget: { name: 'ckpt_name' },
+      },
+    ];
+
+    const innerNode = makeNode(300, 'CheckpointLoaderSimple', []);
+    const workflow: Workflow = {
+      last_node_id: 300,
+      last_link_id: 0,
+      nodes: [placeholder],
+      links: [],
+      groups: [],
+      config: {},
+      version: 1,
+      definitions: {
+        subgraphs: [
+          {
+            id: 'subgraph-ckpt',
+            nodes: [innerNode],
+            links: [],
+            groups: [],
+            config: {},
+          },
+        ],
+      },
+    };
+    const nodeTypes: NodeTypes = {
+      CheckpointLoaderSimple: {
+        input: {
+          required: { ckpt_name: [['model.safetensors', 'other.safetensors'], {}] },
+          optional: {},
+        },
+        output: [],
+        output_name: [],
+        name: 'CheckpointLoaderSimple',
+        display_name: 'Load Checkpoint',
+        description: '',
+        python_module: '',
+        category: '',
+      },
+    };
+
+    const inputDefs = resolveSubgraphPlaceholderInputWidgetDefs(
+      placeholder,
+      workflow,
+      nodeTypes,
+    );
+
+    expect(inputDefs).toHaveLength(1);
+    // Shown under its display label, but the picker kind is detected from the
+    // inner ComfyUI input name (ckpt_name -> checkpoints).
+    expect(inputDefs[0].name).toBe('Checkpoint');
+    expect((inputDefs[0].options as Record<string, unknown>).__modelKind).toBe(
+      'checkpoints',
+    );
+  });
+});
+
+describe('promoted placeholder widget wired as a live connection', () => {
+  // A promoted widget wired to an upstream node output (no widget-value route,
+  // empty widgets_values) has no value to display. It used to render as a blank
+  // widget control; it must instead be marked `connected` (hidden from the
+  // parameters section) and surfaced as a connection button.
+  function wiredBlankSetup() {
+    const sourceNode = makeNode(100, 'SomeProducerNode', []);
+    sourceNode.outputs = [{ name: 'FLOAT', type: 'FLOAT', links: [55] }];
+
+    const placeholder = makeNode(200, 'subgraph-a', []); // empty widgets_values
+    placeholder.inputs = [
+      { name: 'frame_rate', type: 'FLOAT', link: 55, widget: { name: 'frame_rate' } },
+    ];
+
+    const innerNode = makeNode(300, 'InnerNode', []);
+    const workflow: Workflow = {
+      last_node_id: 300,
+      last_link_id: 55,
+      nodes: [sourceNode, placeholder],
+      links: [[55, sourceNode.id, 0, placeholder.id, 0, 'FLOAT']],
+      groups: [],
+      config: {},
+      version: 1,
+      definitions: {
+        subgraphs: [
+          { id: 'subgraph-a', nodes: [innerNode], links: [], groups: [], config: {} },
+        ],
+      },
+    } as unknown as Workflow;
+    const nodeTypes: NodeTypes = {
+      InnerNode: {
+        input: { required: { frame_rate: ['FLOAT', {}] }, optional: {} },
+        output: [],
+        output_name: [],
+        name: 'InnerNode',
+        display_name: 'InnerNode',
+        description: '',
+        python_module: '',
+        category: '',
+      },
+    } as unknown as NodeTypes;
+    return { placeholder, workflow, nodeTypes };
+  }
+
+  it('marks a wired, valueless promoted widget as connected', () => {
+    const { placeholder, workflow, nodeTypes } = wiredBlankSetup();
+    const widgets = resolveSubgraphPlaceholderWidgetDefs(placeholder, workflow, nodeTypes);
+    expect(widgets).toHaveLength(1);
+    expect(widgets[0].name).toBe('frame_rate');
+    expect(widgets[0].connected).toBe(true);
+  });
+
+  it('isPlaceholderPromotedConnection is true for the wired input', () => {
+    const { placeholder } = wiredBlankSetup();
+    expect(isPlaceholderPromotedConnection(placeholder.inputs[0])).toBe(true);
+  });
+
+  it('isPlaceholderPromotedConnection is false for an unwired widget value', () => {
+    const input = { name: 'frame_rate', type: 'FLOAT', link: null, widget: { name: 'frame_rate' } };
+    expect(isPlaceholderPromotedConnection(input)).toBe(false);
+  });
+
+  it('marks a wired promoted combo as connected even when a value resolves', () => {
+    // A promoted combo fed by a value-providing source (a primitive supplying
+    // "euler") is still populated BY A CONNECTION — it must render as a
+    // connection button, not an editable widget, so it is marked connected.
+    const sourceNode = makeNode(100, 'PrimitiveNode', ['euler']);
+    sourceNode.outputs = [{ name: 'sampler_name', type: 'COMBO', links: [55] }];
+    const placeholder = makeNode(200, 'subgraph-a', []);
+    placeholder.inputs = [
+      { name: 'sampler_name', type: 'COMBO', link: 55, widget: { name: 'sampler_name' } },
+    ];
+    const innerNode = makeNode(300, 'SamplerNode', []);
+    const workflow = {
+      last_node_id: 300, last_link_id: 55,
+      nodes: [sourceNode, placeholder],
+      links: [[55, sourceNode.id, 0, placeholder.id, 0, 'COMBO']],
+      groups: [], config: {}, version: 1,
+      definitions: {
+        subgraphs: [{ id: 'subgraph-a', nodes: [innerNode], links: [], groups: [], config: {} }],
+      },
+    } as unknown as Workflow;
+    const nodeTypes = {
+      SamplerNode: {
+        input: { required: { sampler_name: [['euler', 'dpmpp_2m'], {}] }, optional: {} },
+        output: [], output_name: [], name: 'SamplerNode', display_name: 'SamplerNode',
+        description: '', python_module: '', category: '',
+      },
+    } as unknown as NodeTypes;
+
+    const inputDefs = resolveSubgraphPlaceholderInputWidgetDefs(placeholder, workflow, nodeTypes);
+    expect(inputDefs).toHaveLength(1);
+    // The value still resolves (used for the connection label/routing) ...
+    expect(inputDefs[0].value).toBe('euler');
+    // ... but it is connected, so NodeCard hides the widget and shows a button.
+    expect(inputDefs[0].connected).toBe(true);
+    expect(isPlaceholderPromotedConnection(placeholder.inputs[0])).toBe(true);
+  });
+});
+
+// Issue #69, fix 3: a subgraph template author can promote a widget to the
+// boundary (definitions.subgraphs[].inputs[]) without giving it a socket
+// entry on the placeholder's own inputs[] at all -- e.g. the shipped MiniMax
+// H3 template only puts width/height/duration/audio_vae in the placeholder's
+// inputs[], while prompt/noise_seed/unet_name/clip_name/vae_name live only in
+// widgets_values, positionally aligned with the subgraph's widget-typed
+// boundary inputs. Neither the slot-promotion mechanism (inputs[].widget) nor
+// the proxyWidgets mechanism sees these, so findSeedWidgetIndex previously
+// returned null and the whole seed section silently vanished from the UI.
+describe('resolveAllSubgraphBoundaryWidgetDefs (issue #69 fix 3)', () => {
+  const workflow = {
+    definitions: {
+      subgraphs: [
+        {
+          id: 'sg-1',
+          nodes: [
+            {
+              id: 1,
+              type: 'InnerLoader',
+              pos: [0, 0],
+              size: [100, 100],
+              flags: {},
+              order: 0,
+              mode: 0,
+              inputs: [],
+              outputs: [],
+              properties: {},
+              widgets_values: [0, 'a.safetensors'],
+            } as unknown as WorkflowNode,
+          ],
+          links: [],
+          inputs: [
+            { name: 'prompt', type: 'STRING' },
+            { name: 'width', type: 'INT' },
+            { name: 'noise_seed', type: 'INT' },
+            { name: 'unet_name', type: 'COMBO' },
+          ],
+        },
+      ],
+    },
+  } as unknown as Workflow;
+
+  const nodeTypes: NodeTypes = {
+    InnerLoader: {
+      input: {
+        required: {
+          noise_seed: ['INT', { min: 0, max: 999999999 }],
+          unet_name: [['a.safetensors', 'b.safetensors'], {}],
+        },
+      },
+      output: [],
+      output_name: [],
+      name: 'InnerLoader',
+      display_name: 'InnerLoader',
+      description: '',
+      python_module: '',
+      category: '',
+    },
+  };
+
+  function makePlaceholder(): WorkflowNode {
+    return {
+      id: 105,
+      type: 'sg-1',
+      pos: [0, 0],
+      size: [200, 100],
+      flags: {},
+      order: 0,
+      mode: 0,
+      // Only 'width' has a placeholder-level socket entry (mechanism 1) --
+      // prompt / noise_seed / unet_name are boundary-only (mechanism 3).
+      inputs: [
+        { name: 'width', type: 'INT', widget: { name: 'width' }, link: null },
+      ],
+      outputs: [],
+      properties: {},
+      widgets_values: ['a prompt', 1024, 42, 'a.safetensors'],
+    } as unknown as WorkflowNode;
+  }
+
+  it('resolves widgets exposed only through the subgraph boundary, not the placeholder inputs[]', () => {
+    const placeholder = makePlaceholder();
+    const nonCombo = resolveSubgraphBoundaryWidgetDefs(placeholder, workflow, nodeTypes);
+    const combo = resolveSubgraphBoundaryInputWidgetDefs(placeholder, workflow, nodeTypes);
+
+    // 'width' is already covered by mechanism 1 -> must not be duplicated here.
+    expect(nonCombo.some((w) => w.name === 'width')).toBe(false);
+    expect(combo.some((w) => w.name === 'width')).toBe(false);
+
+    const prompt = nonCombo.find((w) => w.name === 'prompt');
+    expect(prompt?.widgetIndex).toBe(0);
+    expect(prompt?.value).toBe('a prompt');
+
+    const seed = nonCombo.find((w) => w.name === 'noise_seed');
+    expect(seed?.widgetIndex).toBe(2);
+    expect(seed?.value).toBe(42);
+    expect(seed?.options).toMatchObject({ min: 0, max: 999999999 });
+
+    const unet = combo.find((w) => w.name === 'unet_name');
+    expect(unet?.widgetIndex).toBe(3);
+    expect(unet?.value).toBe('a.safetensors');
+    expect((unet?.options as Record<string, unknown>).options).toEqual([
+      'a.safetensors',
+      'b.safetensors',
+    ]);
+  });
+
+  it('keeps visible promoted widgets aligned after an omitted boundary widget', () => {
+    const placeholder = makePlaceholder();
+    const promoted = resolveSubgraphPlaceholderWidgetDefs(placeholder, workflow, nodeTypes);
+
+    // The placeholder inputs[] starts at width, but widgets_values[0] belongs
+    // to the omitted prompt boundary. Width must therefore retain boundary
+    // widget slot 1 instead of being paired with the prompt string.
+    expect(promoted).toHaveLength(1);
+    expect(promoted[0]).toMatchObject({
+      name: 'width',
+      value: 1024,
+      widgetIndex: 1,
+    });
+    expect(getPlaceholderWidgetIndexForInput(placeholder, 0, workflow)).toBe(1);
+  });
+
+  it('returns nothing for a node that is not a subgraph placeholder', () => {
+    const workflowWithoutMatch = { definitions: { subgraphs: [] } } as unknown as Workflow;
+    const placeholder = makePlaceholder();
+    expect(resolveSubgraphBoundaryWidgetDefs(placeholder, workflowWithoutMatch, nodeTypes)).toEqual([]);
+    expect(resolveSubgraphBoundaryInputWidgetDefs(placeholder, workflowWithoutMatch, nodeTypes)).toEqual([]);
+  });
+});
+
+// Two promoted widgets that share the same underlying inner widget name (e.g.
+// two VAELoader nodes, one for image VAE and one for audio VAE, both of whose
+// real ComfyUI widget is literally called "vae_name") get disambiguated by
+// ComfyUI at the boundary: the second becomes "vae_name_1". The options/type
+// lookup must resolve via the actual link to the specific inner node, not by
+// matching the (possibly suffixed) boundary name against every inner node's
+// schema -- otherwise the second widget's dropdown silently comes back empty,
+// looking like the installed files are missing.
+describe('subgraph boundary widgets with a disambiguated name (e.g. vae_name_1)', () => {
+  const nodeTypes: NodeTypes = {
+    VAELoader: {
+      input: {
+        required: {
+          vae_name: [['image_vae.safetensors', 'audio_vae.safetensors'], {}],
+        },
+      },
+      output: [],
+      output_name: [],
+      name: 'VAELoader',
+      display_name: 'VAELoader',
+      description: '',
+      python_module: '',
+      category: '',
+    },
+  };
+
+  function makeVaeLoader(id: number, linkId: number): WorkflowNode {
+    return {
+      id,
+      type: 'VAELoader',
+      pos: [0, 0],
+      size: [100, 100],
+      flags: {},
+      order: 0,
+      mode: 0,
+      inputs: [
+        { name: 'vae_name', type: 'COMBO', widget: { name: 'vae_name' }, link: linkId },
+      ],
+      outputs: [],
+      properties: {},
+      widgets_values: ['image_vae.safetensors'],
+    } as unknown as WorkflowNode;
+  }
+
+  const workflow = {
+    definitions: {
+      subgraphs: [
+        {
+          id: 'sg-vae',
+          nodes: [makeVaeLoader(1, 100), makeVaeLoader(2, 101)],
+          links: [
+            { id: 100, origin_id: -10, origin_slot: 0, target_id: 1, target_slot: 0, type: 'COMBO' },
+            { id: 101, origin_id: -10, origin_slot: 1, target_id: 2, target_slot: 0, type: 'COMBO' },
+          ],
+          inputs: [
+            { name: 'vae_name', type: 'COMBO', linkIds: [100] },
+            { name: 'vae_name_1', type: 'COMBO', linkIds: [101], label: 'audio_vae' },
+          ],
+        },
+      ],
+    },
+  } as unknown as Workflow;
+
+  function makePlaceholder(): WorkflowNode {
+    return {
+      id: 105,
+      type: 'sg-vae',
+      pos: [0, 0],
+      size: [200, 100],
+      flags: {},
+      order: 0,
+      mode: 0,
+      inputs: [
+        { name: 'vae_name', type: 'COMBO', widget: { name: 'vae_name' }, link: null },
+        { name: 'vae_name_1', type: 'COMBO', widget: { name: 'vae_name_1' }, link: null, label: 'audio_vae' },
+      ],
+      outputs: [],
+      properties: {},
+      widgets_values: ['image_vae.safetensors', 'audio_vae.safetensors'],
+    } as unknown as WorkflowNode;
+  }
+
+  it('resolves options for the disambiguated widget via its link, not an empty list', () => {
+    const placeholder = makePlaceholder();
+    const inputDefs = resolveSubgraphPlaceholderInputWidgetDefs(placeholder, workflow, nodeTypes);
+
+    const first = inputDefs.find((d) => d.widgetIndex === 0);
+    const second = inputDefs.find((d) => d.widgetIndex === 1);
+
+    expect((first!.options as Record<string, unknown>).options).toEqual([
+      'image_vae.safetensors',
+      'audio_vae.safetensors',
+    ]);
+    // This is the regression: before the fix, this came back as [].
+    expect((second!.options as Record<string, unknown>).options).toEqual([
+      'image_vae.safetensors',
+      'audio_vae.safetensors',
+    ]);
+  });
+
+  it('shows the label instead of the raw disambiguated name', () => {
+    const placeholder = makePlaceholder();
+    const inputDefs = resolveSubgraphPlaceholderInputWidgetDefs(placeholder, workflow, nodeTypes);
+    const second = inputDefs.find((d) => d.widgetIndex === 1);
+    expect(second!.name).toBe('audio_vae');
+  });
+});
+
+describe('V3 COMBO options promoted from a subgraph', () => {
+  const modelName = 'ltx-2.3-spatial-upscaler-x2-1.1.safetensors';
+  const modelOptions = [modelName, 'another-latent-upscaler.safetensors'];
+  const nodeTypes: NodeTypes = {
+    LatentUpscaleModelLoader: {
+      input: {
+        required: {
+          model_name: ['COMBO', {
+            options: modelOptions,
+            tooltip: 'The latent upscale model to load.',
+          }],
+        },
+      },
+      input_order: { required: ['model_name'] },
+      output: ['LATENT_UPSCALE_MODEL'],
+      output_name: ['LATENT_UPSCALE_MODEL'],
+      name: 'LatentUpscaleModelLoader',
+      display_name: 'Load Latent Upscale Model',
+      description: '',
+      python_module: 'comfy_extras.nodes_hunyuan',
+      category: 'model/loaders',
+    },
+  };
+
+  const loader = {
+    ...makeNode(233, 'LatentUpscaleModelLoader', [modelName]),
+    inputs: [
+      { name: 'model_name', type: 'COMBO', widget: { name: 'model_name' }, link: 607 },
+    ],
+  } as WorkflowNode;
+
+  const workflow = {
+    definitions: {
+      subgraphs: [
+        {
+          id: 'sg-ltx',
+          nodes: [loader],
+          links: [
+            { id: 607, origin_id: -10, origin_slot: 0, target_id: 233, target_slot: 0, type: 'COMBO' },
+          ],
+          inputs: [
+            {
+              name: 'model_name',
+              type: 'COMBO',
+              linkIds: [607],
+              label: 'latent_upscale_model',
+            },
+          ],
+        },
+      ],
+    },
+  } as unknown as Workflow;
+
+  it('keeps V3 options on a placeholder input.widget promotion', () => {
+    const placeholder = {
+      ...makeNode(267, 'sg-ltx', [modelName]),
+      inputs: [
+        {
+          name: 'model_name',
+          type: 'COMBO',
+          widget: { name: 'model_name' },
+          link: null,
+          label: 'latent_upscale_model',
+        },
+      ],
+    } as WorkflowNode;
+
+    const [definition] = resolveSubgraphPlaceholderInputWidgetDefs(
+      placeholder,
+      workflow,
+      nodeTypes,
+    );
+
+    expect(definition.name).toBe('latent_upscale_model');
+    expect(definition.value).toBe(modelName);
+    expect(definition.options).toMatchObject({
+      options: modelOptions,
+      tooltip: 'The latent upscale model to load.',
+    });
+  });
+
+  it('keeps V3 options on a boundary-only promotion', () => {
+    const placeholder = makeNode(267, 'sg-ltx', [modelName]);
+
+    const [definition] = resolveSubgraphBoundaryInputWidgetDefs(
+      placeholder,
+      workflow,
+      nodeTypes,
+    );
+
+    expect(definition.name).toBe('latent_upscale_model');
+    expect(definition.value).toBe(modelName);
+    expect(definition.options).toMatchObject({
+      options: modelOptions,
+      tooltip: 'The latent upscale model to load.',
+    });
+  });
+});
+
+describe('subgraph boundary widget indexing follows the interior link, not the type', () => {
+  // Mirrors video_wan2_1_infinitetalk.json: a COMFY_DYNAMICCOMBO_V3 boundary
+  // input IS a widget (it drives an inner combo), and a STRING boundary input
+  // feeding a forceInput socket is NOT. A type whitelist gets both wrong, and
+  // either mistake shifts every widgets_values index on the placeholder.
+  const subgraph = {
+    id: 'sg-dyn',
+    nodes: [
+      {
+        id: 1,
+        type: 'ModeNode',
+        inputs: [
+          { name: 'mode', type: 'COMFY_DYNAMICCOMBO_V3', link: 1, widget: { name: 'mode' } },
+        ],
+        outputs: [],
+        widgets_values: ['one_speaker'],
+      },
+      {
+        id: 2,
+        type: 'TextSink',
+        // forceInput: a real socket with no widget behind it.
+        inputs: [{ name: 'text', type: 'STRING', link: 2 }],
+        outputs: [],
+        widgets_values: [],
+      },
+      {
+        id: 3,
+        type: 'ScaleNode',
+        inputs: [
+          { name: 'audio_scale', type: 'FLOAT', link: 3, widget: { name: 'audio_scale' } },
+        ],
+        outputs: [],
+        widgets_values: [1],
+      },
+    ],
+    inputs: [
+      { name: 'mode', type: 'COMFY_DYNAMICCOMBO_V3', linkIds: [1] },
+      { name: 'forced_text', type: 'STRING', linkIds: [2] },
+      { name: 'audio_scale', type: 'FLOAT', linkIds: [3] },
+    ],
+    outputs: [],
+    links: [
+      { id: 1, origin_id: -10, origin_slot: 0, target_id: 1, target_slot: 0, type: 'COMFY_DYNAMICCOMBO_V3' },
+      { id: 2, origin_id: -10, origin_slot: 1, target_id: 2, target_slot: 0, type: 'STRING' },
+      { id: 3, origin_id: -10, origin_slot: 2, target_id: 3, target_slot: 0, type: 'FLOAT' },
+    ],
+  };
+  const workflow = { definitions: { subgraphs: [subgraph] } } as unknown as Workflow;
+
+  function makePlaceholder(): WorkflowNode {
+    return {
+      id: 188,
+      type: 'sg-dyn',
+      pos: [0, 0],
+      size: [200, 100],
+      flags: {},
+      order: 0,
+      mode: 0,
+      inputs: [],
+      outputs: [],
+      properties: {},
+      widgets_values: ['two_speakers', 2.5],
+    } as unknown as WorkflowNode;
+  }
+
+  it('counts a dynamic-combo boundary input and skips a socket-backed one', () => {
+    const sg = workflow.definitions!.subgraphs![0];
+    expect(getSubgraphBoundaryWidgetIndexForSlot(sg, 0)).toBe(0);
+    expect(getSubgraphBoundaryWidgetIndexForSlot(sg, 1)).toBeNull();
+    expect(getSubgraphBoundaryWidgetIndexForSlot(sg, 2)).toBe(1);
+  });
+
+  it('reads each boundary widget from its own widgets_values slot', () => {
+    const placeholder = makePlaceholder();
+    const combos = resolveSubgraphBoundaryInputWidgetDefs(placeholder, workflow, null);
+    const plain = resolveSubgraphBoundaryWidgetDefs(placeholder, workflow, null);
+
+    expect(combos).toHaveLength(1);
+    expect(combos[0]).toMatchObject({ name: 'mode', widgetIndex: 0, value: 'two_speakers' });
+
+    // audio_scale must not inherit the mode string from widgets_values[0].
+    expect(plain).toHaveLength(1);
+    expect(plain[0]).toMatchObject({ name: 'audio_scale', widgetIndex: 1, value: 2.5 });
+    expect(plain.some((widget) => widget.name === 'forced_text')).toBe(false);
+  });
+
+  it('pushes the right value into each inner node when expanded', () => {
+    const innerNodeTypes = {
+      ModeNode: {
+        input: { required: { mode: [['one_speaker', 'two_speakers'], {}] } },
+        output: [], output_name: [], name: 'ModeNode', display_name: 'ModeNode',
+        description: '', python_module: '', category: '',
+      },
+      ScaleNode: {
+        input: { required: { audio_scale: ['FLOAT', { default: 1 }] } },
+        output: [], output_name: [], name: 'ScaleNode', display_name: 'ScaleNode',
+        description: '', python_module: '', category: '',
+      },
+      TextSink: {
+        input: { required: { text: ['STRING', { forceInput: true }] } },
+        output: [], output_name: [], name: 'TextSink', display_name: 'TextSink',
+        description: '', python_module: '', category: '',
+      },
+    } as unknown as NodeTypes;
+    const placeholder = makePlaceholder();
+    const wf = {
+      last_node_id: 188,
+      last_link_id: 0,
+      nodes: [placeholder],
+      links: [],
+      groups: [],
+      definitions: { subgraphs: [subgraph] },
+      version: 0.4,
+    } as unknown as Workflow;
+
+    const { workflow: expanded, promptKeyMap } = expandWorkflowSubgraphs(wf, innerNodeTypes);
+    const byKey = new Map(expanded.nodes.map((node) => [promptKeyMap.get(node.id), node]));
+
+    expect(byKey.get('188:1')?.widgets_values).toEqual(['two_speakers']);
+    expect(byKey.get('188:3')?.widgets_values).toEqual([2.5]);
+    expect(byKey.get('188:2')?.widgets_values).toEqual([]);
+  });
+});
+
+describe('promoted widgets fed from outside the subgraph they sit in', () => {
+  /**
+   * outer INTConstant → [ OUTER placeholder ] → boundary → [ INNER placeholder ]
+   *
+   * The inner placeholder's promoted `steps` is wired to the outer subgraph's
+   * input boundary, so the link it carries ends at the sentinel and the value
+   * lives a scope out. `instances` says how many copies of the outer subgraph
+   * exist, since that is what decides whether "a scope out" is one place.
+   */
+  function nestedSetup(instances: number) {
+    const source = makeNode(10, 'INTConstant', [7]);
+    source.outputs = [{ name: 'value', type: 'INT', links: [1] }];
+
+    const outerPlaceholders = Array.from({ length: instances }, (_, i) => {
+      const placeholder = makeNode(20 + i, 'outer-sg', []);
+      placeholder.inputs = [
+        { name: 'steps', type: 'INT', link: i === 0 ? 1 : null, widget: { name: 'steps' } },
+      ];
+      return placeholder;
+    });
+
+    const inner = makeNode(30, 'inner-sg', []);
+    inner.inputs = [{ name: 'steps', type: 'INT', link: 5, widget: { name: 'steps' } }];
+
+    const workflow = {
+      last_node_id: 30,
+      last_link_id: 5,
+      nodes: [source, ...outerPlaceholders],
+      links: [[1, 10, 0, 20, 0, 'INT']],
+      groups: [],
+      config: {},
+      version: 1,
+      definitions: {
+        subgraphs: [
+          {
+            id: 'outer-sg',
+            name: 'Outer',
+            inputs: [{ id: 'b0', name: 'steps', type: 'INT', linkIds: [5] }],
+            outputs: [],
+            nodes: [inner],
+            // origin -10 is the input boundary; slot 0 is that boundary input.
+            links: [{ id: 5, origin_id: -10, origin_slot: 0, target_id: 30, target_slot: 0, type: 'INT' }],
+            groups: [],
+          },
+          {
+            id: 'inner-sg',
+            name: 'Inner',
+            inputs: [{ id: 'c0', name: 'steps', type: 'INT', linkIds: [] }],
+            outputs: [],
+            nodes: [makeNode(40, 'KSampler', [7])],
+            links: [],
+            groups: [],
+          },
+        ],
+      },
+    } as unknown as Workflow;
+
+    const nodeTypes = {
+      KSampler: {
+        input: { required: { steps: ['INT', {}] }, optional: {} },
+        output: [], output_name: [], name: 'KSampler', display_name: 'KSampler',
+        description: '', python_module: '', category: '',
+      },
+    } as unknown as NodeTypes;
+
+    return { inner, workflow, nodeTypes, outerPlaceholders };
+  }
+
+  it('steps out through the boundary to the value feeding it', () => {
+    const { inner, workflow, nodeTypes } = nestedSetup(1);
+    const [steps] = resolveSubgraphPlaceholderWidgetDefs(inner, workflow, nodeTypes);
+
+    // Without the hop this renders blank: the link stops at the sentinel.
+    expect(steps.value).toBe(7);
+    expect(steps.connected).toBe(true);
+  });
+
+  it('reads through the instance the view was navigated in by', () => {
+    const { inner, workflow, nodeTypes, outerPlaceholders } = nestedSetup(2);
+    // The second instance has nothing wired in and a value typed on it.
+    outerPlaceholders[1].widgets_values = [99];
+
+    expect(
+      resolveSubgraphPlaceholderWidgetDefs(inner, workflow, nodeTypes, new Set([20]))[0].value,
+    ).toBe(7);
+    expect(
+      resolveSubgraphPlaceholderWidgetDefs(inner, workflow, nodeTypes, new Set([21]))[0].value,
+    ).toBe(99);
+  });
+
+  it('offers no value when several instances could be meant and none is named', () => {
+    const { inner, workflow, nodeTypes } = nestedSetup(2);
+    const [steps] = resolveSubgraphPlaceholderWidgetDefs(inner, workflow, nodeTypes);
+
+    // Picking an arbitrary sibling's value would be worse than showing none.
+    expect(steps.value).toBeUndefined();
+    expect(steps.connected).toBe(true);
+  });
+});
+
+describe('renaming a shared type boundary slot', () => {
+  /**
+   * A placeholder carries a copy of the definition's boundary label on its own
+   * slot. Both are present here and they disagree, which is the state right
+   * after a rename — and the state every instance of a type is left in.
+   */
+  function renamedSetup() {
+    const placeholder = makeNode(200, 'subgraph-a', []);
+    placeholder.inputs = [
+      { name: 'frame_rate', type: 'FLOAT', link: null, label: 'final_fps', widget: { name: 'frame_rate' } },
+    ];
+    const inner = makeNode(300, 'VideoCombine', [24]);
+    inner.inputs = [{ name: 'frame_rate', type: 'FLOAT', link: 1, widget: { name: 'frame_rate' } }];
+    const workflow = {
+      last_node_id: 300, last_link_id: 1,
+      nodes: [placeholder], links: [], groups: [], config: {}, version: 1,
+      definitions: {
+        subgraphs: [{
+          id: 'subgraph-a',
+          name: 'Video',
+          inputs: [{ id: 'b0', name: 'frame_rate', type: 'FLOAT', linkIds: [1], label: 'initial_frame_rate' }],
+          outputs: [],
+          nodes: [inner],
+          links: [{ id: 1, origin_id: -10, origin_slot: 0, target_id: 300, target_slot: 0, type: 'FLOAT' }],
+          groups: [],
+        }],
+      },
+    } as unknown as Workflow;
+    const nodeTypes = {
+      VideoCombine: {
+        input: { required: { frame_rate: ['FLOAT', {}] }, optional: {} },
+        output: [], output_name: [], name: 'VideoCombine', display_name: 'VideoCombine',
+        description: '', python_module: '', category: '',
+      },
+    } as unknown as NodeTypes;
+    return { placeholder, workflow, nodeTypes };
+  }
+
+  it('shows the definition\'s label, not the copy left on the placeholder', () => {
+    const { placeholder, workflow, nodeTypes } = renamedSetup();
+    const [widget] = resolveSubgraphPlaceholderWidgetDefs(placeholder, workflow, nodeTypes);
+
+    // Reading the stale copy first meant a rename changed nothing on screen.
+    expect(widget.name).toBe('initial_frame_rate');
+  });
+
+  it('still uses the placeholder\'s own label when the definition has none', () => {
+    const { placeholder, workflow, nodeTypes } = renamedSetup();
+    delete workflow.definitions!.subgraphs![0].inputs![0].label;
+
+    const [widget] = resolveSubgraphPlaceholderWidgetDefs(placeholder, workflow, nodeTypes);
+    expect(widget.name).toBe('final_fps');
+  });
+
+  it('lets this instance override the type', () => {
+    const { placeholder, workflow, nodeTypes } = renamedSetup();
+    placeholder.properties = { mobileSlotLabels: { 'input:frame_rate': 'just this one' } };
+
+    const [widget] = resolveSubgraphPlaceholderWidgetDefs(placeholder, workflow, nodeTypes);
+    expect(widget.name).toBe('just this one');
+  });
+});

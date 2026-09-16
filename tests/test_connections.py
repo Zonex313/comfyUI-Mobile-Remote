@@ -122,10 +122,20 @@ class MobileGatewayTests(unittest.IsolatedAsyncioTestCase):
             "/mobile/assets/preset-engine.js",
             "/mobile/assets/settings-sync.js",
             "/mobile/assets/progress-sync.js",
-            # 「高级」页模块：按画布节点 1:1 渲染控件
-            "/mobile/assets/advanced.js",
             "/mobile/assets/app.js",
         ])
+        # 「高级」页换成参考项目那套面板后，入口是 iframe 宿主页 panel.html，
+        # 它自己带 panel.css / panel.js（不再由 index.html 直接引脚本）。
+        panel = (PLUGIN_ROOT / "mobile" / "panel.html").read_text(encoding="utf-8")
+        self.assertIn("/mobile/assets/panel.js", panel)
+        self.assertIn("/mobile/assets/panel.css", panel)
+        # 面板要能在公网隧道下工作：宿主页、产物、以及它取数据用的原始工作流接口。
+        self.assertTrue(
+            connections.public_path_allowed("GET", "/mobile/api/panel/workflow/" + WORKFLOW_ID),
+            "面板的原生工作流接口要能过公网隧道",
+        )
+        for asset in ("/mobile/assets/panel.html", "/mobile/assets/panel.js", "/mobile/assets/panel.css"):
+            self.assertTrue(connections.public_path_allowed("GET", asset), asset + " 要能过公网隧道")
         paths = ["/mobile", "/mobile/", *boot,
                  "/mobile/api/status", "/mobile/api/progress", "/mobile/api/workflows",
                  "/mobile/api/workflows/" + WORKFLOW_ID, "/mobile/api/jobs",

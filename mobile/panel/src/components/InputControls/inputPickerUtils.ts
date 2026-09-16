@@ -1,0 +1,116 @@
+import type { AssetSource, FileItem, SortMode } from "@/api/client";
+import { splitPathAnnotation } from "@/utils/annotatedPath";
+
+export interface InputPickerSelectionLocation {
+  source: AssetSource;
+  folder: string | null;
+  fileId: string;
+}
+
+/** Resolve a combo's current file value into the browser location that owns it. */
+export function getInputPickerSelectionLocation(
+  value: unknown,
+  defaultSource: AssetSource = "input",
+): InputPickerSelectionLocation | null {
+  const candidate = Array.isArray(value) ? value[0] : value;
+  if (typeof candidate !== "string" || !candidate.trim()) return null;
+
+  const annotated = splitPathAnnotation(candidate.trim());
+  const path = annotated.path
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "");
+  if (!path) return null;
+
+  const source = annotated.type ?? defaultSource;
+  const slashIndex = path.lastIndexOf("/");
+  return {
+    source,
+    folder: slashIndex >= 0 ? path.slice(0, slashIndex) : null,
+    fileId: `${source}/${path}`,
+  };
+}
+
+export function getInputPickerValue(
+  file: FileItem,
+  source: AssetSource = "input",
+): string {
+  const prefix = `${source}/`;
+  return file.id.startsWith(prefix) ? file.id.slice(prefix.length) : file.id;
+}
+
+export function projectInputSearchResults(
+  results: FileItem[],
+  folder: string | null,
+  source: AssetSource = "input",
+): FileItem[] {
+  const folderPrefix = folder ? `${folder}/` : "";
+  const folders = new Map<string, {
+    date: number;
+    createdDate: number;
+    modifiedDate: number;
+    count: number;
+  }>();
+  const directFiles: FileItem[] = [];
+
+  for (const file of results) {
+    const relativePath = getInputPickerValue(file, source);
+    if (!relativePath.startsWith(folderPrefix)) continue;
+    const remainder = relativePath.slice(folderPrefix.length);
+    if (!remainder) continue;
+    const slashIndex = remainder.indexOf("/");
+    if (slashIndex === -1) {
+      directFiles.push(file);
+      continue;
+    }
+
+    const name = remainder.slice(0, slashIndex);
+    const existing = folders.get(name);
+    const createdDate = file.createdDate ?? file.date ?? 0;
+    const modifiedDate = file.modifiedDate ?? file.date ?? 0;
+    if (existing) {
+      existing.count += 1;
+      existing.date = Math.max(existing.date, modifiedDate);
+      existing.createdDate = Math.max(existing.createdDate, createdDate);
+      existing.modifiedDate = Math.max(existing.modifiedDate, modifiedDate);
+    } else {
+      folders.set(name, {
+        date: modifiedDate,
+        createdDate,
+        modifiedDate,
+        count: 1,
+      });
+    }
+  }
+
+  return [
+    ...Array.from(folders.entries()).map(([name, info]) => ({
+      id: `${source}/${folderPrefix}${name}`,
+      name,
+      type: "folder" as const,
+      date: info.date,
+      createdDate: info.createdDate,
+      modifiedDate: info.modifiedDate,
+      matchCount: info.count,
+    })),
+    ...directFiles,
+  ];
+}
+
+export function sortInputPickerFiles(files: FileItem[], mode: SortMode): FileItem[] {
+  const result = [...files];
+  const direction = mode.endsWith("-reverse") ? -1 : 1;
+  if (mode.startsWith("name")) {
+    result.sort((a, b) => a.name.localeCompare(b.name) * direction);
+  } else if (mode.startsWith("size")) {
+    result.sort((a, b) => ((a.size ?? 0) - (b.size ?? 0)) * direction);
+  } else if (mode.startsWith("created")) {
+    result.sort((a, b) => (
+      ((a.createdDate ?? a.date ?? 0) - (b.createdDate ?? b.date ?? 0)) * -1 * direction
+    ));
+  } else {
+    result.sort((a, b) => (
+      ((a.modifiedDate ?? a.date ?? 0) - (b.modifiedDate ?? b.date ?? 0)) * -1 * direction
+    ));
+  }
+  return result;
+}

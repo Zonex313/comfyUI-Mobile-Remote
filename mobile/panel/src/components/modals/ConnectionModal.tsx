@@ -1,0 +1,1535 @@
+import { useEffect, useMemo, useState } from 'react';
+import { useWorkflowStore } from '@/hooks/useWorkflow';
+import {
+  getScopedWorkflowView,
+  SUBGRAPH_INPUT_NODE_ID,
+  SUBGRAPH_OUTPUT_NODE_ID,
+} from '@/utils/canonicalWorkflowOps';
+import { runUndoTransaction } from '@/utils/undoTransaction';
+import { useConnectionSectionFoldsStore } from '@/hooks/useConnectionSectionFolds';
+import { useI18n } from '@/i18n';
+import {
+  areTypesCompatible,
+  findCompatibleSourceNodes,
+  findCompatibleNodeTypesForInput,
+  findCompatibleNodeTypesForOutput,
+  findCompatibleTargetNodesForOutput,
+  isWildcardOnlyMatch
+} from '@/utils/connectionUtils';
+import {
+  getScopedUeLinkMap,
+  listUeBroadcasts,
+  ueSlotKey
+} from '@/utils/useEverywhere';
+import { CheckIcon, PlusIcon } from '@/components/icons';
+import {
+  fuzzyMatch,
+  getFieldScore,
+  isSubsequence,
+  normalizeSearchText,
+  prettyPackName
+} from '@/utils/search';
+import { resolveNodeTypeDisplayName, searchAndSortNodeTypes } from '@/utils/nodeTypeSearch';
+import {
+  findWorkflowNodeInScope,
+  resolveWorkflowNodeDisplayName
+} from '@/utils/subgraphPlaceholderLabels';
+import { collectSetNodeNames, getSetGetName, isGetNode } from '@/utils/setGetNodes';
+import { ConnectionSearchResult } from './ConnectionModal/SearchResult';
+import { SearchActionModal } from './SearchActionModal';
+import { NodeTypeSearchResult } from './NodeTypeSearchResult';
+import { SearchEmptyState } from './SearchEmptyState';
+import { Dialog } from './Dialog';
+import { FullscreenModalActions } from './FullscreenModalActions';
+import { resolveBoundaryPromotion } from '@/utils/boundaryPromotion';
+
+interface ConnectionModalBaseProps {
+  isOpen: boolean;
+  onClose: () => void;
+  nodeId: number;
+  // True when the originating connection button already had a connection (i.e.
+  // the user is editing an existing link). When false, the button was empty and
+  // this modal is creating a brand-new connection — in that case we skip the
+  // scroll-to-node on submit so creating a connection doesn't jump the view.
+  originHadConnection: boolean;
+}
+
+interface InputConnectionModalProps extends ConnectionModalBaseProps {
+  mode: 'input';
+  inputIndex: number;
+  inputType: string;
+  inputName: string;
+  currentlyConnectedNodeId: number | null;
+}
+
+interface OutputConnectionModalProps extends ConnectionModalBaseProps {
+  mode: 'output';
+  outputIndex: number;
+  outputType: string;
+  outputName: string;
+}
+
+type ConnectionModalProps = InputConnectionModalProps | OutputConnectionModalProps;
+
+interface OutputCandidate {
+  nodeId: number;
+  inputIndex: number;
+  // Stable identifier for selection — `${nodeId}:${inputIndex}` for materialized
+  // inputs, `${nodeId}:w:${inputName}` for un-materialized widget-inputs.
+  selectionKey: string;
+  // True when the input slot isn't materialized yet (created on connect).
+  isSynthetic: boolean;
+  displayName: string;
+  pack: string;
+  inputName: string;
+  inputType: string;
+  currentlyConnectedFromThisOutput: boolean;
+  hasExistingLink: boolean;
+  existingSourceLabel: string | null;
+  // True when this input is backed by a widget — connecting overrides the
+  // widget's current value.
+  isOverrideable: boolean;
+  score: number;
+}
+
+interface OutputNodeCandidate {
+  nodeId: number;
+  displayName: string;
+  pack: string;
+  score: number;
+  overrideableCount: number;
+  inputs: OutputCandidate[];
+}
+
+interface BoundarySlotCandidate {
+  slotIndex: number;
+  label: string;
+  type: string;
+  currentlyConnected: boolean;
+  hasExistingLink: boolean;
+}
+
+function makeOutputSelectionKey(nodeId: number, inputIndex: number): string {
+  return `${nodeId}:${inputIndex}`;
+}
+
+function areKeySetsEqual<T>(a: Set<T>, b: Set<T>): boolean {
+  if (a.size !== b.size) return false;
+  for (const key of a) {
+    if (!b.has(key)) return false;
+  }
+  return true;
+}
+
+export function ConnectionModal(props: ConnectionModalProps) {
+  const { t } = useI18n();
+  const { isOpen, onClose, nodeId, mode } = props;
+  const workflow = useWorkflowStore((s) => s.workflow);
+  const scopeStack = useWorkflowStore((s) => s.scopeStack);
+  const nodeTypes = useWorkflowStore((s) => s.nodeTypes);
+  const connectNodes = useWorkflowStore((s) => s.connectNodes);
+  const disconnectInput = useWorkflowStore((s) => s.disconnectInput);
+  const updateNodeWidget = useWorkflowStore((s) => s.updateNodeWidget);
+  const ensureWidgetInputSlot = useWorkflowStore((s) => s.ensureWidgetInputSlot);
+  const addNode = useWorkflowStore((s) => s.addNode);
+  const addNodeAndConnect = useWorkflowStore((s) => s.addNodeAndConnect);
+  const addBoundaryInput = useWorkflowStore((s) => s.addBoundaryInput);
+  const addBoundaryOutput = useWorkflowStore((s) => s.addBoundaryOutput);
+  const connectBoundaryInput = useWorkflowStore((s) => s.connectBoundaryInput);
+  const connectBoundaryOutput = useWorkflowStore((s) => s.connectBoundaryOutput);
+  const scrollToNode = useWorkflowStore((s) => s.scrollToNode);
+  const expandConnectionsSection = useConnectionSectionFoldsStore((s) => s.expand);
+  const topScopeFrame = scopeStack[scopeStack.length - 1];
+  const currentSubgraphId = topScopeFrame?.type === 'subgraph' ? topScopeFrame.id : null;
+  const scopedWorkflow = useMemo(
+    () => (workflow ? getScopedWorkflowView(workflow, currentSubgraphId) : null),
+    [currentSubgraphId, workflow],
+  );
+  const currentSubgraphDefinition = useMemo(
+    () => workflow?.definitions?.subgraphs?.find((def) => def.id === currentSubgraphId) ?? null,
+    [currentSubgraphId, workflow],
+  );
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [currentAction, setCurrentAction] = useState<'pick' | 'addNew'>('pick');
+  const [selectedOutputTargetKeys, setSelectedOutputTargetKeys] = useState<Set<string>>(() => {
+    if (mode !== 'output' || !scopedWorkflow) return new Set<string>();
+    const selected = new Set<string>();
+    // Scoped links: inside a subgraph the root link list would yield wrong
+    // (or false-positive same-id) pre-selected targets.
+    for (const link of scopedWorkflow.links) {
+      const [, srcNodeId, srcSlot, tgtNodeId, tgtSlot] = link;
+      // Skip boundary links (target -20): the sentinel is never a candidate,
+      // so seeding it made the selection permanently "changed" and left Apply
+      // enabled with nothing actually selected.
+      if (srcNodeId === nodeId && srcSlot === props.outputIndex && tgtNodeId >= 0) {
+        selected.add(makeOutputSelectionKey(tgtNodeId, tgtSlot));
+      }
+    }
+    return selected;
+  });
+  const initialOutputBoundarySelection = useMemo(() => {
+    const selected = new Set<number>();
+    if (mode !== 'output') return selected;
+    for (const link of currentSubgraphDefinition?.links ?? []) {
+      if (
+        link.origin_id === nodeId
+        && link.origin_slot === props.outputIndex
+        && link.target_id === SUBGRAPH_OUTPUT_NODE_ID
+      ) {
+        selected.add(link.target_slot);
+      }
+    }
+    return selected;
+  }, [currentSubgraphDefinition, mode, nodeId, props]);
+  const [selectedOutputBoundarySlots, setSelectedOutputBoundarySlots] = useState<Set<number>>(
+    initialOutputBoundarySelection,
+  );
+  const [showOverwriteConfirm, setShowOverwriteConfirm] = useState(false);
+  const [multiInputPickerNodeId, setMultiInputPickerNodeId] = useState<number | null>(null);
+  const [multiInputPickerSelection, setMultiInputPickerSelection] = useState<Set<string>>(new Set());
+
+  // Every Use Everywhere broadcast available in this scope, plus the one (if any)
+  // already feeding the input being edited. A broadcast is a real data
+  // connection even though nothing is drawn, so the picker has to account for
+  // both: show what is arriving now, and offer the broadcast sources as choices.
+  const ueLinks = useMemo(
+    () => getScopedUeLinkMap(workflow, currentSubgraphId, scopedWorkflow),
+    [workflow, currentSubgraphId, scopedWorkflow],
+  );
+  const ueResolution = useMemo(() => {
+    if (mode !== 'input' || !scopedWorkflow) return null;
+    const inputIndex = (props as InputConnectionModalProps).inputIndex;
+    const node = scopedWorkflow.nodes.find((n) => n.id === nodeId);
+    if (node?.inputs?.[inputIndex]?.link != null) return null;
+    return ueLinks.get(ueSlotKey(nodeId, inputIndex)) ?? null;
+  }, [mode, scopedWorkflow, nodeId, props, ueLinks]);
+
+  // Which broadcast, if any, carries a given (node, output slot) — so a source
+  // that is already on the air can be labelled as such wherever it is listed.
+  const broadcastBySource = useMemo(() => {
+    const bySource = new Map<string, number>();
+    if (mode !== 'input' || !scopedWorkflow) return bySource;
+    for (const broadcast of listUeBroadcasts(scopedWorkflow)) {
+      const key = `${broadcast.originId}:${broadcast.originSlot}`;
+      if (!bySource.has(key)) bySource.set(key, broadcast.controllerId);
+    }
+    return bySource;
+  }, [mode, scopedWorkflow]);
+
+  // The source this input is actually wired to right now (origin node + slot),
+  // resolved from the scoped link list, or from the broadcast feeding it when no
+  // link is drawn. Used both to pre-select the form and to tell when the staged
+  // selection has changed.
+  const initialInputBoundarySlot = useMemo<number | null>(() => {
+    if (mode !== 'input') return null;
+    const inputIndex = props.inputIndex;
+    const link = currentSubgraphDefinition?.links.find(
+      (candidate) => candidate.target_id === nodeId && candidate.target_slot === inputIndex,
+    );
+    return link?.origin_id === SUBGRAPH_INPUT_NODE_ID ? link.origin_slot : null;
+  }, [currentSubgraphDefinition, mode, nodeId, props]);
+
+  const initialInputSource = useMemo<{ nodeId: number; outputIndex: number } | null>(() => {
+    if (mode !== 'input' || !scopedWorkflow) return null;
+    const inputIndex = (props as InputConnectionModalProps).inputIndex;
+    const node = scopedWorkflow.nodes.find((n) => n.id === nodeId);
+    const linkId = node?.inputs?.[inputIndex]?.link;
+    if (linkId == null) {
+      return ueResolution
+        ? { nodeId: ueResolution.originId, outputIndex: ueResolution.originSlot }
+        : null;
+    }
+    const link = scopedWorkflow.links.find((l) => l[0] === linkId);
+    if (!link || link[1] === SUBGRAPH_INPUT_NODE_ID) return null;
+    return { nodeId: link[1], outputIndex: link[2] };
+  }, [mode, scopedWorkflow, nodeId, props, ueResolution]);
+  // Staged single-selection for the input picker: tapping a candidate selects
+  // it (tapping the connected one clears it), and Apply commits — mirroring the
+  // output picker so editing a wired input updates the form in place instead of
+  // connecting + closing + scrolling on every tap.
+  const [selectedInputSource, setSelectedInputSource] = useState(initialInputSource);
+  const [selectedInputBoundarySlot, setSelectedInputBoundarySlot] = useState<number | null>(
+    initialInputBoundarySlot,
+  );
+
+  const currentNodeHierarchicalKey = useMemo(() => {
+    const node = findWorkflowNodeInScope(workflow, nodeId, currentSubgraphId);
+    return node?.itemKey ?? null;
+  }, [currentSubgraphId, nodeId, workflow]);
+
+  // Inside a subgraph, a slot can be answered by exposing it on the boundary
+  // rather than by wiring it to a sibling — the connection the user wants is
+  // simply outside this scope. `resolveBoundaryPromotion` decides where that is
+  // a real, non-destructive choice.
+  const promoteBoundarySlot = useMemo(
+    () =>
+      resolveBoundaryPromotion({
+        scopedWorkflow,
+        currentSubgraphId,
+        nodeKey: currentNodeHierarchicalKey,
+        nodeId,
+        direction: mode,
+        slotIndex: mode === 'input' ? props.inputIndex : props.outputIndex,
+      }),
+    [scopedWorkflow, currentSubgraphId, currentNodeHierarchicalKey, nodeId, mode, props],
+  );
+
+  // A GetNode reads its value from a SetNode by a shared name (no link). When the
+  // modal is opened on a Get's (synthesized) input, we list the available
+  // SetNodes here instead of compatible source slots; selecting one sets the
+  // Get's name widget.
+  const isGetInput = useMemo(
+    () => mode === 'input' && Boolean(scopedWorkflow?.nodes.find((n) => n.id === nodeId && isGetNode(n))),
+    [mode, scopedWorkflow, nodeId],
+  );
+
+  const getHierarchicalKeyForNodeId = (targetNodeId: number): string | null => {
+    const node = findWorkflowNodeInScope(
+      useWorkflowStore.getState().workflow,
+      targetNodeId,
+      currentSubgraphId,
+    );
+    return node?.itemKey ?? null;
+  };
+
+  const compatibleNodes = useMemo(() => {
+    if (mode !== 'input' || !scopedWorkflow || !nodeTypes) return [];
+    const found = findCompatibleSourceNodes(scopedWorkflow, nodeId, props.inputIndex);
+    // A broadcast source is usually already here — it is an ordinary node with a
+    // matching output. Not always, though: `findCompatibleSourceNodes` drops
+    // bypassed nodes and anything downstream of the target, and it stops at the
+    // first matching output per node, so a second matching slot never surfaces.
+    // Anything currently on the air is a legitimate choice, so add what is
+    // missing rather than leaving the user unable to pick it.
+    const seen = new Set(found.map((entry) => `${entry.node.id}:${entry.outputIndex}`));
+    const inputType = (props as InputConnectionModalProps).inputType;
+    for (const broadcast of listUeBroadcasts(scopedWorkflow)) {
+      if (broadcast.originId === nodeId) continue;
+      const key = `${broadcast.originId}:${broadcast.originSlot}`;
+      if (seen.has(key)) continue;
+      if (!areTypesCompatible(broadcast.type, inputType)) continue;
+      const source = scopedWorkflow.nodes.find((n) => n.id === broadcast.originId);
+      if (!source?.outputs?.[broadcast.originSlot]) continue;
+      seen.add(key);
+      found.push({ node: source, outputIndex: broadcast.originSlot });
+    }
+    return found;
+  }, [mode, scopedWorkflow, nodeTypes, nodeId, props]);
+
+  const filteredNodes = useMemo(() => {
+    if (mode !== 'input') return [];
+    const query = searchQuery.trim();
+    const scored = compatibleNodes
+      .map((entry) => {
+        const { node } = entry;
+        const typeDef = nodeTypes?.[node.type];
+        const displayName = resolveWorkflowNodeDisplayName(workflow, node, nodeTypes);
+        const text = `${displayName} ${typeDef?.display_name ?? ''} ${node.type} ${String(node.id)}`;
+        const matches = !query
+          || fuzzyMatch(query, text)
+          || isSubsequence(normalizeSearchText(query), normalizeSearchText(text));
+        if (!matches) return null;
+        const score =
+          getFieldScore(query, displayName) * 4 +
+          getFieldScore(query, typeDef?.display_name ?? '') * 3 +
+          getFieldScore(query, node.type) * 2 +
+          getFieldScore(query, String(node.id));
+        return { ...entry, score };
+      })
+      .filter(Boolean) as Array<(typeof compatibleNodes)[number] & { score: number }>;
+    scored.sort((a, b) => b.score - a.score || a.node.id - b.node.id);
+    return scored;
+  }, [mode, compatibleNodes, searchQuery, nodeTypes, workflow]);
+
+  const boundarySlotCandidates = useMemo<BoundarySlotCandidate[]>(() => {
+    if (!currentSubgraphDefinition) return [];
+    const query = searchQuery.trim();
+    const slots = mode === 'input'
+      ? currentSubgraphDefinition.inputs ?? []
+      : currentSubgraphDefinition.outputs ?? [];
+    const connectionType = mode === 'input' ? props.inputType : props.outputType;
+
+    return slots.flatMap((slot, slotIndex) => {
+      const type = String(slot.type ?? '*');
+      if (!areTypesCompatible(type, connectionType)) return [];
+      const label = slot.label || slot.localized_name || slot.name || `#${slotIndex + 1}`;
+      const text = `${label} ${type}`;
+      if (
+        query
+        && !fuzzyMatch(query, text)
+        && !isSubsequence(normalizeSearchText(query), normalizeSearchText(text))
+      ) {
+        return [];
+      }
+
+      if (mode === 'input') {
+        const currentlyConnected = currentSubgraphDefinition.links.some(
+          (link) => link.origin_id === SUBGRAPH_INPUT_NODE_ID
+            && link.origin_slot === slotIndex
+            && link.target_id === nodeId
+            && link.target_slot === props.inputIndex,
+        );
+        return [{ slotIndex, label, type, currentlyConnected, hasExistingLink: false }];
+      }
+
+      const feeders = currentSubgraphDefinition.links.filter(
+        (link) => link.target_id === SUBGRAPH_OUTPUT_NODE_ID && link.target_slot === slotIndex,
+      );
+      const currentlyConnected = feeders.some(
+        (link) => link.origin_id === nodeId && link.origin_slot === props.outputIndex,
+      );
+      return [{
+        slotIndex,
+        label,
+        type,
+        currentlyConnected,
+        hasExistingLink: feeders.length > 0 && !currentlyConnected,
+      }];
+    });
+  }, [currentSubgraphDefinition, mode, nodeId, props, searchQuery]);
+
+  const compatibleTypes = useMemo(() => {
+    if (mode !== 'input' || !nodeTypes) return [];
+    return findCompatibleNodeTypesForInput(nodeTypes, props.inputType).map((item, index) => ({ ...item, index }));
+  }, [mode, nodeTypes, props]);
+
+  const compatibleOutputTypes = useMemo(() => {
+    if (mode !== 'output' || !nodeTypes) return [];
+    return findCompatibleNodeTypesForOutput(nodeTypes, props.outputType).map((item, index) => ({ ...item, index }));
+  }, [mode, nodeTypes, props]);
+
+  const filteredTypes = useMemo(() => {
+    if (mode !== 'input') return [];
+    return searchAndSortNodeTypes(
+      compatibleTypes,
+      searchQuery,
+      (item) => {
+        const displayName = resolveNodeTypeDisplayName(item.def, item.typeName);
+        const typeName = resolveNodeTypeDisplayName(
+          { display_name: item.def.name, name: item.typeName },
+          item.typeName
+        );
+        const pack = prettyPackName(item.def.python_module || (item.def.category?.split('/')[0] || 'Core'));
+        return {
+          displayName,
+          typeName,
+          category: String(item.def.category ?? ''),
+          pack
+        };
+      },
+      (item) => item.index
+    );
+  }, [mode, compatibleTypes, searchQuery]);
+
+  const filteredOutputTypes = useMemo(() => {
+    if (mode !== 'output') return [];
+    return searchAndSortNodeTypes(
+      compatibleOutputTypes,
+      searchQuery,
+      (item) => {
+        const displayName = resolveNodeTypeDisplayName(item.def, item.typeName);
+        const typeName = resolveNodeTypeDisplayName(
+          { display_name: item.def.name, name: item.typeName },
+          item.typeName
+        );
+        const pack = prettyPackName(item.def.python_module || (item.def.category?.split('/')[0] || 'Core'));
+        return {
+          displayName,
+          typeName,
+          category: String(item.def.category ?? ''),
+          pack
+        };
+      },
+      (item) => item.index
+    );
+  }, [mode, compatibleOutputTypes, searchQuery]);
+
+  const outputCandidates = useMemo<OutputCandidate[]>(() => {
+    if (mode !== 'output' || !scopedWorkflow || !nodeTypes) return [];
+    const compatibleTargets = findCompatibleTargetNodesForOutput(scopedWorkflow, nodeId, props.outputIndex, nodeTypes);
+    const connectedKeys = new Set<string>();
+    for (const link of scopedWorkflow.links) {
+      const [, srcNodeId, srcSlot, tgtNodeId, tgtSlot] = link;
+      if (srcNodeId === nodeId && srcSlot === props.outputIndex) {
+        connectedKeys.add(makeOutputSelectionKey(tgtNodeId, tgtSlot));
+      }
+    }
+    const query = searchQuery.trim();
+
+    const candidates = compatibleTargets
+      .map(({ node, inputIndex, widgetInputName, widgetInputType }) => {
+        const typeDef = nodeTypes[node.type];
+        const displayName = resolveWorkflowNodeDisplayName(workflow, node, nodeTypes);
+        const pack = prettyPackName(String(typeDef?.python_module ?? typeDef?.category?.split('/')[0] ?? 'Core'));
+        const isSynthetic = inputIndex < 0;
+        const inputSlot = isSynthetic ? undefined : node.inputs?.[inputIndex];
+        if (!isSynthetic && !inputSlot) return null;
+        const inputName = isSynthetic
+          ? (widgetInputName ?? 'value')
+          : (inputSlot!.localized_name || inputSlot!.name || `Input ${inputIndex + 1}`);
+        const inputType = isSynthetic ? String(widgetInputType) : String(inputSlot!.type);
+        const selectionKey = isSynthetic
+          ? `${node.id}:w:${inputName}`
+          : makeOutputSelectionKey(node.id, inputIndex);
+        const currentlyConnectedFromThisOutput = !isSynthetic && connectedKeys.has(selectionKey);
+        let hasExistingLink = false;
+        let existingSourceLabel: string | null = null;
+        const existingLinkId = inputSlot?.link;
+        if (existingLinkId != null && !currentlyConnectedFromThisOutput) {
+          const existingLink = scopedWorkflow.links.find((link) => link[0] === existingLinkId);
+          if (existingLink) {
+            hasExistingLink = true;
+            const [, existingSrcNodeId] = existingLink;
+            const existingSrcNode = findWorkflowNodeInScope(
+              workflow,
+              existingSrcNodeId,
+              currentSubgraphId,
+            );
+            if (existingSrcNode) {
+              existingSourceLabel = `${resolveWorkflowNodeDisplayName(workflow, existingSrcNode, nodeTypes)} #${existingSrcNode.id}`;
+            }
+          }
+        }
+        const text = `${displayName} ${typeDef?.display_name ?? ''} ${node.type} ${String(node.id)} ${inputName}`;
+        const matches = !query
+          || fuzzyMatch(query, text)
+          || isSubsequence(normalizeSearchText(query), normalizeSearchText(text));
+        if (!matches) return null;
+        const score =
+          getFieldScore(query, displayName) * 4 +
+          getFieldScore(query, inputName) * 3 +
+          getFieldScore(query, typeDef?.display_name ?? '') * 2 +
+          getFieldScore(query, node.type) * 2 +
+          getFieldScore(query, String(node.id));
+
+        return {
+          nodeId: node.id,
+          inputIndex,
+          selectionKey,
+          isSynthetic,
+          displayName,
+          pack,
+          inputName,
+          inputType,
+          currentlyConnectedFromThisOutput,
+          hasExistingLink,
+          existingSourceLabel,
+          // Materialized widget-inputs carry .widget; synthetic ones are widgets
+          // by construction.
+          isOverrideable: isSynthetic || Boolean(inputSlot!.widget),
+          score
+        };
+      });
+    const filtered = candidates.filter((candidate): candidate is OutputCandidate => candidate !== null);
+    filtered.sort((a, b) => b.score - a.score || a.nodeId - b.nodeId);
+    return filtered;
+  }, [mode, scopedWorkflow, workflow, nodeTypes, nodeId, props, searchQuery, currentSubgraphId]);
+
+  const initialOutputSelection = useMemo(() => {
+    if (mode !== 'output') return new Set<string>();
+    return new Set(
+      outputCandidates
+        .filter((candidate) => candidate.currentlyConnectedFromThisOutput)
+        .map((candidate) => candidate.selectionKey)
+    );
+  }, [mode, outputCandidates]);
+
+  const outputCandidatesByKey = useMemo(() => {
+    const map = new Map<string, OutputCandidate>();
+    for (const candidate of outputCandidates) {
+      map.set(candidate.selectionKey, candidate);
+    }
+    return map;
+  }, [outputCandidates]);
+
+  const outputNodeCandidates = useMemo<OutputNodeCandidate[]>(() => {
+    if (mode !== 'output') return [];
+    const byNode = new Map<number, OutputNodeCandidate>();
+    for (const candidate of outputCandidates) {
+      const existing = byNode.get(candidate.nodeId);
+      if (existing) {
+        existing.inputs.push(candidate);
+        if (candidate.isOverrideable) existing.overrideableCount += 1;
+        if (candidate.score > existing.score) existing.score = candidate.score;
+        continue;
+      }
+      byNode.set(candidate.nodeId, {
+        nodeId: candidate.nodeId,
+        displayName: candidate.displayName,
+        pack: candidate.pack,
+        score: candidate.score,
+        overrideableCount: candidate.isOverrideable ? 1 : 0,
+        inputs: [candidate]
+      });
+    }
+    return Array.from(byNode.values()).sort((a, b) => b.score - a.score || a.nodeId - b.nodeId);
+  }, [mode, outputCandidates]);
+
+  const outputSelectionHasChanges = useMemo(() => {
+    if (mode !== 'output') return false;
+    return !areKeySetsEqual(selectedOutputTargetKeys, initialOutputSelection)
+      || !areKeySetsEqual(selectedOutputBoundarySlots, initialOutputBoundarySelection);
+  }, [
+    mode,
+    selectedOutputTargetKeys,
+    initialOutputSelection,
+    selectedOutputBoundarySlots,
+    initialOutputBoundarySelection,
+  ]);
+
+  const inputSelectionHasChanges = useMemo(() => {
+    if (mode !== 'input') return false;
+    if (selectedInputBoundarySlot !== initialInputBoundarySlot) return true;
+    const a = selectedInputSource;
+    const b = initialInputSource;
+    if (!a && !b) return false;
+    if (!a || !b) return true;
+    return a.nodeId !== b.nodeId || a.outputIndex !== b.outputIndex;
+  }, [mode, selectedInputSource, initialInputSource, selectedInputBoundarySlot, initialInputBoundarySlot]);
+
+  const outputOverwriteCandidates = useMemo(() => {
+    if (mode !== 'output') return [];
+    const candidates: OutputCandidate[] = [];
+    for (const key of selectedOutputTargetKeys) {
+      if (initialOutputSelection.has(key)) continue;
+      const candidate = outputCandidatesByKey.get(key);
+      if (candidate?.hasExistingLink) candidates.push(candidate);
+    }
+    return candidates;
+  }, [mode, selectedOutputTargetKeys, initialOutputSelection, outputCandidatesByKey]);
+
+  const hasBoundaryOutputOverwrite = useMemo(() => {
+    if (mode !== 'output') return false;
+    return boundarySlotCandidates.some(
+      (candidate) => selectedOutputBoundarySlots.has(candidate.slotIndex)
+        && !initialOutputBoundarySelection.has(candidate.slotIndex)
+        && candidate.hasExistingLink,
+    );
+  }, [
+    mode,
+    boundarySlotCandidates,
+    selectedOutputBoundarySlots,
+    initialOutputBoundarySelection,
+  ]);
+
+  const toggleInputSelection = (srcNodeId: number, srcOutputIndex: number) => {
+    if (mode !== 'input') return;
+    setSelectedInputBoundarySlot(null);
+    setSelectedInputSource((prev) =>
+      prev && prev.nodeId === srcNodeId && prev.outputIndex === srcOutputIndex
+        ? null
+        : { nodeId: srcNodeId, outputIndex: srcOutputIndex },
+    );
+  };
+
+  const toggleInputBoundarySelection = (slotIndex: number) => {
+    if (mode !== 'input') return;
+    setSelectedInputSource(null);
+    setSelectedInputBoundarySlot((previous) => previous === slotIndex ? null : slotIndex);
+  };
+
+  const toggleOutputBoundarySelection = (slotIndex: number) => {
+    if (mode !== 'output') return;
+    setSelectedOutputBoundarySlots((previous) => {
+      const next = new Set(previous);
+      if (next.has(slotIndex)) next.delete(slotIndex);
+      else next.add(slotIndex);
+      return next;
+    });
+  };
+
+  // Clears the staged selection; the actual disconnect happens on Apply.
+  const handleDisconnect = () => {
+    if (mode !== 'input') return;
+    setSelectedInputSource(null);
+    setSelectedInputBoundarySlot(null);
+  };
+
+  const getBoundaryInputTargets = (
+    slotIndex: number,
+    omitCurrentTarget: boolean,
+  ): Array<{ nodeKey: string; inputSlot: number }> => {
+    if (mode !== 'input') return [];
+    const latestWorkflow = useWorkflowStore.getState().workflow;
+    const definition = latestWorkflow?.definitions?.subgraphs?.find(
+      (candidate) => candidate.id === currentSubgraphId,
+    );
+    if (!definition) return [];
+    const targets: Array<{ nodeKey: string; inputSlot: number }> = [];
+    for (const link of definition.links) {
+      if (link.origin_id !== SUBGRAPH_INPUT_NODE_ID || link.origin_slot !== slotIndex) continue;
+      if (omitCurrentTarget && link.target_id === nodeId && link.target_slot === props.inputIndex) continue;
+      const targetNode = definition.nodes.find((candidate) => candidate.id === link.target_id);
+      if (targetNode?.itemKey) {
+        targets.push({ nodeKey: targetNode.itemKey, inputSlot: link.target_slot });
+      }
+    }
+    return targets;
+  };
+
+  const applyInputSelection = () => {
+    if (mode !== 'input') return;
+    if (!currentNodeHierarchicalKey) return;
+    runUndoTransaction(() => {
+      if (
+        initialInputBoundarySlot != null
+        && initialInputBoundarySlot !== selectedInputBoundarySlot
+      ) {
+        connectBoundaryInput(
+          initialInputBoundarySlot,
+          getBoundaryInputTargets(initialInputBoundarySlot, true),
+        );
+      }
+
+      if (
+        selectedInputBoundarySlot != null
+        && selectedInputBoundarySlot !== initialInputBoundarySlot
+      ) {
+        connectBoundaryInput(selectedInputBoundarySlot, [
+          ...getBoundaryInputTargets(selectedInputBoundarySlot, true),
+          { nodeKey: currentNodeHierarchicalKey, inputSlot: props.inputIndex },
+        ]);
+        return;
+      }
+
+      if (selectedInputSource) {
+        const srcHierarchicalKey = getHierarchicalKeyForNodeId(selectedInputSource.nodeId);
+        if (!srcHierarchicalKey) return;
+        connectNodes(
+          srcHierarchicalKey,
+          selectedInputSource.outputIndex,
+          currentNodeHierarchicalKey,
+          props.inputIndex,
+          props.inputType,
+        );
+      } else if (initialInputSource && !ueResolution) {
+        // A broadcast has no link to remove — it would simply be re-resolved on
+        // the next render. Stopping it is a job for its Anything Everywhere node.
+        disconnectInput(currentNodeHierarchicalKey, props.inputIndex);
+      }
+    }, 'Edit connections');
+    onClose();
+  };
+
+  const handleAddNewNode = (typeName: string) => {
+    if (mode !== 'input') return;
+    if (!currentNodeHierarchicalKey) return;
+    const newNodeId = addNodeAndConnect(typeName, currentNodeHierarchicalKey, props.inputIndex);
+    onClose();
+    setSearchQuery('');
+    if (newNodeId !== null) {
+      const newHierarchicalKey = getHierarchicalKeyForNodeId(newNodeId);
+      if (newHierarchicalKey) {
+        // New node opens with its connections section expanded.
+        expandConnectionsSection(newHierarchicalKey);
+        if (props.originHadConnection) scrollToNode(newHierarchicalKey);
+      }
+    }
+  };
+
+  const handleAddNewNodeFromOutput = (
+    typeName: string,
+    suggestedInputIndex: number,
+    suggestedInputType: string
+  ) => {
+    if (mode !== 'output') return;
+    if (!currentNodeHierarchicalKey) return;
+
+    const newNodeId = addNode(typeName, {
+      nearNodeHierarchicalKey: currentNodeHierarchicalKey,
+      inSubgraphId: currentSubgraphId ?? undefined,
+    });
+    if (newNodeId === null) return;
+
+    const newHierarchicalKey = getHierarchicalKeyForNodeId(newNodeId);
+    if (!newHierarchicalKey) return;
+
+    const latestWorkflow = useWorkflowStore.getState().workflow;
+    const newNode = latestWorkflow
+      ? findWorkflowNodeInScope(latestWorkflow, newNodeId, currentSubgraphId)
+      : null;
+    if (!newNode || !currentNodeHierarchicalKey) return;
+
+    const compatibleInputIndex = newNode.inputs.findIndex((input) => input.type.toUpperCase() === suggestedInputType.toUpperCase());
+    const inputIndex = compatibleInputIndex >= 0 ? compatibleInputIndex : suggestedInputIndex;
+    const inputType = newNode.inputs[inputIndex]?.type;
+    if (inputType == null) return;
+
+    connectNodes(currentNodeHierarchicalKey, props.outputIndex, newHierarchicalKey, inputIndex, inputType);
+    onClose();
+    setSearchQuery('');
+    // New node opens with its connections section expanded.
+    expandConnectionsSection(newHierarchicalKey);
+    if (props.originHadConnection) scrollToNode(newHierarchicalKey);
+  };
+
+  const toggleOutputTargetSelection = (key: string) => {
+    setSelectedOutputTargetKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  const openMultiInputPicker = (nodeCandidate: OutputNodeCandidate) => {
+    const initialSelection = new Set<string>();
+    for (const candidate of nodeCandidate.inputs) {
+      if (selectedOutputTargetKeys.has(candidate.selectionKey)) {
+        initialSelection.add(candidate.selectionKey);
+      }
+    }
+    setMultiInputPickerNodeId(nodeCandidate.nodeId);
+    setMultiInputPickerSelection(initialSelection);
+  };
+
+  const closeMultiInputPicker = () => {
+    setMultiInputPickerNodeId(null);
+    setMultiInputPickerSelection(new Set());
+  };
+
+  const toggleMultiInputPickerSelection = (selectionKey: string) => {
+    setMultiInputPickerSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(selectionKey)) {
+        next.delete(selectionKey);
+      } else {
+        next.add(selectionKey);
+      }
+      return next;
+    });
+  };
+
+  const applyMultiInputPickerSelection = () => {
+    if (multiInputPickerNodeId == null) return;
+    const nodeCandidate = outputNodeCandidates.find((candidate) => candidate.nodeId === multiInputPickerNodeId);
+    if (!nodeCandidate) {
+      closeMultiInputPicker();
+      return;
+    }
+    const nodeKeys = nodeCandidate.inputs.map((input) => input.selectionKey);
+    setSelectedOutputTargetKeys((prev) => {
+      const next = new Set(prev);
+      for (const key of nodeKeys) {
+        next.delete(key);
+      }
+      for (const key of multiInputPickerSelection) {
+        next.add(key);
+      }
+      return next;
+    });
+    closeMultiInputPicker();
+  };
+
+  const handleOutputNodeClick = (nodeCandidate: OutputNodeCandidate) => {
+    if (nodeCandidate.inputs.length > 1) {
+      openMultiInputPicker(nodeCandidate);
+      return;
+    }
+    const onlyInput = nodeCandidate.inputs[0];
+    if (!onlyInput) return;
+    toggleOutputTargetSelection(onlyInput.selectionKey);
+  };
+
+  const applyOutputSelection = () => {
+    if (mode !== 'output') return;
+    // One undo step for the whole Apply: each disconnect/materialize/connect
+    // below commits its own store set(), and N targets would otherwise stack
+    // up to 2N separate undo snapshots.
+    runUndoTransaction(() => {
+      for (const key of initialOutputSelection) {
+        if (selectedOutputTargetKeys.has(key)) continue;
+        const candidate = outputCandidatesByKey.get(key);
+        if (!candidate) continue;
+        const targetHierarchicalKey = getHierarchicalKeyForNodeId(candidate.nodeId);
+        if (!targetHierarchicalKey) continue;
+        disconnectInput(targetHierarchicalKey, candidate.inputIndex);
+      }
+      for (const key of selectedOutputTargetKeys) {
+        if (initialOutputSelection.has(key)) continue;
+        const candidate = outputCandidatesByKey.get(key);
+        if (!candidate) continue;
+        const targetHierarchicalKey = getHierarchicalKeyForNodeId(candidate.nodeId);
+        if (!targetHierarchicalKey || !currentNodeHierarchicalKey) continue;
+        // Un-materialized widget-inputs only exist in the type def — create the
+        // slot first (overriding the widget), then connect to it.
+        const targetInputIndex = candidate.isSynthetic
+          ? ensureWidgetInputSlot(targetHierarchicalKey, candidate.inputName, candidate.inputType)
+          : candidate.inputIndex;
+        if (targetInputIndex == null || targetInputIndex < 0) continue;
+        connectNodes(currentNodeHierarchicalKey, props.outputIndex, targetHierarchicalKey, targetInputIndex, candidate.inputType);
+      }
+      for (const slotIndex of initialOutputBoundarySelection) {
+        if (!selectedOutputBoundarySlots.has(slotIndex)) {
+          connectBoundaryOutput(slotIndex, null);
+        }
+      }
+      if (currentNodeHierarchicalKey) {
+        for (const slotIndex of selectedOutputBoundarySlots) {
+          if (initialOutputBoundarySelection.has(slotIndex)) continue;
+          connectBoundaryOutput(slotIndex, {
+            nodeKey: currentNodeHierarchicalKey,
+            outputSlot: props.outputIndex,
+          });
+        }
+      }
+    }, 'Edit connections');
+    onClose();
+  };
+
+  const handleSubmitOutput = () => {
+    if (mode !== 'output') return;
+    if (outputOverwriteCandidates.length > 0 || hasBoundaryOutputOverwrite) {
+      setShowOverwriteConfirm(true);
+      return;
+    }
+    applyOutputSelection();
+  };
+
+  // Escape closes the topmost layer: the overwrite confirm, then the multi-input
+  // picker, then the whole connection menu.
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      if (showOverwriteConfirm) {
+        setShowOverwriteConfirm(false);
+      } else if (multiInputPickerNodeId != null) {
+        setMultiInputPickerNodeId(null);
+        setMultiInputPickerSelection(new Set());
+      } else {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [isOpen, showOverwriteConfirm, multiInputPickerNodeId, onClose]);
+
+  const modalTitle = isGetInput
+    ? t('Read from Set')
+    : mode === 'input'
+    ? (currentAction === 'pick' ? t('Connect {name}', { name: props.inputName }) : t('Add new node'))
+    : (currentAction === 'pick' ? t('Connect {name}', { name: props.outputName }) : t('Add new node'));
+  const searchPlaceholder = isGetInput
+    ? t('Search set nodes...')
+    : mode === 'input'
+    ? (currentAction === 'pick' ? t('Search existing nodes...') : t('Search node types...'))
+    : (currentAction === 'pick' ? t('Search target nodes...') : t('Search node types...'));
+
+  // GetNode source picker: list the SetNode relay names; selecting one sets the
+  // Get's name widget (index 0). Lives in the standard connection modal shell.
+  const renderGetSourceContent = () => {
+    const getNode = scopedWorkflow?.nodes.find((n) => n.id === nodeId);
+    const currentName = getNode ? getSetGetName(getNode) : null;
+    const allNames = scopedWorkflow ? collectSetNodeNames(scopedWorkflow) : [];
+    const query = searchQuery.trim().toLowerCase();
+    const names = query ? allNames.filter((n) => n.toLowerCase().includes(query)) : allNames;
+    const choose = (name: string) => {
+      if (currentNodeHierarchicalKey) updateNodeWidget(currentNodeHierarchicalKey, 0, name, 'value');
+      onClose();
+    };
+    return (
+      <div className="px-3 pt-3 pb-20 flex flex-col gap-2">
+        {names.length === 0 ? (
+          <SearchEmptyState query={searchQuery} message={t('No Set nodes found')} />
+        ) : (
+          names.map((name) => (
+            <button
+              key={name}
+              type="button"
+              onClick={() => choose(name)}
+              className={`w-full text-left rounded-xl border px-4 py-3 flex items-center justify-between gap-3 transition active:scale-[0.998] shadow-sm ${
+                name === currentName
+                  ? 'border-cyan-400/40 bg-cyan-500/10'
+                  : 'border-white/10 bg-slate-900/80 hover:bg-white/10'
+              }`}
+            >
+              <span className="font-mono text-sm text-slate-100">{name}</span>
+              {name === currentName && <CheckIcon className="w-4 h-4 text-cyan-300" />}
+            </button>
+          ))
+        )}
+        {currentName && (
+          <button
+            type="button"
+            className="w-full text-left rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-300 hover:bg-red-500/20 active:scale-[0.998] transition"
+            onClick={() => {
+              if (currentNodeHierarchicalKey) updateNodeWidget(currentNodeHierarchicalKey, 0, '', 'value');
+              onClose();
+            }}
+          >
+            {t('Clear source')}
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  const renderBoundarySlotSection = () => {
+    if (boundarySlotCandidates.length === 0) return null;
+    const heading = mode === 'input' ? t('Subgraph inputs') : t('Subgraph outputs');
+
+    return (
+      <section className="connection-boundary-section rounded-xl border border-white/10 bg-slate-900/55 overflow-hidden mb-1">
+        <div className="px-3 py-2 border-b border-white/10 text-xs font-semibold uppercase tracking-wide text-slate-400">
+          {heading}
+        </div>
+        <div className="p-2 flex flex-col gap-2">
+          {boundarySlotCandidates.map((candidate) => {
+            const selected = mode === 'input'
+              ? selectedInputBoundarySlot === candidate.slotIndex
+              : selectedOutputBoundarySlots.has(candidate.slotIndex);
+            return (
+              <button
+                key={`boundary-slot-${mode}-${candidate.slotIndex}`}
+                type="button"
+                className={`connection-boundary-candidate w-full flex items-center justify-between gap-3 text-left px-3 py-2.5 rounded-lg border transition active:scale-[0.998] ${
+                  selected
+                    ? 'bg-cyan-500/15 border-cyan-400/40'
+                    : 'bg-slate-950/70 border-white/10 hover:bg-white/5'
+                }`}
+                onClick={() => {
+                  if (mode === 'input') toggleInputBoundarySelection(candidate.slotIndex);
+                  else toggleOutputBoundarySelection(candidate.slotIndex);
+                }}
+              >
+                <span className="min-w-0">
+                  <span className="flex items-center gap-2 min-w-0">
+                    <span className="text-sm font-semibold text-slate-100 truncate">
+                      {candidate.label}
+                    </span>
+                    {candidate.currentlyConnected && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 text-[10px] font-medium shrink-0">
+                        <CheckIcon className="w-3 h-3" />
+                        {t('Connected')}
+                      </span>
+                    )}
+                    {candidate.hasExistingLink && (
+                      <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 text-[10px] font-medium shrink-0">
+                        {t('Already linked')}
+                      </span>
+                    )}
+                  </span>
+                  <span className="block text-xs text-slate-400 truncate mt-0.5">
+                    {candidate.type}
+                  </span>
+                </span>
+                <span className={`w-5 h-5 rounded border flex items-center justify-center shrink-0 ${
+                  selected
+                    ? 'bg-cyan-500 border-cyan-500 text-slate-950'
+                    : 'bg-slate-950 border-white/20'
+                }`}>
+                  {selected && <CheckIcon className="w-3 h-3" />}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    );
+  };
+
+  const renderInputPickContent = () => {
+    if (mode !== 'input') return null;
+    const inputProps = props;
+
+    const concreteNodes: typeof filteredNodes = [];
+    const wildcardNodes: typeof filteredNodes = [];
+    for (const entry of filteredNodes) {
+      const outputSlot = entry.node.outputs?.[entry.outputIndex];
+      const outputType = outputSlot?.type;
+      if (isWildcardOnlyMatch(outputType, inputProps.inputType)) {
+        wildcardNodes.push(entry);
+      } else {
+        concreteNodes.push(entry);
+      }
+    }
+
+    const renderNodeEntry = (entry: (typeof filteredNodes)[number]) => {
+      const { node, outputIndex } = entry;
+      const typeDef = nodeTypes?.[node.type];
+      const displayName = resolveWorkflowNodeDisplayName(workflow, node, nodeTypes);
+      const pack = prettyPackName(String(typeDef?.python_module ?? typeDef?.category?.split('/')[0] ?? 'Core'));
+      const outputSlot = node.outputs?.[outputIndex];
+      const outputName = outputSlot?.localized_name || outputSlot?.name || `Output ${outputIndex + 1}`;
+      const outputType = String(outputSlot?.type ?? inputProps.inputType);
+      const selected = Boolean(
+        selectedInputSource &&
+        selectedInputSource.nodeId === node.id &&
+        selectedInputSource.outputIndex === outputIndex,
+      );
+      const currentlyConnected = Boolean(
+        initialInputSource &&
+        initialInputSource.nodeId === node.id &&
+        initialInputSource.outputIndex === outputIndex,
+      );
+      const broadcastControllerId = broadcastBySource.get(`${node.id}:${outputIndex}`);
+      const broadcastVia = broadcastControllerId === undefined
+        ? null
+        : currentlyConnected && ueResolution
+          ? t('Broadcast to this input via Anything Everywhere #{id}', { id: broadcastControllerId })
+          : t('Broadcast via Anything Everywhere #{id}', { id: broadcastControllerId });
+      return (
+        <ConnectionSearchResult
+          key={`${node.id}:${outputIndex}`}
+          nodeId={node.id}
+          displayName={displayName}
+          pack={pack}
+          outputName={outputName}
+          outputType={outputType}
+          inputName={inputProps.inputName}
+          selected={selected}
+          currentlyConnected={currentlyConnected}
+          broadcastVia={broadcastVia}
+          onSelect={() => toggleInputSelection(node.id, outputIndex)}
+        />
+      );
+    };
+
+    return (
+      <div className="px-3 pt-3 pb-20 flex flex-col gap-2">
+        {renderBoundarySlotSection()}
+
+        {concreteNodes.map(renderNodeEntry)}
+
+        {wildcardNodes.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 pt-1 pb-0.5">
+              <div className="flex-1 border-t border-white/10" />
+              <span className="text-xs font-medium text-slate-400 whitespace-nowrap">{t('Wildcard *')}</span>
+              <div className="flex-1 border-t border-white/10" />
+            </div>
+            {wildcardNodes.map(renderNodeEntry)}
+          </>
+        )}
+
+        {filteredNodes.length === 0 && boundarySlotCandidates.length === 0 && (
+          <SearchEmptyState query={searchQuery} message={t('No matching nodes found')} />
+        )}
+
+        <button
+          type="button"
+          className="w-full text-left rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 flex items-center gap-3 hover:bg-cyan-500/15 active:scale-[0.998] transition shadow-sm"
+          onClick={() => { setCurrentAction('addNew'); setSearchQuery(''); }}
+        >
+          <div className="w-8 h-8 rounded-full bg-cyan-500 flex items-center justify-center flex-shrink-0">
+            <PlusIcon className="w-4 h-4 text-slate-950" />
+          </div>
+          <span className="text-sm font-semibold text-slate-100">{t('Add new node...')}</span>
+        </button>
+
+        {/* No Disconnect for a broadcast: there is no link here to remove, and
+            it would just be re-resolved. Stopping it is a job for the sending
+            Anything Everywhere node. */}
+        {(inputProps.currentlyConnectedNodeId !== null || initialInputBoundarySlot != null) && !ueResolution && (
+          <button
+            type="button"
+            className="w-full text-left rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-300 hover:bg-red-500/20 active:scale-[0.998] transition"
+            onClick={handleDisconnect}
+          >
+            {t('Disconnect')}
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  const renderInputAddNewContent = () => {
+    if (mode !== 'input') return null;
+    const inputProps = props;
+
+    const concreteTypes: typeof filteredTypes = [];
+    const wildcardTypes: typeof filteredTypes = [];
+    for (const entry of filteredTypes) {
+      const outputType = entry.def.output?.[entry.outputIndex];
+      if (isWildcardOnlyMatch(outputType, inputProps.inputType)) {
+        wildcardTypes.push(entry);
+      } else {
+        concreteTypes.push(entry);
+      }
+    }
+
+    const renderTypeEntry = (entry: (typeof filteredTypes)[number]) => {
+      const { typeName, def, outputIndex } = entry;
+      const pack = prettyPackName(String(def.python_module ?? def.category?.split('/')[0] ?? 'Core'));
+      const outputType = String(def.output?.[outputIndex] ?? inputProps.inputType);
+      const outputName = def.output_name?.[outputIndex] ?? def.output?.[outputIndex] ?? 'Output';
+      return (
+        <NodeTypeSearchResult
+          key={typeName}
+          title={resolveNodeTypeDisplayName(def, typeName)}
+          subtitle={pack || t('Core')}
+          outputType={outputType}
+          outputName={String(outputName)}
+          inputName={inputProps.inputName}
+          titleClassName="text-sm font-medium text-slate-100 truncate"
+          onSelect={() => handleAddNewNode(typeName)}
+        />
+      );
+    };
+
+    return (
+      <div className="px-3 pt-3 pb-20 flex flex-col gap-2">
+        {filteredTypes.length === 0 && (
+          <SearchEmptyState query={searchQuery} message={t('No matching node types found')} />
+        )}
+        {concreteTypes.map(renderTypeEntry)}
+        {wildcardTypes.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 pt-1 pb-0.5">
+              <div className="flex-1 border-t border-white/10" />
+              <span className="text-xs font-medium text-slate-400 whitespace-nowrap">{t('Wildcard *')}</span>
+              <div className="flex-1 border-t border-white/10" />
+            </div>
+            {wildcardTypes.map(renderTypeEntry)}
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const renderOutputSelectionContent = () => {
+    if (mode !== 'output') return null;
+    const outputProps = props;
+
+    const concreteOutputNodes: typeof outputNodeCandidates = [];
+    const wildcardOutputNodes: typeof outputNodeCandidates = [];
+    for (const nodeCandidate of outputNodeCandidates) {
+      const allWildcard = nodeCandidate.inputs.every((candidate) =>
+        isWildcardOnlyMatch(outputProps.outputType, candidate.inputType)
+      );
+      if (allWildcard) {
+        wildcardOutputNodes.push(nodeCandidate);
+      } else {
+        concreteOutputNodes.push(nodeCandidate);
+      }
+    }
+
+    const renderOutputNodeEntry = (nodeCandidate: OutputNodeCandidate) => {
+      const selectedCount = nodeCandidate.inputs.filter((candidate) =>
+        selectedOutputTargetKeys.has(candidate.selectionKey)
+      ).length;
+      const isSelected = selectedCount > 0;
+      const hasExistingLink = nodeCandidate.inputs.some((candidate) => candidate.hasExistingLink);
+      const hasConnectedFromThisOutput = nodeCandidate.inputs.some((candidate) => candidate.currentlyConnectedFromThisOutput);
+      const subtitle = nodeCandidate.inputs.length > 1
+        ? t('{count} compatible inputs', { count: nodeCandidate.inputs.length })
+        : t('{output} -> {input}', { output: outputProps.outputName, input: nodeCandidate.inputs[0]?.inputName ?? t('Input') });
+      return (
+        <button
+          key={`output-node-${nodeCandidate.nodeId}`}
+          type="button"
+          className={`w-full text-left rounded-xl border px-4 py-3 shadow-sm transition ${
+            isSelected
+              ? 'border-cyan-400/50 bg-cyan-500/10'
+              : 'border-white/10 bg-slate-900/95 hover:bg-slate-800/95 active:scale-[0.998]'
+          }`}
+          onClick={() => handleOutputNodeClick(nodeCandidate)}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold text-slate-100 flex items-center gap-2 min-w-0">
+                <span className="truncate">
+                  {nodeCandidate.displayName} <span className="text-slate-500">#{nodeCandidate.nodeId}</span>
+                </span>
+                {hasConnectedFromThisOutput && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 text-[10px] font-medium shrink-0">
+                    <CheckIcon className="w-3 h-3" />
+                    {t('Connected')}
+                  </span>
+                )}
+                {hasExistingLink && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 text-[10px] font-medium shrink-0">
+                    {t('Already linked')}
+                  </span>
+                )}
+              </div>
+              <div className="text-xs text-slate-400 truncate mt-0.5">{nodeCandidate.pack || 'Core'}</div>
+              <div className="text-xs text-slate-300 mt-1 truncate">{subtitle}</div>
+              {nodeCandidate.overrideableCount > 0 && (
+                <div className="text-[11px] text-cyan-300/90 mt-0.5">
+                  {nodeCandidate.overrideableCount} overrideable widget{nodeCandidate.overrideableCount === 1 ? '' : 's'}
+                </div>
+              )}
+            </div>
+            <div className={`w-5 h-5 rounded border flex items-center justify-center ${isSelected ? 'bg-cyan-500 border-cyan-500 text-slate-950' : 'bg-slate-950 border-white/20'}`}>
+              {isSelected && <CheckIcon className="w-3 h-3" />}
+            </div>
+          </div>
+        </button>
+      );
+    };
+
+    return (
+      <div className="px-3 pt-3 pb-20 flex flex-col gap-2">
+        {renderBoundarySlotSection()}
+
+        {concreteOutputNodes.map(renderOutputNodeEntry)}
+
+        {wildcardOutputNodes.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 pt-1 pb-0.5">
+              <div className="flex-1 border-t border-white/10" />
+              <span className="text-xs font-medium text-slate-400 whitespace-nowrap">{t('Wildcard *')}</span>
+              <div className="flex-1 border-t border-white/10" />
+            </div>
+            {wildcardOutputNodes.map(renderOutputNodeEntry)}
+          </>
+        )}
+
+        {outputNodeCandidates.length === 0 && boundarySlotCandidates.length === 0 && (
+          <SearchEmptyState query={searchQuery} message={t('No matching target nodes found')} />
+        )}
+
+        <button
+          type="button"
+          className="w-full text-left rounded-xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3 flex items-center gap-3 hover:bg-cyan-500/15 active:scale-[0.998] transition shadow-sm"
+          onClick={() => { setCurrentAction('addNew'); setSearchQuery(''); }}
+        >
+          <div className="w-8 h-8 rounded-full bg-cyan-500 flex items-center justify-center flex-shrink-0">
+            <PlusIcon className="w-4 h-4 text-slate-950" />
+          </div>
+          <span className="text-sm font-semibold text-slate-100">{t('Add new node...')}</span>
+        </button>
+      </div>
+    );
+  };
+
+  const renderOutputAddNewContent = () => {
+    if (mode !== 'output') return null;
+    const outputProps = props;
+
+    const concreteOutputTypes: typeof filteredOutputTypes = [];
+    const wildcardOutputTypes: typeof filteredOutputTypes = [];
+    for (const entry of filteredOutputTypes) {
+      if (isWildcardOnlyMatch(outputProps.outputType, entry.inputType)) {
+        wildcardOutputTypes.push(entry);
+      } else {
+        concreteOutputTypes.push(entry);
+      }
+    }
+
+    const renderOutputTypeEntry = (entry: (typeof filteredOutputTypes)[number]) => {
+      const { typeName, def, inputIndex, inputType, inputName } = entry;
+      const pack = prettyPackName(String(def.python_module ?? def.category?.split('/')[0] ?? 'Core'));
+      return (
+        <NodeTypeSearchResult
+          key={typeName}
+          title={resolveNodeTypeDisplayName(def, typeName)}
+          subtitle={pack || t('Core')}
+          outputType={outputProps.outputType}
+          outputName={outputProps.outputName}
+          inputName={String(inputName)}
+          titleClassName="text-sm font-medium text-slate-100 truncate"
+          onSelect={() => handleAddNewNodeFromOutput(typeName, inputIndex, inputType)}
+        />
+      );
+    };
+
+    return (
+      <div className="px-3 pt-3 pb-20 flex flex-col gap-2">
+        {filteredOutputTypes.length === 0 && (
+          <SearchEmptyState query={searchQuery} message={t('No matching node types found')} />
+        )}
+        {concreteOutputTypes.map(renderOutputTypeEntry)}
+        {wildcardOutputTypes.length > 0 && (
+          <>
+            <div className="flex items-center gap-2 pt-1 pb-0.5">
+              <div className="flex-1 border-t border-white/10" />
+              <span className="text-xs font-medium text-slate-400 whitespace-nowrap">{t('Wildcard *')}</span>
+              <div className="flex-1 border-t border-white/10" />
+            </div>
+            {wildcardOutputTypes.map(renderOutputTypeEntry)}
+          </>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <SearchActionModal
+      isOpen={isOpen}
+      onClose={onClose}
+      title={modalTitle}
+      searchQuery={searchQuery}
+      onSearchQueryChange={setSearchQuery}
+      searchPlaceholder={searchPlaceholder}
+      onBack={currentAction === 'addNew' ? () => { setCurrentAction('pick'); setSearchQuery(''); } : undefined}
+      footer={(
+        <FullscreenModalActions
+          zIndex={2201}
+          actions={[
+            {
+              key: 'cancel',
+              label: t('Cancel'),
+              onClick: onClose,
+              variant: 'secondary'
+            },
+            ...(promoteBoundarySlot && currentAction === 'pick'
+              ? [{
+                  key: 'promote-boundary',
+                  label: promoteBoundarySlot.direction === 'input'
+                    ? t('Expose as subgraph input')
+                    : t('Expose as subgraph output'),
+                  onClick: () => {
+                    if (promoteBoundarySlot.direction === 'input') {
+                      addBoundaryInput({
+                        nodeKey: promoteBoundarySlot.nodeKey,
+                        inputSlot: promoteBoundarySlot.slotIndex,
+                      });
+                    } else {
+                      addBoundaryOutput({
+                        nodeKey: promoteBoundarySlot.nodeKey,
+                        outputSlot: promoteBoundarySlot.slotIndex,
+                      });
+                    }
+                    onClose();
+                  },
+                  variant: 'secondary' as const
+                }]
+              : []),
+            ...(mode === 'output'
+              && currentAction === 'pick'
+              ? [{
+                  key: 'apply',
+                  label: t('Apply'),
+                  onClick: handleSubmitOutput,
+                  variant: 'primary' as const,
+                  disabled: !outputSelectionHasChanges
+                }]
+              : []),
+            ...(mode === 'input'
+              && currentAction === 'pick'
+              && !isGetInput
+              ? [{
+                  key: 'apply',
+                  label: t('Apply'),
+                  onClick: applyInputSelection,
+                  variant: 'primary' as const,
+                  disabled: !inputSelectionHasChanges
+                }]
+              : [])
+          ]}
+        />
+      )}
+    >
+      <div className="flex-1 overflow-auto bg-slate-950/88">
+        {isGetInput ? (
+          renderGetSourceContent()
+        ) : mode === 'input' ? (
+          currentAction === 'pick' ? (
+            renderInputPickContent()
+          ) : (
+            renderInputAddNewContent()
+          )
+        ) : currentAction === 'pick' ? (
+          renderOutputSelectionContent()
+        ) : (
+          renderOutputAddNewContent()
+        )}
+      </div>
+
+      {mode === 'output' && multiInputPickerNodeId != null && (
+        <div
+          className="fixed inset-0 z-[2250] bg-black/40 flex items-center justify-center p-4"
+          onClick={closeMultiInputPicker}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className="w-full max-w-sm bg-slate-900 border border-white/10 text-slate-100 rounded-xl shadow-lg overflow-hidden"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-4 py-3 text-sm font-semibold text-slate-100 border-b border-white/10">
+              {t('Select compatible inputs')}
+            </div>
+            <div className="max-h-[45vh] overflow-y-auto">
+              {outputNodeCandidates
+                .find((candidate) => candidate.nodeId === multiInputPickerNodeId)
+                ?.inputs.map((candidate) => {
+                  const key = candidate.selectionKey;
+                  const selected = multiInputPickerSelection.has(key);
+                  return (
+                    <button
+                      key={`input-picker-${key}`}
+                      type="button"
+                      className={`w-full flex items-center justify-between gap-3 text-left px-4 py-3 text-sm ${
+                        selected ? 'bg-cyan-500/10' : 'hover:bg-white/10'
+                      }`}
+                      onClick={() => toggleMultiInputPickerSelection(key)}
+                    >
+                      <span className="min-w-0">
+                        <span className="flex items-center gap-2 min-w-0">
+                          <span className="text-slate-100 truncate">{candidate.inputName}</span>
+                          {candidate.isOverrideable && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 text-[10px] font-medium shrink-0">
+                              {t('Override')}
+                            </span>
+                          )}
+                        </span>
+                        <span className="block text-xs text-slate-400 truncate">{candidate.inputType}</span>
+                      </span>
+                      <span className={`w-5 h-5 rounded border flex items-center justify-center shrink-0 ${
+                        selected ? 'bg-cyan-500 border-cyan-500 text-slate-950' : 'bg-slate-950 border-white/20'
+                      }`}>
+                        {selected ? <CheckIcon className="w-3 h-3" /> : null}
+                      </span>
+                    </button>
+                  );
+                })}
+            </div>
+            <div className="px-3 py-3 border-t border-white/10 flex justify-end gap-2">
+              <button
+                type="button"
+                className="px-3 py-2 rounded-lg text-sm font-medium text-slate-300 hover:bg-white/10"
+                onClick={closeMultiInputPicker}
+              >
+                {t('Cancel')}
+              </button>
+              <button
+                type="button"
+                className="px-3 py-2 rounded-lg text-sm font-semibold text-slate-950 bg-cyan-500 hover:bg-cyan-400"
+                onClick={applyMultiInputPickerSelection}
+              >
+                {t('Apply')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mode === 'output' && showOverwriteConfirm && (
+        <Dialog
+          onClose={() => setShowOverwriteConfirm(false)}
+          // Above the SearchActionModal that hosts it (z-2200) and its
+          // multi-input picker (z-2250).
+          zIndex={2260}
+          title={t('Overwrite existing connections?')}
+          description={hasBoundaryOutputOverwrite
+            ? t('Some selected slots are already connected. Continuing will disconnect their current source and reconnect them to this output.')
+            : t('Some selected inputs are already connected. Continuing will disconnect their current source and reconnect to this output.')}
+          actions={[
+            {
+              label: t('Cancel'),
+              onClick: () => setShowOverwriteConfirm(false),
+              variant: 'secondary'
+            },
+            {
+              label: t('Overwrite'),
+              onClick: () => {
+                setShowOverwriteConfirm(false);
+                applyOutputSelection();
+              },
+              variant: 'danger'
+            }
+          ]}
+        />
+      )}
+    </SearchActionModal>
+  );
+}

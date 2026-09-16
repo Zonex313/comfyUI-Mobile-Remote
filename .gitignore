@@ -11,6 +11,12 @@
 # 原子写入中断时留下的临时文件（例如 mobile_history.json.<hex>.tmp，体积跟原文件一样大）
 /*.json.*.tmp
 
+# ---- 面板源码的构建依赖与中间产物（构建产物 panel.js/panel.css 反而要入库，见 mobile/panel）----
+/mobile/panel/node_modules/
+/mobile/panel/dist/
+/mobile/panel/*.tsbuildinfo
+/mobile/panel/node_modules/.tmp/
+
 # ---- Python 缓存 ----
 __pycache__/
 *.pyc

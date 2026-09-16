@@ -1,0 +1,436 @@
+import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import type { Workflow, WorkflowNode, WorkflowSubgraphDefinition, WorkflowLink } from '@/api/types';
+import { validateAndNormalizeWorkflow } from '@/utils/workflowValidator';
+
+function loadFixture(): Workflow {
+  const path = resolve(
+    process.cwd(),
+    'src/hooks/__tests__/fixtures/complex_i2v_example_workflow.json',
+  );
+  return JSON.parse(readFileSync(path, 'utf-8')) as Workflow;
+}
+
+function makeNode(id: number, inputs = 0, outputs = 0): WorkflowNode {
+  return {
+    id,
+    itemKey: `sk-${id}`,
+    type: 'TestNode',
+    pos: [0, 0],
+    size: [200, 100],
+    flags: {},
+    order: 0,
+    mode: 0,
+    inputs: Array.from({ length: inputs }, (_, i) => ({
+      name: `input_${i}`,
+      type: 'INT',
+      link: null,
+    })),
+    outputs: Array.from({ length: outputs }, (_, i) => ({
+      name: `output_${i}`,
+      type: 'INT',
+      links: [],
+    })),
+    properties: {},
+    widgets_values: [],
+  };
+}
+
+function makeWorkflow(overrides: Partial<Workflow> = {}): Workflow {
+  const workflow: Workflow = {
+    last_node_id: 0,
+    last_link_id: 0,
+    nodes: [],
+    links: [],
+    groups: [],
+    config: {},
+    version: 0.4,
+    ...overrides,
+  };
+  // A real workflow's link allocator clears the ids already in use, and the
+  // validator now repairs one that doesn't (stock reissues from that counter,
+  // so a stale one overwrites a live link). Deriving it here keeps a fixture
+  // that declares `links: [[10, …]]` from reading as a workflow needing
+  // repair, which would defeat the "unchanged when already valid" tests.
+  const linkIds = [
+    ...workflow.links.map((link) => link[0]),
+    ...(workflow.definitions?.subgraphs ?? []).flatMap((sg) => (sg.links ?? []).map((l) => l.id)),
+  ];
+  return {
+    ...workflow,
+    last_link_id: Math.max(workflow.last_link_id, 0, ...linkIds),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// validateAndNormalizeWorkflow — fixture round-trip
+// ---------------------------------------------------------------------------
+
+describe('validateAndNormalizeWorkflow — fixture round-trip', () => {
+  it('returns the workflow unchanged when it is already valid', () => {
+    const wf = loadFixture();
+    const result = validateAndNormalizeWorkflow(wf);
+    // SubgraphIO.linkIds must be unchanged since the fixture is already correct
+    const sg4123 = result.definitions?.subgraphs?.find((s) =>
+      s.id.startsWith('4123daa5'),
+    );
+    expect(sg4123).toBeDefined();
+    // input[0] linkIds = [2408] from fixture
+    expect(sg4123!.inputs?.[0]?.linkIds).toEqual([2408]);
+    // input[4] linkIds = [2153, 2333, 2334] — multiple boundary links
+    const input4LinkIds = (sg4123!.inputs?.[4]?.linkIds ?? []).slice().sort((a, b) => a - b);
+    expect(input4LinkIds).toEqual([2153, 2333, 2334]);
+    // output[0] linkIds = [2163]
+    expect(sg4123!.outputs?.[0]?.linkIds).toEqual([2163]);
+  });
+
+  it('repairs a link allocator the desktop frontend left stale', () => {
+    // Not a contrived case: this fixture is a real desktop-authored workflow,
+    // and its "Backend" definition already runs interior link ids up to 2431
+    // while the root declares 2131. Stock hands out `state.lastLinkId + 1` and
+    // subgraphs share the root's counter, so the next connection drawn inside
+    // that subgraph would be given an id 300 live links already hold.
+    const wf = loadFixture();
+    expect(wf.last_link_id).toBe(2131);
+
+    const result = validateAndNormalizeWorkflow(wf);
+
+    // 2431 is the highest id the file already held; the 11 above it are the
+    // boundary links `migrateProxyWidgets` adds when it retires this fixture's
+    // legacy `proxyWidgets` lists into real boundary inputs.
+    expect(result.last_link_id).toBe(2442);
+    // Beyond the counter and the proxy migration, nothing moves: the node list
+    // is the same length and every node that carried no legacy widget list comes
+    // back byte-for-byte. (Identity is no longer the right assertion — migrating
+    // a placeholder necessarily rebuilds the graph around it.)
+    expect(result.nodes).toHaveLength(wf.nodes.length);
+    const carriedProxies = new Set(
+      wf.nodes.filter((node) => node.properties?.proxyWidgets).map((node) => node.id),
+    );
+    expect(carriedProxies.size, 'the fixture is the one with legacy lists').toBeGreaterThan(0);
+    for (const node of wf.nodes) {
+      if (carriedProxies.has(node.id)) continue;
+      expect(result.nodes.find((candidate) => candidate.id === node.id)).toEqual(node);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateAndNormalizeWorkflow — SubgraphIO.linkIds repair
+// ---------------------------------------------------------------------------
+
+describe('validateAndNormalizeWorkflow — SubgraphIO.linkIds repair', () => {
+  function makeSubgraphWorkflow(): Workflow {
+    const innerNode = makeNode(10, 1, 0);
+    const subgraph: WorkflowSubgraphDefinition = {
+      id: 'sg-test-uuid',
+      nodes: [innerNode],
+      links: [
+        { id: 101, origin_id: -10, origin_slot: 0, target_id: 10, target_slot: 0, type: 'INT' },
+        { id: 102, origin_id: -10, origin_slot: 0, target_id: 10, target_slot: 0, type: 'INT' },
+      ],
+      inputs: [
+        { id: 'slot-0', name: 'x', type: 'INT', linkIds: [] }, // intentionally empty (corrupt)
+      ],
+      outputs: [],
+      groups: [],
+      config: {},
+    };
+    const placeholder = makeNode(5, 1, 0);
+    placeholder.type = 'sg-test-uuid';
+    return makeWorkflow({
+      nodes: [placeholder],
+      definitions: { subgraphs: [subgraph] },
+    });
+  }
+
+  it('repairs empty linkIds to match actual boundary links', () => {
+    const wf = makeSubgraphWorkflow();
+    const result = validateAndNormalizeWorkflow(wf);
+    const sg = result.definitions?.subgraphs?.[0];
+    expect(sg?.inputs?.[0]?.linkIds).toEqual([101, 102]);
+  });
+
+  it('repairs stale linkIds that do not match actual boundary links', () => {
+    const wf = makeSubgraphWorkflow();
+    // Corrupt: set wrong link ID
+    wf.definitions!.subgraphs![0]!.inputs![0]!.linkIds = [999];
+    const result = validateAndNormalizeWorkflow(wf);
+    const sg = result.definitions?.subgraphs?.[0];
+    expect(sg?.inputs?.[0]?.linkIds).toEqual([101, 102]);
+  });
+
+  it('repairs output linkIds', () => {
+    const innerNode = makeNode(10, 0, 1);
+    const subgraph: WorkflowSubgraphDefinition = {
+      id: 'sg-out-test',
+      nodes: [innerNode],
+      links: [
+        { id: 201, origin_id: 10, origin_slot: 0, target_id: -20, target_slot: 0, type: 'FLOAT' },
+      ],
+      inputs: [],
+      outputs: [
+        { id: 'out-slot-0', name: 'value', type: 'FLOAT', linkIds: [] }, // corrupt
+      ],
+      groups: [],
+      config: {},
+    };
+    const placeholder = makeNode(5, 0, 1);
+    placeholder.type = 'sg-out-test';
+    const wf = makeWorkflow({
+      nodes: [placeholder],
+      definitions: { subgraphs: [subgraph] },
+    });
+    const result = validateAndNormalizeWorkflow(wf);
+    const sg = result.definitions?.subgraphs?.[0];
+    expect(sg?.outputs?.[0]?.linkIds).toEqual([201]);
+  });
+
+  it('sets linkIds to [] when there are no boundary links for that slot', () => {
+    const subgraph: WorkflowSubgraphDefinition = {
+      id: 'sg-empty-links',
+      nodes: [],
+      links: [],
+      inputs: [
+        { id: 'slot-0', name: 'x', type: 'INT', linkIds: [999] }, // stale
+      ],
+      outputs: [],
+      groups: [],
+      config: {},
+    };
+    const wf = makeWorkflow({ definitions: { subgraphs: [subgraph] } });
+    const result = validateAndNormalizeWorkflow(wf);
+    const sg = result.definitions?.subgraphs?.[0];
+    expect(sg?.inputs?.[0]?.linkIds).toEqual([]);
+  });
+
+  it('returns same reference when no subgraph corrections needed', () => {
+    const subgraph: WorkflowSubgraphDefinition = {
+      id: 'sg-already-valid',
+      inputNode: { id: -10, bounding: [-400, 0, 120, 60] as [number, number, number, number] },
+      outputNode: { id: -20, bounding: [400, 0, 120, 60] as [number, number, number, number] },
+      version: 1,
+      revision: 0,
+      state: { lastGroupId: 0, lastNodeId: 0, lastLinkId: 0, lastRerouteId: 0 },
+      nodes: [],
+      links: [
+        { id: 301, origin_id: -10, origin_slot: 0, target_id: 10, target_slot: 0, type: 'INT' },
+      ],
+      inputs: [{ id: 'slot-0', name: 'x', type: 'INT', linkIds: [301] }],
+      outputs: [],
+      groups: [],
+      config: {},
+    };
+    const wf = makeWorkflow({ definitions: { subgraphs: [subgraph] } });
+    const result = validateAndNormalizeWorkflow(wf);
+    expect(result).toBe(wf);
+    expect(result.definitions?.subgraphs?.[0]).toBe(subgraph);
+  });
+
+  it('does not modify subgraphs that have no links', () => {
+    const subgraph: WorkflowSubgraphDefinition = {
+      id: 'sg-no-links',
+      inputNode: { id: -10, bounding: [-400, 0, 120, 60] as [number, number, number, number] },
+      outputNode: { id: -20, bounding: [400, 0, 120, 60] as [number, number, number, number] },
+      version: 1,
+      revision: 0,
+      state: { lastGroupId: 0, lastNodeId: 0, lastLinkId: 0, lastRerouteId: 0 },
+      nodes: [],
+      links: [],
+      inputs: [{ id: 'slot-0', name: 'x', type: 'INT' }],
+      outputs: [],
+      groups: [],
+      config: {},
+    };
+    const wf = makeWorkflow({ definitions: { subgraphs: [subgraph] } });
+    const result = validateAndNormalizeWorkflow(wf);
+    // No boundary links → linkIds stays undefined (no modification since there's nothing to correct)
+    expect(result).toBe(wf);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateAndNormalizeWorkflow — root link slot repair
+// ---------------------------------------------------------------------------
+
+describe('validateAndNormalizeWorkflow — root link slot repair', () => {
+  it('adds missing link ID to output.links', () => {
+    const src = makeNode(1, 0, 1);
+    const dst = makeNode(2, 1, 0);
+    dst.inputs[0]!.link = 10;
+    // src.outputs[0].links is empty — missing link 10
+    const link: WorkflowLink = [10, 1, 0, 2, 0, 'INT'];
+    const wf = makeWorkflow({ nodes: [src, dst], links: [link] });
+    const result = validateAndNormalizeWorkflow(wf);
+    const srcNode = result.nodes.find((n) => n.id === 1)!;
+    expect(srcNode.outputs[0]!.links).toContain(10);
+  });
+
+  it('repairs stale input.link', () => {
+    const src = makeNode(1, 0, 1);
+    src.outputs[0]!.links = [10];
+    const dst = makeNode(2, 1, 0);
+    dst.inputs[0]!.link = 999; // stale: should be 10
+    const link: WorkflowLink = [10, 1, 0, 2, 0, 'INT'];
+    const wf = makeWorkflow({ nodes: [src, dst], links: [link] });
+    const result = validateAndNormalizeWorkflow(wf);
+    const dstNode = result.nodes.find((n) => n.id === 2)!;
+    expect(dstNode.inputs[0]!.link).toBe(10);
+  });
+
+  it('returns same workflow reference when root links are already valid', () => {
+    const src = makeNode(1, 0, 1);
+    src.outputs[0]!.links = [10];
+    const dst = makeNode(2, 1, 0);
+    dst.inputs[0]!.link = 10;
+    const link: WorkflowLink = [10, 1, 0, 2, 0, 'INT'];
+    const wf = makeWorkflow({ nodes: [src, dst], links: [link] });
+    const result = validateAndNormalizeWorkflow(wf);
+    expect(result).toBe(wf);
+  });
+
+  it('skips missing nodes gracefully', () => {
+    // Link references node 99 which does not exist. Nothing points at it either,
+    // so the garbage collector drops it rather than leaving it in the table.
+    const link: WorkflowLink = [10, 99, 0, 98, 0, 'INT'];
+    const wf = makeWorkflow({ links: [link] });
+    expect(() => validateAndNormalizeWorkflow(wf)).not.toThrow();
+    const result = validateAndNormalizeWorkflow(wf);
+    expect(result.links).toEqual([]);
+    expect(result.nodes).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Root link-table garbage collection
+// ---------------------------------------------------------------------------
+
+describe('validateAndNormalizeWorkflow — root link garbage collection', () => {
+  it('drops a link no node slot references', () => {
+    const src = makeNode(1, 0, 1);
+    const dst = makeNode(2, 1, 0);
+    // Neither endpoint knows about link 10 — it is leftover, not a stale
+    // reference, so repairing from it would re-create a connection that is gone.
+    const orphan: WorkflowLink = [10, 1, 0, 2, 0, 'INT'];
+    const wf = makeWorkflow({ nodes: [src, dst], links: [orphan] });
+    const result = validateAndNormalizeWorkflow(wf);
+    expect(result.links).toEqual([]);
+    expect(result.nodes.find((n) => n.id === 2)!.inputs[0]!.link).toBeNull();
+    expect(result.nodes.find((n) => n.id === 1)!.outputs[0]!.links).toEqual([]);
+  });
+
+  it('keeps a link the origin still references, so a stale input is still repaired', () => {
+    const src = makeNode(1, 0, 1);
+    src.outputs[0]!.links = [10];
+    const dst = makeNode(2, 1, 0);
+    dst.inputs[0]!.link = null; // stale on the target side only
+    const link: WorkflowLink = [10, 1, 0, 2, 0, 'INT'];
+    const wf = makeWorkflow({ nodes: [src, dst], links: [link] });
+    const result = validateAndNormalizeWorkflow(wf);
+    expect(result.links).toHaveLength(1);
+    expect(result.nodes.find((n) => n.id === 2)!.inputs[0]!.link).toBe(10);
+  });
+
+  it('keeps a link the target still references', () => {
+    const src = makeNode(1, 0, 1);
+    const dst = makeNode(2, 1, 0);
+    dst.inputs[0]!.link = 10;
+    const link: WorkflowLink = [10, 1, 0, 2, 0, 'INT'];
+    const wf = makeWorkflow({ nodes: [src, dst], links: [link] });
+    const result = validateAndNormalizeWorkflow(wf);
+    expect(result.links).toHaveLength(1);
+    expect(result.nodes.find((n) => n.id === 1)!.outputs[0]!.links).toContain(10);
+  });
+
+  it('de-duplicates repeated link ids on an output slot', () => {
+    const src = makeNode(1, 0, 1);
+    src.outputs[0]!.links = [10, 10, 10];
+    const dst = makeNode(2, 1, 0);
+    dst.inputs[0]!.link = 10;
+    const link: WorkflowLink = [10, 1, 0, 2, 0, 'INT'];
+    const wf = makeWorkflow({ nodes: [src, dst], links: [link] });
+    const result = validateAndNormalizeWorkflow(wf);
+    expect(result.nodes.find((n) => n.id === 1)!.outputs[0]!.links).toEqual([10]);
+  });
+
+  /**
+   * Use Everywhere materialises its virtual broadcasts as real links to serialise
+   * a prompt and then removes them again, but the cleanup does not always run.
+   * Affected workflows accumulate the same edge on every save; without the GC,
+   * `repairRootLinkSlots` resurrects the whole pile into the node slots and the
+   * next save writes it to disk.
+   */
+  it('clears an accumulated pile of leaked Use Everywhere links', () => {
+    const src = makeNode(1, 0, 1);
+    const dst = makeNode(2, 1, 0);
+    const leaked: WorkflowLink[] = Array.from(
+      { length: 70 },
+      (_, i) => [100 + i, 1, 0, 2, 0, 'INT'] as WorkflowLink,
+    );
+    const wf = makeWorkflow({ nodes: [src, dst], links: leaked });
+    const result = validateAndNormalizeWorkflow(wf);
+    expect(result.links).toEqual([]);
+    expect(result.nodes.find((n) => n.id === 1)!.outputs[0]!.links).toEqual([]);
+    expect(result.nodes.find((n) => n.id === 2)!.inputs[0]!.link).toBeNull();
+  });
+
+  it('is idempotent', () => {
+    const src = makeNode(1, 0, 1);
+    const dst = makeNode(2, 1, 0);
+    dst.inputs[0]!.link = 10;
+    const wf = makeWorkflow({
+      nodes: [src, dst],
+      links: [[10, 1, 0, 2, 0, 'INT'], [11, 1, 0, 2, 0, 'INT']] as WorkflowLink[],
+    });
+    const once = validateAndNormalizeWorkflow(wf);
+    const twice = validateAndNormalizeWorkflow(once);
+    expect(twice).toBe(once);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// widgets_values_named
+// ---------------------------------------------------------------------------
+
+describe('validateAndNormalizeWorkflow — widgets_values_named', () => {
+  it('strips the named widget-value mirror from root and subgraph nodes', () => {
+    const rootNode = {
+      ...makeNode(1),
+      widgets_values: ['edited on mobile'],
+      widgets_values_named: { text: 'stale desktop value' },
+    } as unknown as WorkflowNode;
+    const innerNode = {
+      ...makeNode(2),
+      widgets_values: [7],
+      widgets_values_named: { steps: 20 },
+    } as unknown as WorkflowNode;
+    const wf = makeWorkflow({
+      nodes: [rootNode],
+      definitions: {
+        subgraphs: [
+          {
+            id: 'sg-1',
+            nodes: [innerNode],
+            links: [],
+            inputs: [],
+            outputs: [],
+          } as unknown as WorkflowSubgraphDefinition,
+        ],
+      },
+    });
+
+    const result = validateAndNormalizeWorkflow(wf);
+
+    expect('widgets_values_named' in result.nodes[0]).toBe(false);
+    expect(result.nodes[0].widgets_values).toEqual(['edited on mobile']);
+    const inner = result.definitions!.subgraphs![0].nodes[0];
+    expect('widgets_values_named' in inner).toBe(false);
+    expect(inner.widgets_values).toEqual([7]);
+  });
+
+  it('leaves a workflow without the mirror untouched', () => {
+    const wf = makeWorkflow({ nodes: [makeNode(1)] });
+    expect(validateAndNormalizeWorkflow(wf)).toBe(wf);
+  });
+});

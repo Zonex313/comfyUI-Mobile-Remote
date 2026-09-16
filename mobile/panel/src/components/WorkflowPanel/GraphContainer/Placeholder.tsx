@@ -1,0 +1,57 @@
+import { PlusIcon } from '@/components/icons';
+import { hexToRgba } from '@/utils/grouping';
+import { useI18n } from '@/i18n';
+
+type GraphContainerType = 'group' | 'subgraph';
+
+interface GraphContainerPlaceholderProps {
+  containerType: GraphContainerType;
+  containerId: string | number;
+  hiddenNodeCount?: number;
+  color: string;
+  onClick?: () => void;
+}
+
+export function GraphContainerPlaceholder({
+  containerType,
+  containerId,
+  hiddenNodeCount = 0,
+  color,
+  onClick
+}: GraphContainerPlaceholderProps) {
+  const { t } = useI18n();
+  const label = containerType === 'group' ? t('group') : t('subgraph');
+
+  const resolveEmptyLabel = () => {
+    if (hiddenNodeCount === 1) {
+      return t('{count} hidden node in {type}', { count: hiddenNodeCount, type: label });
+    }
+    if (hiddenNodeCount > 1) {
+      return t('{count} hidden nodes in {type}', { count: hiddenNodeCount, type: label });
+    }
+    return t('No nodes in {type}', { type: label });
+  };
+
+  return (
+    <div
+      id={`${containerType}-placeholder-${containerId}`}
+      className="flex items-center justify-center px-4 pb-4 pt-2"
+      style={{ borderColor: hexToRgba(color, 0.3) }}
+    >
+      <button
+        type="button"
+        onClick={onClick}
+        className="w-full rounded-lg border-2 border-dashed bg-slate-950/40 flex flex-col items-center justify-center py-4 hover:bg-slate-900/70 transition-colors"
+        style={{ borderColor: hexToRgba(color, 0.4) }}
+      >
+        <span className="text-sm text-slate-400 select-none">
+          {resolveEmptyLabel()}
+        </span>
+        <span className="text-xs text-slate-500 select-none mt-1 inline-flex items-center gap-1">
+          <PlusIcon className="w-3 h-3" />
+          {t('Click to add a node')}
+        </span>
+      </button>
+    </div>
+  );
+}

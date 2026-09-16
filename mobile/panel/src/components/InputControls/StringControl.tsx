@@ -1,0 +1,399 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { TextareaActions } from './TextareaActions';
+import { TagAutocompleteTextarea } from './TagAutocompleteTextarea';
+import { FullscreenWidgetModal } from '../modals/FullscreenWidgetModal';
+import { PinButton } from './PinButton';
+import { useCoarsePointer } from '@/hooks/useCoarsePointer';
+import { themeColors } from '@/theme/colors';
+import {
+  controlInputBaseClassName,
+  controlInputDarkClassName,
+  controlInputFocusClassNameForState,
+  controlLabelClassName,
+  controlModalFocusClassName,
+  controlModalInputBaseClassName,
+  controlStateClassName,
+} from './controlStyles';
+import { ControlLabelRow } from './ControlLabelRow';
+
+// How long after the last keystroke the draft is committed to the store.
+const DRAFT_COMMIT_DELAY_MS = 300;
+
+/**
+ * Keystrokes land in local draft state and are committed to the store on a
+ * short debounce (plus blur/unmount/modal-close flushes). Committing per
+ * keystroke replaces the whole workflow object, re-rendering every NodeCard
+ * per character — the single biggest source of typing latency on mobile.
+ */
+function useDraftText(value: string, onChange: (value: unknown) => void) {
+  const [draft, setDraft] = useState(value);
+  const [syncedValue, setSyncedValue] = useState(value);
+  const [dirty, setDirty] = useState(false);
+
+  // Adopt upstream changes (other clients, pinned overlay, reverts) unless the
+  // user is mid-edit. Render-time state adjustment per the React docs pattern.
+  if (value !== syncedValue) {
+    setSyncedValue(value);
+    if (!dirty) {
+      setDraft(value);
+    }
+  }
+
+  const flush = useCallback(() => {
+    if (!dirty) return;
+    setDirty(false);
+    onChange(draft);
+  }, [dirty, draft, onChange]);
+
+  const handleDraftChange = useCallback((next: string) => {
+    setDraft(next);
+    setDirty(true);
+  }, []);
+
+  // Debounced commit: every keystroke restarts the timer via the deps.
+  useEffect(() => {
+    if (!dirty) return;
+    const timer = window.setTimeout(() => {
+      setDirty(false);
+      onChange(draft);
+    }, DRAFT_COMMIT_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [dirty, draft, onChange]);
+
+  // Commit anything pending if the control unmounts (card collapse, etc.).
+  const latestRef = useRef({ dirty, draft, onChange });
+  useEffect(() => {
+    latestRef.current = { dirty, draft, onChange };
+  });
+  useEffect(
+    () => () => {
+      const latest = latestRef.current;
+      if (latest.dirty) latest.onChange(latest.draft);
+    },
+    [],
+  );
+
+  return { draft, handleDraftChange, flush };
+}
+
+interface StringControlProps {
+  containerClass: string;
+  name: string;
+  value: unknown;
+  options?: Record<string, unknown> | unknown[];
+  onChange: (value: unknown) => void;
+  disabled?: boolean;
+  hideLabel?: boolean;
+  displayLabel?: string;
+  hasPin: boolean;
+  isPinned?: boolean;
+  onTogglePin?: () => void;
+  hasError?: boolean;
+  isPromoted?: boolean;
+  forceModalOpen?: boolean;
+  /** Route modal opening through a parent-owned editor when provided. */
+  onRequestModalOpen?: () => void;
+  onModalClose?: () => void;
+  labelAccessory?: ReactNode;
+  /** "⇠ slot" boundary annotation and its jump — see ControlLabelRow. */
+  boundaryAnnotation?: string;
+  onBoundaryJump?: () => void;
+}
+
+export function StringControl({
+  containerClass,
+  name,
+  value,
+  options,
+  onChange,
+  disabled = false,
+  hideLabel = false,
+  displayLabel,
+  hasPin,
+  isPinned = false,
+  onTogglePin,
+  hasError = false,
+  isPromoted = false,
+  labelAccessory,
+  boundaryAnnotation,
+  onBoundaryJump,
+  forceModalOpen = false,
+  onRequestModalOpen,
+  onModalClose
+}: StringControlProps) {
+  const getOption = (key: string): unknown => {
+    if (Array.isArray(options)) return undefined;
+    return options?.[key];
+  };
+
+  const isMultiline = getOption('multiline') as boolean;
+  const placeholder = getOption('placeholder') as string;
+  const { draft: valueString, handleDraftChange, flush } = useDraftText(
+    String(value ?? ''),
+    onChange,
+  );
+  // TextareaActions transforms (clear/insert) apply immediately — they're
+  // discrete actions, not typing.
+  const handleImmediateChange = (next: unknown) => {
+    handleDraftChange(String(next ?? ''));
+    flush();
+  };
+  const [internalModalOpen, setInternalModalOpen] = useState(false);
+  const showModal = forceModalOpen || internalModalOpen;
+
+  const isCoarsePointer = useCoarsePointer();
+  const useModalFlow = forceModalOpen || isCoarsePointer;
+
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-grow the textarea to fit its content (both the inline editor and the
+  // modal editor). In the modal, the panel/body caps the visible height and
+  // scrolls past it, so the textarea grows with content instead of being forced
+  // to full height by flex-1.
+  useLayoutEffect(() => {
+    if (!isMultiline) return;
+    const el = textareaRef.current;
+    if (!el) return;
+    const grow = () => {
+      el.style.height = '0px';
+      el.style.height = `${el.scrollHeight}px`;
+    };
+    grow();
+
+    // A textarea first measured while its panel was hidden (display:none →
+    // scrollHeight 0) would otherwise stay collapsed: the deps below don't
+    // change when the panel is shown again. Re-grow whenever the element gains
+    // width — that captures the hidden→visible transition (and real reflows)
+    // while ignoring the height changes we make ourselves, so it can't loop.
+    if (typeof ResizeObserver === 'undefined') return;
+    let lastWidth = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth === lastWidth) return;
+      lastWidth = el.clientWidth;
+      grow();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [valueString, showModal, isMultiline]);
+
+  const handleClose = () => {
+    flush();
+    setInternalModalOpen(false);
+    onModalClose?.();
+  };
+
+  const handleOpen = () => {
+    if (disabled) return;
+    if (onRequestModalOpen) {
+      onRequestModalOpen();
+      return;
+    }
+    setInternalModalOpen(true);
+  };
+
+  if (useModalFlow) {
+    return (
+      // The top padding sits on the container so it applies to the multiline
+      // and single-line branches alike — widgetControlHasTopPadding promises
+      // every labelled standard control carries it.
+      <div className={`${containerClass} ${!hideLabel ? 'pt-2' : ''}`}>
+        {isMultiline ? (
+          <>
+            <div className="string-control-label-container flex items-center justify-between mb-1 min-h-[18px]">
+              {!hideLabel ? (
+                <ControlLabelRow
+                  name={name}
+                  displayLabel={displayLabel}
+                  isPromoted={isPromoted}
+                  boundaryAnnotation={boundaryAnnotation}
+          onBoundaryJump={onBoundaryJump}
+                  labelAccessory={labelAccessory}
+                  className=""
+                />
+              ) : (
+                <span className={controlLabelClassName} />
+              )}
+              <TextareaActions
+                allowEdit={!disabled}
+                value={valueString}
+                onChange={handleImmediateChange}
+                textareaRef={textareaRef}
+                className="opacity-100"
+              />
+            </div>
+            <div
+              className={`relative ${controlInputBaseClassName} min-h-[100px] group cursor-text ${hasPin ? 'pr-10' : ''} ${controlStateClassName({ disabled, hasError, isPromoted })}`}
+              onClick={handleOpen}
+            >
+              <div
+                className="whitespace-pre-wrap break-words text-slate-100"
+                style={{ color: themeColors.text.onDark }}
+              >
+                {valueString || <span className="text-slate-500">{placeholder}</span>}
+              </div>
+              {hasPin && (
+                <div className="absolute right-2 top-2 pointer-events-none">
+                  <div className="pointer-events-auto">
+                    <PinButton isPinned={isPinned} onToggle={onTogglePin} />
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            {!hideLabel && (
+              <ControlLabelRow
+                name={name}
+                displayLabel={displayLabel}
+                isPromoted={isPromoted}
+                boundaryAnnotation={boundaryAnnotation}
+          onBoundaryJump={onBoundaryJump}
+                labelAccessory={labelAccessory}
+              />
+            )}
+            <div
+              className={`relative ${controlInputBaseClassName} min-h-[46px] flex items-center cursor-text ${hasPin ? 'pr-16' : 'pr-6'} ${controlStateClassName({ disabled, hasError, isPromoted })}`}
+              onClick={handleOpen}
+            >
+              <div
+                className="truncate min-w-0 flex-1 text-slate-100"
+                style={{ color: themeColors.text.onDark }}
+              >
+                {valueString || <span className="text-slate-500">{placeholder}</span>}
+              </div>
+              {hasPin && (
+                <div className="absolute right-0 top-0 bottom-0 flex items-center pointer-events-none">
+                  <div className="pointer-events-auto px-3">
+                    <PinButton isPinned={isPinned} onToggle={onTogglePin} />
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        <FullscreenWidgetModal
+          title={displayLabel ?? name}
+          isOpen={showModal}
+          onClose={handleClose}
+          viewerSidebar={forceModalOpen}
+          headerActions={isMultiline ? (
+            <TextareaActions
+              allowEdit={!disabled}
+              value={valueString}
+              onChange={handleImmediateChange}
+              textareaRef={textareaRef}
+              className="mr-2"
+            />
+          ) : null}
+        >
+          {isMultiline ? (
+            <TagAutocompleteTextarea
+              textareaRef={textareaRef}
+              value={valueString}
+              onValueChange={handleDraftChange}
+              onBlur={flush}
+              placeholder={placeholder}
+              className={`${controlModalInputBaseClassName} min-h-[150px] resize-none overflow-hidden ${controlModalFocusClassName(isPromoted)}`}
+              autoFocus={!forceModalOpen}
+              disabled={disabled}
+            />
+          ) : (
+            <input
+              ref={inputRef}
+              type="text"
+              value={valueString}
+              onChange={(e) => handleDraftChange(e.target.value)}
+              onBlur={flush}
+              placeholder={placeholder}
+              data-swipe-nav-ignore="true"
+              className={`${controlModalInputBaseClassName} ${controlModalFocusClassName(isPromoted)}`}
+              autoFocus={!forceModalOpen}
+              disabled={disabled}
+            />
+          )}
+        </FullscreenWidgetModal>
+      </div>
+    );
+  }
+
+  if (isMultiline) {
+    return (
+      <div className={`${containerClass} group ${!hideLabel ? 'pt-2' : ''}`} data-textarea-root="true">
+        <div className="string-control-label-container flex items-center justify-between mb-1 min-h-[18px]" data-textarea-header="true">
+          {!hideLabel && (
+            <ControlLabelRow
+              name={name}
+              displayLabel={displayLabel}
+              isPromoted={isPromoted}
+              boundaryAnnotation={boundaryAnnotation}
+          onBoundaryJump={onBoundaryJump}
+              labelAccessory={labelAccessory}
+              className=""
+            />
+          )}
+          <TextareaActions
+            allowEdit={!disabled}
+            value={valueString}
+            onChange={handleImmediateChange}
+            textareaRef={textareaRef}
+            className="opacity-70 transition-opacity group-focus-within:opacity-100"
+          />
+        </div>
+        <div className="relative">
+          <TagAutocompleteTextarea
+            textareaRef={textareaRef}
+            value={valueString}
+            onValueChange={handleDraftChange}
+            onBlur={flush}
+            placeholder={placeholder}
+            className={`${controlInputBaseClassName} min-h-[100px] resize-none overflow-hidden ${hasPin ? 'pr-10' : ''} ${controlInputFocusClassNameForState(isPromoted)} ${controlStateClassName({ disabled, hasError, isPromoted })}`} // TODO - determine if overflow should be hidden or auto here
+            style={{ overflowAnchor: 'none' }}
+            disabled={disabled}
+          />
+          {hasPin && (
+            <div className="absolute right-2 top-2">
+              <PinButton isPinned={isPinned} onToggle={onTogglePin} />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${containerClass} ${!hideLabel ? 'pt-2' : ''}`}>
+      {!hideLabel && (
+        <ControlLabelRow
+          name={name}
+          displayLabel={displayLabel}
+          isPromoted={isPromoted}
+          boundaryAnnotation={boundaryAnnotation}
+          onBoundaryJump={onBoundaryJump}
+          labelAccessory={labelAccessory}
+        />
+      )}
+      <div className="relative">
+        <input
+          type="text"
+          value={valueString}
+          onChange={(e) => handleDraftChange(e.target.value)}
+          onBlur={flush}
+          placeholder={placeholder}
+          data-swipe-nav-ignore="true"
+          className={`${controlInputBaseClassName} ${controlInputDarkClassName} ${hasPin ? 'pr-16' : ''} ${controlInputFocusClassNameForState(isPromoted)} ${controlStateClassName({ disabled, hasError, isPromoted })}`}
+          disabled={disabled}
+        />
+        {hasPin && (
+          <div className="absolute right-0 top-0 bottom-0 flex items-center pointer-events-none">
+            <div className="pointer-events-auto px-3">
+              <PinButton isPinned={isPinned} onToggle={onTogglePin} />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

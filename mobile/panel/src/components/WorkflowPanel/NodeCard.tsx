@@ -1,0 +1,1951 @@
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { HistoryOutputImage, WorkflowInput, WorkflowNode, WorkflowOutput } from '@/api/types';
+import { useWildcards } from '@/hooks/useWildcards';
+import {
+  appendWildcard,
+  buildWildcardOptions,
+  decorateWildcardPromptWidgets,
+  isWildcardSelectWidget,
+  isWildcardTargetWidget,
+  WILDCARD_SELECT_SENTINEL,
+} from '@/utils/wildcardWidgets';
+import { useWorkflowStore, getWidgetDefinitions, getInputWidgetDefinitions, getWidgetIndexForInput, findSeedWidgetIndex, findSeedControlWidgetIndex, resolveSubgraphPlaceholderWidgetDefs, resolveSubgraphPlaceholderInputWidgetDefs, resolveSubgraphProxyWidgetDefs, resolveSubgraphProxyInputWidgetDefs, resolveSubgraphBoundaryWidgetDefs, resolveSubgraphBoundaryInputWidgetDefs, isPlaceholderPromotedConnection } from '@/hooks/useWorkflow';
+import type { LinkedWidgetRoute, ProxyWidgetRoute } from '@/utils/widgetDefinitions';
+import { getInstanceNumber, getMobileDefMeta, isSubgraphPlaceholder, resolveCurrentScope } from '@/utils/canonicalWorkflowOps';
+import { getNodeDeletionOptions } from '@/utils/nodeDeletionOptions';
+import {
+  collectInstancePromotedValues,
+  collectPromotedWidgetViews,
+  instancesLosingPromotedValue,
+  resolveBoundaryTargetWidgetNames,
+} from '@/utils/promotedWidgetForm';
+import { ArrowRightIcon } from '@/components/icons';
+import { interpolateInstanceLabel } from '@/utils/subgraphInstanceLabels';
+import { runUndoTransaction } from '@/utils/undoTransaction';
+import { ReplaceSubgraphModal, type ReplaceSubgraphOption } from '@/components/modals/ReplaceSubgraphModal';
+import { EditSubgraphLabelsModal, type SubgraphLabelRow } from '@/components/modals/EditSubgraphLabelsModal';
+import {
+  collectSubgraphInstances,
+  getInstanceProxyLabel,
+  getInstanceSlotLabel,
+} from '@/utils/boundarySlotLabels';
+import { DeleteContainerModal } from '@/components/modals/DeleteContainerModal';
+import { EditBoundarySlotLabelModal } from '@/components/modals/EditBoundarySlotLabelModal';
+import { Dialog } from '@/components/modals/Dialog';
+import { UnpromoteSharedWidgetDialog } from '@/components/modals/UnpromoteSharedWidgetDialog';
+import { isLoraManagerNodeType } from '@/utils/loraManager';
+import { useSeedStore } from '@/hooks/useSeed';
+import { useBookmarksStore } from '@/hooks/useBookmarks';
+import { usePinnedWidgetStore } from '@/hooks/usePinnedWidget';
+import { useWorkflowErrorsStore } from '@/hooks/useWorkflowErrors';
+import { useOverallProgress } from '@/hooks/useOverallProgress';
+import { useQueueStore } from '@/hooks/useQueue';
+import { useNodeErrorPopover } from '@/hooks/useNodeErrorPopover';
+import { useConnectionSectionFoldsStore } from '@/hooks/useConnectionSectionFolds';
+import { useParameterSectionFoldsStore } from '@/hooks/useParameterSectionFolds';
+import { useWorkflowClipboardStore } from '@/hooks/useWorkflowClipboard';
+import { buildNodeClipboardPayload } from '@/utils/workflowClipboard';
+import {
+  getImageUrl,
+  getImagePreviewUrl,
+  getMediaThumbnailUrl,
+  getPlayableVideoUrl,
+} from '@/api/client';
+import { getMediaType } from '@/utils/media';
+import { NodeCardMenu } from './NodeCard/Menu';
+import { SelectionCheckbox } from '@/components/buttons/SelectionCheckbox';
+import { useWorkflowSelectionStore } from '@/hooks/useWorkflowSelection';
+import { NodeCardErrorPopover } from './NodeCard/ErrorPopover';
+import { NodeCardNote } from './NodeCard/Note';
+import { MarkdownContent } from './NodeCard/MarkdownContent';
+import { NodeCardOutputPreview } from './NodeCard/OutputPreview';
+import { NodeCardImageComparer } from './NodeCard/ImageComparer';
+import { DenoVideoCompare } from './NodeCard/DenoVideoCompare';
+import { isGetNode, isSetGetNode, isSetNode } from '@/utils/setGetNodes';
+import { isUseEverywhereNode } from '@/utils/useEverywhere';
+import { isUninstalledNodeType } from '@/utils/missingNodes';
+import { useCustomNodesManager } from '@/hooks/useCustomNodesManager';
+import { useSetGetNameEditStore } from '@/hooks/useSetGetNameEdit';
+import { useI18n } from '@/i18n';
+import { NodeCardHeader } from './NodeCard/Header';
+import { DeleteNodeModal } from '@/components/modals/DeleteNodeModal';
+import { ErrorHighlightBadge } from './NodeCard/ErrorHighlightBadge';
+import { NodeCardConnectionsSection } from './NodeCard/ConnectionsSection';
+import { NodeCardParameters } from './NodeCard/Parameters';
+import { resolveLoadImagePreview } from '@/utils/loadImagePreview';
+import { useMaskEditorStore } from '@/hooks/useMaskEditor';
+import {
+  getRevealFrontendPreviewUpdate,
+  getNodeFrontendPreviewPolicy,
+  getOasisWidgetState,
+  resolveNodeFrontendMediaPreview,
+} from '@/utils/nodeFrontendPreviews';
+import { requireHierarchicalKey } from '@/utils/itemKeys';
+import { hexToRgba } from '@/utils/grouping';
+import { resolveWorkflowColor, themeColors } from '@/theme/colors';
+import { supportsPinnedWidgetEditor } from '@/utils/pinnedWidgetSupport';
+import { BookmarkIconSvg, BookmarkOutlineIcon } from '@/components/icons';
+import { getPopOutTerminalKind } from '@/utils/popNodeOutOfSubgraph';
+import { collectPromotableWidgets } from '@/utils/promotableWidgets';
+
+/**
+ * Present a subgraph placeholder's widgets in the order the desktop card shows
+ * them. The three resolvers (socket-promoted, legacy proxyWidgets, boundary-only)
+ * each cover a different slice of the same boundary list, so concatenating them
+ * would sink boundary-only widgets — like the Krea-2 prompt box — to the bottom.
+ * `widgetIndex` is the boundary widget order, and proxy widgets carry
+ * PROXY_INDEX_OFFSET so they still sort after the boundary ones.
+ */
+function sortPlaceholderWidgetsByBoundaryOrder<T extends { widgetIndex: number }>(
+  defs: T[],
+): T[] {
+  return [...defs].sort((a, b) => a.widgetIndex - b.widgetIndex);
+}
+
+const EMPTY_IMAGES: HistoryOutputImage[] = [];
+type ImageLike = (typeof EMPTY_IMAGES)[number];
+const EMPTY_DURATION_STATS: Record<string, { avgMs: number; count: number }> = {};
+
+interface NodeCardProps {
+  node: WorkflowNode;
+  isExecuting?: boolean;
+  isConnectionHighlighted?: boolean;
+  errorBadgeLabel?: string | null;
+  onImageClick?: (images: Array<{ src: string; alt?: string }>, index: number, enableFollowQueue?: boolean) => void;
+  inGroup?: boolean;
+  onMoveNode?: () => void;
+  onMoveIntoSubgraph?: () => void;
+  onEnterSubgraph?: () => void;
+}
+
+export const NodeCard = memo(function NodeCard({
+  node,
+  isExecuting,
+  isConnectionHighlighted = false,
+  errorBadgeLabel,
+  onImageClick,
+  inGroup = false,
+  onMoveNode,
+  onMoveIntoSubgraph,
+  onEnterSubgraph,
+}: NodeCardProps) {
+  const { t } = useI18n();
+  const nodeTypes = useWorkflowStore((s) => s.nodeTypes);
+  const workflow = useWorkflowStore((s) => s.workflow);
+  const scopeStack = useWorkflowStore((s) => s.scopeStack);
+  // Which instance of each enclosing subgraph this card is being read through,
+  // so a promoted widget fed from outside the subgraph resolves to the value
+  // THIS route in has, rather than to nothing.
+  const instanceHint = useMemo(
+    () =>
+      new Set(
+        scopeStack.flatMap((frame) =>
+          frame.type === 'subgraph' ? [frame.placeholderNodeId] : [],
+        ),
+      ),
+    [scopeStack],
+  );
+  const updateNodeWidget = useWorkflowStore((s) => s.updateNodeWidget);
+  const updateNodeWidgets = useWorkflowStore((s) => s.updateNodeWidgets);
+  const updateSubgraphInnerNodeWidget = useWorkflowStore((s) => s.updateSubgraphInnerNodeWidget);
+  const promoteWidget = useWorkflowStore((s) => s.promoteWidget);
+  const setPromotedWidgetForm = useWorkflowStore((s) => s.setPromotedWidgetForm);
+  const demoteWidget = useWorkflowStore((s) => s.demoteWidget);
+  const moveBoundarySlot = useWorkflowStore((s) => s.moveBoundarySlot);
+  const removeBoundarySlot = useWorkflowStore((s) => s.removeBoundarySlot);
+  // Which boundary slot the rename modal is open for, on a placeholder card.
+  const [boundaryLabelSlot, setBoundaryLabelSlot] = useState<number | null>(null);
+  // Set when unpromoting a slot would collapse instance values that disagree,
+  // so the card can name what it is about to drop before doing it.
+  const [unpromoteSlot, setUnpromoteSlot] = useState<number | null>(null);
+  const setWidgetLabel = useWorkflowStore((s) => s.setWidgetLabel);
+  const updateNodeTitle = useWorkflowStore((s) => s.updateNodeTitle);
+  const updateWorkflowItemColor = useWorkflowStore((s) => s.updateWorkflowItemColor);
+  const toggleBypass = useWorkflowStore((s) => s.toggleBypass);
+  const convertImageOutputNode = useWorkflowStore((s) => s.convertImageOutputNode);
+  const setItemCollapsed = useWorkflowStore((s) => s.setItemCollapsed);
+  const setItemHidden = useWorkflowStore((s) => s.setItemHidden);
+  const collapsedItems = useWorkflowStore((s) => s.collapsedItems);
+  const nodeHierarchicalKey = requireHierarchicalKey(node.itemKey, `node ${node.id}`);
+  // Select mode: replace the kebab menu with a selection checkbox for this node.
+  const selectionMode = useWorkflowSelectionStore((s) => s.selectionMode);
+  const isNodeSelected = useWorkflowSelectionStore((s) =>
+    s.selectedKeys.includes(nodeHierarchicalKey),
+  );
+  const toggleSelectionKey = useWorkflowSelectionStore((s) => s.toggleKey);
+  const setConnectionHighlightMode = useWorkflowStore((s) => s.setConnectionHighlightMode);
+  const connectionHighlightMode = useWorkflowStore((s) => s.connectionHighlightModes[nodeHierarchicalKey] ?? 'off');
+  const setSeedMode = useSeedStore((s) => s.setSeedMode);
+  const currentWorkflowKey = useWorkflowStore((s) => s.currentWorkflowKey);
+  // Only subscribe to whether THIS node has a pinned widget (reduces re-renders)
+  const pinnedWidgetForThisNode = usePinnedWidgetStore((s) =>
+    s.pinnedWidget?.nodeId === node.id ? s.pinnedWidget : null
+  );
+  const setPinnedWidget = usePinnedWidgetStore((s) => s.setPinnedWidget);
+  const bookmarkedItems = useBookmarksStore((s) => s.bookmarkedItems);
+  const toggleBookmark = useBookmarksStore((s) => s.toggleBookmark);
+  const nodeImages = useWorkflowStore((s) => s.nodeOutputs[String(node.id)]);
+  const comparerOutput = useWorkflowStore((s) => s.nodeComparerOutputs[String(node.id)]);
+  const latentPreviewUrl = useWorkflowStore((s) =>
+    s.latentPreviews[nodeHierarchicalKey] ?? null
+  );
+  // Present only when the run previews a batch: one live preview per image.
+  const latentPreviewTiles = useWorkflowStore((s) =>
+    s.latentPreviewTiles[nodeHierarchicalKey] ?? null
+  );
+  const nodeTextOutput = useWorkflowStore((s) => s.nodeTextOutputs[String(node.id)] ?? null);
+  // By item key first: ComfyUI reports an error against a node inside a
+  // subgraph under a hierarchical prompt id (`57:3`), which matches no
+  // `node.id` here, so the raw-id lookup alone left the offending card with no
+  // error badge and no way to open its popover. The id lookup stays as the
+  // fallback for errors raised before a prompt was ever queued (a workflow-load
+  // error), which are keyed by node id.
+  const nodeErrors = useWorkflowErrorsStore(
+    (s) => s.nodeErrorsByItemKey[nodeHierarchicalKey] ?? s.nodeErrors[String(node.id)],
+  );
+  // Execution-state subscriptions are gated on THIS card executing. Ungated,
+  // every sampler step re-rendered all N cards (scalar `progress`), the 2s
+  // queue poll re-rendered them again (fresh `running` array identity), and
+  // every card ran its own 200ms overall-progress ticker.
+  const progress = useWorkflowStore((s) => (isExecuting ? s.progress : 0));
+  const executingPromptId = useWorkflowStore((s) =>
+    isExecuting ? s.executingPromptId : null,
+  );
+  const workflowDurationStats = useWorkflowStore((s) =>
+    isExecuting ? s.workflowDurationStats : EMPTY_DURATION_STATS,
+  );
+  const storeIsExecuting = useWorkflowStore((s) => (isExecuting ? s.isExecuting : false));
+  const firstRunningPromptId = useQueueStore((s) =>
+    isExecuting ? (s.running[0]?.prompt_id ?? null) : null,
+  );
+  const hasRunning = useQueueStore((s) => (isExecuting ? s.running.length > 0 : false));
+  const runKey = executingPromptId || firstRunningPromptId;
+  // With workflow null the hook is inert (no interval) — only the executing
+  // card runs a ticker instead of one per card.
+  const overallProgress = useOverallProgress({
+    workflow: isExecuting ? workflow : null,
+    runKey,
+    isRunning: storeIsExecuting || hasRunning,
+    workflowDurationStats,
+  });
+  const displayNodeProgress = overallProgress === 100 ? 100 : progress;
+  const handleSetPinnedWidget = useCallback(
+    (pin: {
+      nodeId: number;
+      widgetIndex: number;
+      widgetName: string;
+      inputName?: string;
+      widgetType: string;
+      options?: Record<string, unknown> | unknown[];
+    } | null) => {
+      setPinnedWidget(pin, currentWorkflowKey);
+    },
+    [currentWorkflowKey, setPinnedWidget]
+  );
+  const resolvedImages = nodeImages ?? EMPTY_IMAGES;
+  const [previewMedia, setPreviewMedia] = useState<ImageLike | null>(null);
+  const { errorPopoverOpen, setErrorPopoverOpen, resetErrorPopover } = useNodeErrorPopover();
+  const openCustomNodesManager = useCustomNodesManager((s) => s.open);
+  const noteTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const [isEditingNote, setIsEditingNote] = useState(false);
+  const [isEditingLabel, setIsEditingLabel] = useState(false);
+  const [labelValue, setLabelValue] = useState('');
+  const labelInputRef = useRef<HTMLInputElement>(null);
+  const lastNoteTapRef = useRef<number>(0);
+  const errorIconRef = useRef<HTMLButtonElement>(null);
+  const [highlightLabel, setHighlightLabel] = useState<string | null>(null);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [showFastGroupConfig, setShowFastGroupConfig] = useState(false);
+  const deleteNode = useWorkflowStore((s) => s.deleteNode);
+  const duplicateNode = useWorkflowStore((s) => s.duplicateNode);
+  const popNodeOutToRoot = useWorkflowStore((s) => s.popNodeOutToRoot);
+  const replaceSubgraphInstance = useWorkflowStore((s) => s.replaceSubgraphInstance);
+  const setPromotedWidgetLabel = useWorkflowStore((s) => s.setPromotedWidgetLabel);
+  const setInstanceWidgetLabel = useWorkflowStore((s) => s.setInstanceWidgetLabel);
+  const deleteContainer = useWorkflowStore((s) => s.deleteContainer);
+  const [showReplaceModal, setShowReplaceModal] = useState(false);
+  const [replaceDrops, setReplaceDrops] = useState<Array<{
+    direction: 'input' | 'output';
+    slotName: string;
+    slotType: string;
+    peerNodeTitle: string;
+  }> | null>(null);
+  const [showLabelsModal, setShowLabelsModal] = useState(false);
+  const [showDissolveModal, setShowDissolveModal] = useState(false);
+  const pasteClipboard = useWorkflowStore((s) => s.pasteClipboard);
+  const setClipboardPayload = useWorkflowClipboardStore((s) => s.setPayload);
+  const clipboardSummary = useWorkflowClipboardStore((s) => s.payload?.summary ?? null);
+  const currentSubgraphDefinition = useMemo(() => {
+    const frame = scopeStack[scopeStack.length - 1];
+    if (frame?.type !== 'subgraph') return null;
+    return workflow?.definitions?.subgraphs?.find((definition) => definition.id === frame.id) ?? null;
+  }, [scopeStack, workflow]);
+  const popOutTerminalKind = useMemo(
+    () => getPopOutTerminalKind(currentSubgraphDefinition, node.id),
+    [currentSubgraphDefinition, node.id],
+  );
+
+  useEffect(() => {
+    // A return value from an event handler is discarded, so the hide timer
+    // must be tracked here: clear it on re-fire and on unmount.
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const handleShowLabel = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (detail.nodeId === node.id) {
+        setHighlightLabel(detail.label);
+        if (timer != null) clearTimeout(timer);
+        timer = setTimeout(() => setHighlightLabel(null), 1000);
+      }
+    };
+    window.addEventListener('node-show-label', handleShowLabel as EventListener);
+    return () => {
+      window.removeEventListener('node-show-label', handleShowLabel as EventListener);
+      if (timer != null) clearTimeout(timer);
+    };
+  }, [node.id]);
+
+  // Check if this node has errors
+  const hasErrors = nodeErrors && nodeErrors.length > 0;
+
+  // Get set of widget/input names that have errors
+  const errorInputNames = useMemo(() => {
+    if (!nodeErrors) return new Set<string>();
+    return new Set(nodeErrors.map(e => e.inputName).filter((n): n is string => !!n));
+  }, [nodeErrors]);
+  const latestImage = resolvedImages.length > 0
+    ? resolvedImages[resolvedImages.length - 1]
+    : null;
+  const latestKey = latestImage
+    ? `${latestImage.filename}|${latestImage.subfolder}|${latestImage.type}|${latestImage.cacheToken ?? ''}`
+    : null;
+  const latestOutputIsVideo = Boolean(
+    latestImage && getMediaType(latestImage.filename) === 'video',
+  );
+  const previewKey = previewMedia
+    ? `${previewMedia.filename}|${previewMedia.subfolder}|${previewMedia.type}|${previewMedia.cacheToken ?? ''}`
+    : null;
+
+  useEffect(() => {
+    if (!latestImage) return;
+    if (latestKey === previewKey) return;
+    // Videos load through their own seekable playback + poster endpoints. Do
+    // not gate them behind `new Image()`: that path can decode only a still (or
+    // fail entirely) and was the reason video-output nodes never became an
+    // inline player on iOS.
+    if (latestOutputIsVideo) return;
+    // Preload the same WebP preview the inline OutputPreview displays, so the
+    // gate reflects (and primes the cache for) the fast image, not the full PNG.
+    const nextSrc = getImagePreviewUrl(
+      latestImage.filename,
+      latestImage.subfolder,
+      latestImage.type,
+      latestImage.cacheToken,
+    );
+    const img = new Image();
+    let cancelled = false;
+    img.onload = () => {
+      if (!cancelled) setPreviewMedia(latestImage);
+    };
+    img.src = nextSrc;
+    return () => {
+      cancelled = true;
+    };
+  }, [latestKey, previewKey, latestImage, latestOutputIsVideo]);
+
+  const typeDef = nodeTypes?.[node.type];
+  const isPlaceholder = useMemo(
+    () => workflow != null && isSubgraphPlaceholder(node, workflow),
+    [node, workflow],
+  );
+  const nodeTitle = useMemo(() => {
+    return node.title?.trim() || null;
+  }, [node]);
+  const placeholderDef = useMemo(() => {
+    if (!isPlaceholder || !workflow) return null;
+    return workflow.definitions?.subgraphs?.find((s) => s.id === node.type) ?? null;
+  }, [isPlaceholder, workflow, node.type]);
+  const placeholderSubgraphName = useMemo(() => {
+    const name = placeholderDef?.name ?? null;
+    if (!name) return null;
+    // Shared-type names may carry the {n} instance token ("Layer {n}").
+    return interpolateInstanceLabel(name, getInstanceNumber(node)) || name;
+  }, [placeholderDef, node]);
+  // How many placeholders share this definition, and which one this card is.
+  // A lone subgraph reads "1/1" rather than dropping the count: every subgraph
+  // is a type, and the badge saying so consistently is what makes a 2 appearing
+  // later mean something.
+  const instanceInfo = useMemo(() => {
+    if (!workflow || !placeholderDef) return null;
+    const total = collectSubgraphInstances(workflow, placeholderDef.id).length;
+    if (total < 1) return null;
+    // An instance only gets a stored number once a second one exists, and the
+    // only instance of a type is unambiguously its first.
+    const number = getInstanceNumber(node) ?? (total === 1 ? 1 : undefined);
+    return { number, total };
+  }, [workflow, placeholderDef, node]);
+  // Subgraph types this placeholder could be replaced with — every other
+  // definition in the workflow, since every definition is a type.
+  const replaceOptions: ReplaceSubgraphOption[] = useMemo(() => {
+    if (!isPlaceholder || !workflow) return [];
+    const defs = workflow.definitions?.subgraphs ?? [];
+    const allNodes = [...workflow.nodes, ...defs.flatMap((d) => d.nodes ?? [])];
+    return defs
+      .filter((d) => d.id !== node.type)
+      .map((d) => ({
+        id: d.id,
+        name: d.name || d.id.slice(0, 8),
+        instanceCount: allNodes.filter((n) => n.type === d.id).length,
+      }));
+  }, [isPlaceholder, workflow, node.type]);
+  // Editable label rows: the definition's boundary inputs (covers slot-promoted
+  // and boundary-only widgets, plus connection-slot labels) and proxy widgets.
+  const subgraphInstanceCount = useMemo(
+    () => (isPlaceholder ? collectSubgraphInstances(workflow, node.type).length : 0),
+    [isPlaceholder, workflow, node.type],
+  );
+  const subgraphLabelRows: SubgraphLabelRow[] = useMemo(() => {
+    if (!placeholderDef) return [];
+    const rows: SubgraphLabelRow[] = [];
+    // Outputs as well as inputs: a boundary slot is renameable either way, and
+    // listing only inputs left the output labels reachable from nowhere.
+    for (const direction of ['input', 'output'] as const) {
+      const slots = (direction === 'input' ? placeholderDef.inputs : placeholderDef.outputs) ?? [];
+      for (const slot of slots) {
+        if (!slot.name) continue;
+        rows.push({
+          key: `slot:${direction}:${slot.name}`,
+          target: { kind: 'slot', direction, slotName: slot.name },
+          template: slot.label ?? '',
+          instanceTemplate: getInstanceSlotLabel(node, direction, slot.name) ?? '',
+          defaultLabel: slot.name,
+        });
+      }
+    }
+    const proxyWidgets = (node.properties as Record<string, unknown> | undefined)?.proxyWidgets;
+    const proxyLabels = getMobileDefMeta(placeholderDef).proxyLabels ?? {};
+    if (Array.isArray(proxyWidgets)) {
+      for (const entry of proxyWidgets as [string, string][]) {
+        const [innerNodeIdStr, widgetName] = entry;
+        if (innerNodeIdStr === '-1') continue;
+        const innerNodeId = Number(innerNodeIdStr);
+        const inner = placeholderDef.nodes?.find((n) => n.id === innerNodeId);
+        rows.push({
+          key: `proxy:${innerNodeIdStr}:${widgetName}`,
+          target: { kind: 'proxy', innerNodeId, widgetName },
+          template: proxyLabels[`${innerNodeIdStr}:${widgetName}`] ?? '',
+          instanceTemplate: getInstanceProxyLabel(node, innerNodeId, widgetName) ?? '',
+          defaultLabel: inner?.title ? `${inner.title}: ${widgetName}` : widgetName,
+        });
+      }
+    }
+    return rows;
+  }, [placeholderDef, node]);
+  const displayName: string = nodeTitle || placeholderSubgraphName || typeDef?.display_name || node.type;
+  // A node whose custom-node type isn't installed on the server — outline it in
+  // red and badge it, mirroring desktop; the MissingNodesDialog lists them all.
+  const isMissingNode = useMemo(
+    () => !isPlaceholder && isUninstalledNodeType(node, nodeTypes),
+    [isPlaceholder, node, nodeTypes],
+  );
+  const isKSampler = node.type === 'KSampler';
+  const isLoraManagerNode = isLoraManagerNodeType(node.type);
+  const isFastGroupsBypasser = /fast\s+groups/i.test(node.type) && /\(rgthree\)/i.test(node.type);
+  const isImageComparer = /image\s*comparer/i.test(node.type);
+  const isDenoVideoCompare = node.type === 'DenoVideoCompare';
+  // SetNode/GetNode (KJNodes wireless relays) render a compact relay control in
+  // place of their parameters; their real slots still use the connections section.
+  const isSetGet = isSetGetNode(node);
+  // Anything Everywhere nodes broadcast rather than wire; their outgoing side is
+  // synthesized below because the node type declares no outputs at all.
+  const isUseEverywhere = isUseEverywhereNode(node);
+  const isBypassed = node.mode === 4;
+  const isCollapsed = Boolean(collapsedItems[nodeHierarchicalKey]);
+  const expandConnectionsSection = useConnectionSectionFoldsStore((s) => s.expand);
+  // Bumped when the card is unfolded, to reset any nested in-Parameters folds
+  // (e.g. CR-LoRA groups) back to open so unfolding reveals everything.
+  const [unfoldNonce, setUnfoldNonce] = useState(0);
+  const startEditSetGetName = useSetGetNameEditStore((s) => s.startEdit);
+  const expandParametersSection = useParameterSectionFoldsStore((s) => s.expand);
+  const isLoadImageNode = /LoadImage/i.test(node.type);
+  const inputImagePreview = useMemo(() => {
+    if (!isLoadImageNode || !workflow || !nodeTypes) return null;
+    return resolveLoadImagePreview(workflow, nodeTypes, node);
+  }, [isLoadImageNode, node, nodeTypes, workflow]);
+  // A LoadImage-style node's preview is its input, so masking it edits the
+  // workflow. That is the only place the mask editor is offered: a result --
+  // on a card or in the viewer -- has no node to write a mask back to.
+  const openMaskEditor = useMaskEditorStore((s) => s.open);
+  const handleEditMask = useMemo(() => {
+    if (!inputImagePreview || !node.itemKey) return undefined;
+    const ref = {
+      filename: inputImagePreview.filename,
+      subfolder: inputImagePreview.subfolder,
+      type: inputImagePreview.type,
+    };
+    return () => openMaskEditor({
+      itemKey: node.itemKey!,
+      nodeId: node.id,
+      nodeTitle: displayName,
+      ref,
+    });
+  }, [inputImagePreview, node.itemKey, node.id, displayName, openMaskEditor]);
+
+  const frontendMediaPreview = useMemo(
+    () => workflow
+      ? resolveNodeFrontendMediaPreview(workflow, nodeTypes, node)
+      : null,
+    [workflow, nodeTypes, node],
+  );
+  const isOasisMediaPreview = frontendMediaPreview?.source === 'oasis-widget';
+  // Oasis owns a serialized scene-bar playlist. Its volatile node output only
+  // marks a fresh arrival for autoplay; it must not replace that playlist with
+  // the generic batch grid after the second result.
+  const effectivePreviewImage = isOasisMediaPreview
+    ? null
+    : inputImagePreview ?? (latestOutputIsVideo ? latestImage : previewMedia);
+  const frontendPreviewPolicy = useMemo(
+    () => workflow
+      ? getNodeFrontendPreviewPolicy(workflow, nodeTypes, node)
+      : null,
+    [workflow, nodeTypes, node],
+  );
+  const previewSuppressed = frontendPreviewPolicy?.hidden === true;
+  const revealFrontendPreviewUpdate = useMemo(
+    () => workflow
+      ? getRevealFrontendPreviewUpdate(workflow, nodeTypes, node)
+      : null,
+    [workflow, nodeTypes, node],
+  );
+  const effectiveFrontendMediaPreview = useMemo(() => {
+    if (effectivePreviewImage || previewSuppressed || !frontendMediaPreview) return null;
+    return isOasisMediaPreview && resolvedImages.length > 0
+      ? { ...frontendMediaPreview, autoPlay: true }
+      : frontendMediaPreview;
+  }, [
+    effectivePreviewImage,
+    frontendMediaPreview,
+    isOasisMediaPreview,
+    previewSuppressed,
+    resolvedImages.length,
+  ]);
+
+  const handleFrontendPreviewStateChange = useCallback((change: {
+    activeIndex?: number;
+    playMode?: 'off' | 'loop' | 'cycle';
+  }) => {
+    if (!workflow) return;
+    const oasis = getOasisWidgetState(workflow, nodeTypes, node);
+    if (!oasis) return;
+    const currentPreview = oasis.state.preview && typeof oasis.state.preview === 'object'
+      && !Array.isArray(oasis.state.preview)
+      ? oasis.state.preview as Record<string, unknown>
+      : {};
+    const currentUiState = oasis.state.uiState && typeof oasis.state.uiState === 'object'
+      && !Array.isArray(oasis.state.uiState)
+      ? oasis.state.uiState as Record<string, unknown>
+      : {};
+    const next = {
+      ...oasis.state,
+      ...(change.activeIndex === undefined
+        ? {}
+        : { preview: { ...currentPreview, activeIdx: change.activeIndex } }),
+      ...(change.playMode === undefined
+        ? {}
+        : { uiState: { ...currentUiState, playMode: change.playMode } }),
+    };
+    const widgetIndex = getWidgetIndexForInput(
+      workflow,
+      nodeTypes,
+      node,
+      oasis.widgetName,
+    );
+    updateNodeWidget(
+      nodeHierarchicalKey,
+      widgetIndex ?? -1,
+      JSON.stringify(next),
+      oasis.widgetName,
+    );
+  }, [node, nodeHierarchicalKey, nodeTypes, updateNodeWidget, workflow]);
+
+  // Unfiltered widget defs — used for proxy route extraction before seed filtering.
+  const allResolvedWidgets = useMemo(() => {
+    if (isPlaceholder && workflow) {
+      const slotPromoted = resolveSubgraphPlaceholderWidgetDefs(node, workflow, nodeTypes, instanceHint);
+      const proxyPromoted = resolveSubgraphProxyWidgetDefs(node, workflow, nodeTypes);
+      const boundaryPromoted = resolveSubgraphBoundaryWidgetDefs(node, workflow, nodeTypes);
+      return sortPlaceholderWidgetsByBoundaryOrder([
+        ...slotPromoted,
+        ...proxyPromoted,
+        ...boundaryPromoted,
+      ]);
+    }
+    return getWidgetDefinitions(nodeTypes, node);
+  }, [nodeTypes, node, isPlaceholder, workflow, instanceHint]);
+
+  const widgets = useMemo(() => {
+    return allResolvedWidgets.filter((widget) => {
+      const baseName = widget.name.split(': ').pop() ?? widget.name;
+      // These are serialized transport blobs owned by custom desktop DOM
+      // widgets. Showing raw JSON as an editable text field is both confusing
+      // and can break their websocket result routing.
+      if (baseName === 'video_oasis_ui' || baseName === 'ltx23_oasis_ui') return false;
+      // Filter seed widgets — for proxy widgets the display name may be
+      // "InnerTitle: seed".
+      return !isKSampler || baseName !== 'seed';
+    });
+  }, [allResolvedWidgets, isKSampler]);
+
+  // Get input widgets (COMBO dropdowns). For placeholder nodes, derive from both mechanisms.
+  const inputWidgets = useMemo(() => {
+    if (isPlaceholder && workflow) {
+      const slotPromoted = resolveSubgraphPlaceholderInputWidgetDefs(node, workflow, nodeTypes, instanceHint);
+      const proxyPromoted = resolveSubgraphProxyInputWidgetDefs(node, workflow, nodeTypes);
+      const boundaryPromoted = resolveSubgraphBoundaryInputWidgetDefs(node, workflow, nodeTypes);
+      return sortPlaceholderWidgetsByBoundaryOrder([
+        ...slotPromoted,
+        ...proxyPromoted,
+        ...boundaryPromoted,
+      ]);
+    }
+    return getInputWidgetDefinitions(nodeTypes, node);
+  }, [nodeTypes, node, isPlaceholder, workflow, instanceHint]);
+  // Widgets this node has promoted to the enclosing subgraph's boundary. The
+  // link to the boundary makes them read as "connected", but a promotion moves
+  // where the value is STORED, not what the control is — so they keep drawing
+  // as widgets in here, reading and writing the value wherever it now lives.
+  // Only a boundary input actually fed from outside is a real connection.
+  const promotedWidgetViews = useMemo(
+    () => (isPlaceholder ? [] : collectPromotedWidgetViews(workflow, scopeStack, node, nodeTypes)),
+    [isPlaceholder, workflow, scopeStack, node, nodeTypes],
+  );
+  const editablePromotedWidgets = useMemo(
+    () => new Map(
+      promotedWidgetViews
+        .filter((view) => !view.drivenByConnection)
+        .map((view) => [view.innerWidgetIndex, view]),
+    ),
+    [promotedWidgetViews],
+  );
+  // The seed mode is part of the promoted VALUE's instance state, even though
+  // control_after_generate itself is not another boundary slot. Point the
+  // inner card at the placeholder it is already reading/writing the seed
+  // through, so both cards manipulate one mode rather than disagreeing.
+  const promotedSeedModeRoute = useMemo(
+    () => promotedWidgetViews.find((view) => (
+      view.form === 'widget' &&
+      !view.drivenByConnection &&
+      (view.widgetName === 'seed' || view.widgetName === 'noise_seed') &&
+      view.route
+    ))?.route ?? null,
+    [promotedWidgetViews],
+  );
+  // Which form each promoted widget is currently in, for the menu to offer the
+  // other one.
+  const promotedWidgetForms = useMemo(
+    () => Object.fromEntries(
+      promotedWidgetViews.map((view) => [view.widgetName, view.form]),
+    ),
+    [promotedWidgetViews],
+  );
+  const promotedBoundaryLabels = useMemo(
+    () => Object.fromEntries(
+      promotedWidgetViews.map((view) => [view.widgetName, view.boundaryLabel]),
+    ),
+    [promotedWidgetViews],
+  );
+  // The slot index behind each promoted widget, for the label row's jump up
+  // to the boundary row in the subgraph's connections section.
+  const promotedBoundarySlots = useMemo(
+    () => Object.fromEntries(
+      promotedWidgetViews.map((view) => [view.widgetName, view.boundarySlot]),
+    ),
+    [promotedWidgetViews],
+  );
+  // On a placeholder, each boundary slot's inner target widget names — shown
+  // only in a widget row's "…" menu, so the mapping can be checked without
+  // entering the scope; the row labels themselves stay boundary-only.
+  const boundaryTargetNames = useMemo(() => {
+    if (!isPlaceholder || !workflow) return {};
+    const definition = workflow.definitions?.subgraphs?.find((sg) => sg.id === node.type);
+    if (!definition) return {};
+    return Object.fromEntries(
+      (definition.inputs ?? []).map((_slot, index) => [
+        index,
+        resolveBoundaryTargetWidgetNames(definition, index),
+      ]),
+    );
+  }, [isPlaceholder, workflow, node.type]);
+  const promotedInputSlots = useMemo(
+    () => new Set(
+      promotedWidgetViews
+        .filter((view) => !view.drivenByConnection)
+        .map((view) => view.widgetName),
+    ),
+    [promotedWidgetViews],
+  );
+
+  // A widget overridden by a connection (popped out / wired up) is hidden from
+  // the parameters section — its value isn't used while the input is connected.
+  // The descriptors carry the inner node's own value, which a promoted widget
+  // no longer uses — show the instance's.
+  const withPromotedValue = useCallback(
+    <T extends { widgetIndex: number; value: unknown }>(widget: T): T => {
+      const view = editablePromotedWidgets.get(widget.widgetIndex);
+      return view && view.value !== undefined ? { ...widget, value: view.value } : widget;
+    },
+    [editablePromotedWidgets],
+  );
+  const visibleInputWidgets = useMemo(
+    () => inputWidgets
+      .filter((inputWidget) => (
+        (!inputWidget.connected || editablePromotedWidgets.has(inputWidget.widgetIndex)) &&
+        !['video_oasis_ui', 'ltx23_oasis_ui'].includes(
+          inputWidget.name.split(': ').pop() ?? inputWidget.name,
+        )
+      ))
+      .map(withPromotedValue),
+    [inputWidgets, editablePromotedWidgets, withPromotedValue]
+  );
+  const visibleWidgets = useMemo(
+    () => widgets
+      .filter((widget) => !widget.connected || editablePromotedWidgets.has(widget.widgetIndex))
+      .map(withPromotedValue),
+    [widgets, editablePromotedWidgets, withPromotedValue]
+  );
+
+  // A widget can be promoted only from inside a subgraph. Regular node widgets
+  // may not have a serialized input slot yet; placeholder widgets must already
+  // correspond to a real boundary-backed input on that placeholder (direct
+  // proxy widgets have no input that the enclosing boundary could feed).
+  const promotableWidgets = useMemo(
+    () => collectPromotableWidgets({
+      node,
+      descriptors: [...inputWidgets, ...allResolvedWidgets],
+      isPlaceholder,
+      inSubgraphScope: currentSubgraphDefinition !== null,
+    }),
+    [allResolvedWidgets, currentSubgraphDefinition, inputWidgets, isPlaceholder, node],
+  );
+
+  // Impact-Pack-style "Select to add Wildcard" dropdowns ship with a single
+  // placeholder option and are filled from the browser at run time — desktop
+  // does it in Impact Pack's own JS extension, which we don't run. Route the
+  // list in here, and route a picked value into the node's prompt box below.
+  const wildcardRoute = useMemo(() => {
+    const selector = visibleInputWidgets.find((widget) => isWildcardSelectWidget(widget.options));
+    if (!selector) return null;
+    const target = visibleWidgets.find(isWildcardTargetWidget);
+    if (!target) return null;
+    return { selectorIndex: selector.widgetIndex, targetIndex: target.widgetIndex,
+             targetName: target.inputName };
+  }, [visibleInputWidgets, visibleWidgets]);
+
+  const wildcards = useWildcards(wildcardRoute !== null);
+  const inputWidgetsWithWildcards = useMemo(() => {
+    if (!wildcardRoute) return visibleInputWidgets;
+    const options = buildWildcardOptions(wildcards);
+    return visibleInputWidgets.map((widget) => (
+      widget.widgetIndex === wildcardRoute.selectorIndex ? { ...widget, options } : widget
+    ));
+  }, [visibleInputWidgets, wildcardRoute, wildcards]);
+
+  // The mode combo lives in the input-widget list, so pass both across to work
+  // out whether populated_text is currently server-owned.
+  const widgetsWithWildcardPrompts = useMemo(
+    () => decorateWildcardPromptWidgets(visibleWidgets, visibleInputWidgets),
+    [visibleWidgets, visibleInputWidgets],
+  );
+  const noteText = useMemo<string | null>(() => {
+    const props = node.properties as Record<string, unknown> | undefined;
+    // Note *body* keys only. 'title'/'label' are naming fields, not note content —
+    // including them made an edited node label leak into the bottom note display.
+    const candidateKeys = ['text', 'note', 'description'];
+    if (props) {
+      for (const key of candidateKeys) {
+        const value = props[key];
+        if (typeof value === 'string' && value.trim()) {
+          return value;
+        }
+      }
+    }
+
+    const isNoteLike = /note|comment|sticky|label/i.test(node.type);
+    if (isNoteLike && Array.isArray(node.widgets_values)) {
+      const widgetText = node.widgets_values.find(
+        (value) => typeof value === 'string' && value.trim()
+      );
+      if (typeof widgetText === 'string' && widgetText.trim()) {
+        return widgetText;
+      }
+    }
+
+    return null;
+  }, [node.properties, node.widgets_values, node.type]);
+  const noteWidgetIndex = useMemo<number | null>(() => {
+    const isNoteLike = /note|comment|sticky|label/i.test(node.type);
+    if (!isNoteLike || !Array.isArray(node.widgets_values)) return null;
+    const index = node.widgets_values.findIndex(
+      (value) => typeof value === 'string' && value.trim()
+    );
+    return index >= 0 ? index : null;
+  }, [node.type, node.widgets_values]);
+
+  const handleGetWidgetIndexForInput = (name: string) => {
+    if (!workflow || !nodeTypes) return null;
+    return getWidgetIndexForInput(workflow, nodeTypes, node, name);
+  };
+
+  const handleFindSeedWidgetIndex = () => {
+    if (!workflow || !nodeTypes) return null;
+    return findSeedWidgetIndex(workflow, nodeTypes, node, {
+      widgetDescriptors: [...inputWidgets, ...widgets],
+    });
+  };
+
+  const handleFindSeedControlWidgetIndex = () => {
+    if (!workflow || !nodeTypes) return null;
+    return findSeedControlWidgetIndex([...inputWidgets, ...widgets]);
+  };
+
+  const handleUpdateNote = (value: string) => {
+    if (noteWidgetIndex === null) return;
+    updateNodeWidget(nodeHierarchicalKey, noteWidgetIndex, value);
+  };
+
+  const noteLinkified = useMemo(() => {
+    if (!noteText) return null;
+    const parts: React.ReactNode[] = [];
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    let keyIndex = 0;
+
+    while ((match = urlRegex.exec(noteText)) !== null) {
+      const [url] = match;
+      const start = match.index;
+      if (start > lastIndex) {
+        parts.push(noteText.slice(lastIndex, start));
+      }
+      parts.push(
+        <a
+          key={`note-link-${keyIndex++}`}
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="text-cyan-300 underline break-all"
+        >
+          {url}
+        </a>
+      );
+      lastIndex = start + url.length;
+    }
+
+    if (lastIndex < noteText.length) {
+      parts.push(noteText.slice(lastIndex));
+    }
+
+    return parts;
+  }, [noteText]);
+
+  // MarkdownNote is the one stock note type that renders formatted markdown;
+  // plain Note (and note-like custom nodes) stay verbatim text.
+  const isMarkdownNote = node.type === 'MarkdownNote';
+  const noteBody = useMemo(() => {
+    if (!noteText) return null;
+    return isMarkdownNote ? <MarkdownContent text={noteText} /> : noteLinkified;
+  }, [isMarkdownNote, noteText, noteLinkified]);
+
+  const handleNoteTap = () => {
+    const now = Date.now();
+    if (now - lastNoteTapRef.current < 300) {
+      setIsEditingNote(true);
+    }
+    lastNoteTapRef.current = now;
+  };
+
+  // Collect all pinnable widgets for the pin submenu
+  const pinnableWidgets = useMemo(() => {
+    const items: Array<{ widgetIndex: number; name: string; inputName?: string; type: string; options?: Record<string, unknown> | unknown[] }> = [];
+    const isPinEligible = (
+      widgetType: string,
+      widgetName: string,
+      options?: Record<string, unknown> | unknown[],
+    ) => {
+      if (widgetType.startsWith('LM_LORA')) return false;
+      if (widgetType.startsWith('TW_')) return false;
+      if (isLoraManagerNode && widgetName === 'text') return false;
+      return supportsPinnedWidgetEditor(widgetType, options);
+    };
+    visibleInputWidgets.forEach((w) => {
+      if (!isPinEligible(w.type, w.name, w.options)) return;
+      items.push({ widgetIndex: w.widgetIndex, name: w.name, inputName: w.inputName, type: w.type, options: w.options });
+    });
+    visibleWidgets.forEach((w) => {
+      if (!isPinEligible(w.type, w.name, w.options)) return;
+      items.push({ widgetIndex: w.widgetIndex, name: w.name, inputName: w.inputName, type: w.type, options: w.options });
+    });
+    return items;
+  }, [visibleInputWidgets, visibleWidgets, isLoraManagerNode]);
+
+  // Filter inputs to only show those that are actual connections (connected or connectable without widget values)
+  const isWidgetInput = useCallback((input: WorkflowInput) => {
+    // Promoted widgets on placeholder nodes normally render as widget controls
+    // even though they carry a link to the subgraph boundary — EXCEPT when the
+    // input is wired to an upstream node with no resolvable value. That is a live
+    // data connection (e.g. a promoted frame_rate fed by another node), which
+    // must render as a connection button rather than an empty widget control.
+    if (isPlaceholder && input.widget != null) {
+      if (isPlaceholderPromotedConnection(input)) return false;
+      return true;
+    }
+    // A boundary-promoted slot is linked, but the link is the promotion itself:
+    // the control belongs here, and only an outside connection replaces it.
+    if (input.link != null) {
+      return promotedInputSlots.has(input.widget?.name ?? input.name);
+    }
+    if (input.widget) return true;
+    return [...allResolvedWidgets, ...inputWidgets].some(
+      (widget) => (widget.inputName ?? widget.name) === input.name,
+    );
+  }, [allResolvedWidgets, inputWidgets, isPlaceholder, promotedInputSlots]);
+
+  const connectionInputs = useMemo(() => {
+    const real = node.inputs.filter((input) => {
+      if (isWidgetInput(input)) return false;
+      const isOptConnection = String(input.type).toUpperCase() === 'OPT_CONNECTION';
+      if (isOptConnection && input.link == null) return false;
+      return true;
+    });
+    // A GetNode reads its value wirelessly (by name) and has no real input slot —
+    // synthesize one so it renders an input connection button that jumps to the
+    // matching SetNode. Its type mirrors the Get's output so the button is typed.
+    if (isGetNode(node)) {
+      const valueType = node.outputs?.[0]?.type ?? '*';
+      const synthetic: WorkflowInput = { name: 'get', type: String(valueType), link: null };
+      return [synthetic, ...real];
+    }
+    return real;
+  }, [node, isWidgetInput]);
+
+
+  // Filter outputs to exclude helper outputs like "show_help"
+  const visibleOutputs = useMemo(() => {
+    const real = node.outputs.filter(output => {
+      const name = (output.name || '').toLowerCase().replace(/[_\s]/g, '');
+      if (name === 'showhelp') return false;
+      const isOptConnection = String(output.type).toUpperCase() === 'OPT_CONNECTION';
+      if (isOptConnection && !(output.links?.length)) return false;
+      return true;
+    });
+    // An Anything Everywhere node declares no outputs, yet its whole purpose is
+    // outgoing: each connected input re-publishes to every matching input in the
+    // scope. Synthesize one output per broadcasting slot so the card has
+    // somewhere to show where the value actually goes — the same trick the
+    // GetNode input uses. `slot_index` carries the controller slot through, since
+    // these are not in `node.outputs` for the usual index lookup.
+    //
+    // The type stays the wildcard the slot declares: resolving it needs this
+    // scope's link table, and ConnectionButton — which is scope-aware — derives
+    // both the label and the colour from the controller's input instead.
+    if (!isUseEverywhere) return real;
+    const synthetic: WorkflowOutput[] = [];
+    node.inputs.forEach((input, slotIndex) => {
+      if (input.link == null) return;
+      synthetic.push({
+        name: 'broadcast',
+        type: String(input.type),
+        links: null,
+        slot_index: slotIndex,
+      });
+    });
+    return [...real, ...synthetic];
+  }, [node.outputs, node.inputs, isUseEverywhere]);
+
+  // Helper to check if a widget is pinned
+  const isWidgetPinned = (widgetIndex: number) => {
+    return pinnedWidgetForThisNode?.widgetIndex === widgetIndex;
+  };
+
+  // Helper to toggle pin for a widget
+  const toggleWidgetPin = (widgetIndex: number, widgetName: string, widgetType: string, options?: Record<string, unknown> | unknown[], inputName?: string) => {
+    if (isWidgetPinned(widgetIndex)) {
+      handleSetPinnedWidget(null);
+    } else {
+      handleSetPinnedWidget({
+        nodeId: node.id,
+        widgetIndex,
+        widgetName,
+        inputName,
+        widgetType,
+        options
+      });
+    }
+  };
+
+  const singlePinnableWidget = pinnableWidgets.length === 1 ? pinnableWidgets[0] : null;
+  const isSingleWidgetPinned = singlePinnableWidget
+    ? isWidgetPinned(singlePinnableWidget.widgetIndex)
+    : false;
+  const hasPinnedWidget = Boolean(pinnedWidgetForThisNode);
+  const isNodeBookmarked = bookmarkedItems.includes(nodeHierarchicalKey);
+
+  const showComparer = Boolean(
+    comparerOutput && (
+      isDenoVideoCompare && comparerOutput.video ||
+      isImageComparer && (comparerOutput.a.length > 0 || comparerOutput.b.length > 0)
+    ),
+  );
+  // Executed media descriptors are stronger evidence than a node's declared
+  // slots. Custom video nodes frequently expose no IMAGE output (and some rely
+  // entirely on a frontend extension), while still publishing a standard
+  // images/gifs/videos payload that the websocket layer has already captured.
+  const showImagePreview = !showComparer && !previewSuppressed && Boolean(
+    effectivePreviewImage || effectiveFrontendMediaPreview,
+  );
+  const showTextPreview = typeof nodeTextOutput === 'string' && nodeTextOutput.length > 0;
+  const inputConnectionCount = node.inputs?.filter((input) => input.link != null).length ?? 0;
+  const outputConnectionCount = node.outputs?.reduce((count, output) => count + (output.links?.length ?? 0), 0) ?? 0;
+  // What the delete confirmation offers is read from the scope's link table
+  // rather than from the node's cached slot fields: the table is what deletion
+  // actually operates on, so a leftover cache can't advertise a connection —
+  // or a reconnect — that isn't there.
+  const deletionOptions = useMemo(
+    () =>
+      workflow
+        ? getNodeDeletionOptions(resolveCurrentScope(scopeStack, workflow).links, node.id)
+        : { hasConnections: false, canReconnect: false },
+    [workflow, scopeStack, node.id],
+  );
+  const leftLineCount = Math.min(3, inputConnectionCount);
+  const rightLineCount = Math.min(3, outputConnectionCount);
+  // A node that produced more than one output is a batch: tile the whole batch
+  // instead of just the latest image. The LoadImage input preview stays single.
+  const isBatchOutput =
+    !previewSuppressed && !inputImagePreview && !isOasisMediaPreview && resolvedImages.length > 1;
+
+  // The viewer/click target list — the full batch when tiling, else the single
+  // gated preview image. A LoadImage-style card previews its INPUT file rather
+  // than a generation result, so opening it must not switch the viewer into
+  // Follow Queue: that mode replaces the whole list with the newest completed
+  // run, and the user who tapped their input image would be looking at an
+  // unrelated output instead.
+  const previewList = useMemo(() => {
+    const list: ImageLike[] = isBatchOutput
+      ? resolvedImages
+      : effectivePreviewImage
+        ? [effectivePreviewImage]
+        : [];
+    return list.map((img) => {
+      const { filename, subfolder, type } = img;
+      const src = getImageUrl(filename, subfolder, type, img.cacheToken);
+      const filePath = subfolder ? `${subfolder}/${filename}` : filename;
+      const mediaType = getMediaType(filename);
+      return {
+        src,
+        displaySrc: mediaType === 'image'
+          ? getImagePreviewUrl(filename, subfolder, type, img.cacheToken)
+          : undefined,
+        alt: displayName,
+        filename,
+        mediaType,
+        file: {
+          id: `${type}/${filePath}`,
+          name: filename,
+          type: mediaType === 'video' ? 'video' : 'image',
+          fullUrl: src,
+        },
+      };
+    });
+  }, [isBatchOutput, resolvedImages, effectivePreviewImage, displayName]);
+
+  // Two-column thumbnails for the batch grid; null in the single-image case.
+  const batchTiles = useMemo(() => {
+    if (!isBatchOutput) return null;
+    return resolvedImages.map((img) => {
+      const mediaType = getMediaType(img.filename);
+      if (mediaType === 'video') {
+        const src = getImageUrl(img.filename, img.subfolder, img.type, img.cacheToken);
+        return {
+          displaySrc: getPlayableVideoUrl(src),
+          poster: getMediaThumbnailUrl(
+            img.filename,
+            img.subfolder,
+            img.type,
+            img.cacheToken,
+          ),
+          mediaType,
+          alt: displayName,
+        };
+      }
+      return {
+        displaySrc: getImagePreviewUrl(
+          img.filename,
+          img.subfolder,
+          img.type,
+          img.cacheToken,
+        ),
+        mediaType,
+        alt: displayName,
+      };
+    });
+  }, [isBatchOutput, resolvedImages, displayName]);
+
+  useEffect(() => {
+    if (!isEditingLabel) return;
+    const input = labelInputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, [isEditingLabel]);
+
+  const handleEditLabel = () => {
+    setLabelValue(displayName);
+    setIsEditingLabel(true);
+  };
+
+  const handleLabelBlur = () => {
+    const nextValue = labelValue.trim();
+    updateNodeTitle(nodeHierarchicalKey, nextValue.length > 0 ? nextValue : null);
+    setIsEditingLabel(false);
+  };
+
+  // Map from widgetIndex → proxy routing info for proxy widget updates.
+  const proxyRoutes = useMemo(() => {
+    if (!isPlaceholder) return new Map<number, ProxyWidgetRoute>();
+    const map = new Map<number, ProxyWidgetRoute>();
+    const extract = (defs: Array<{ widgetIndex: number; options?: Record<string, unknown> | unknown[] }>) => {
+      for (const def of defs) {
+        const proxy = (def.options as Record<string, unknown>)?.__proxy;
+        if (proxy && typeof proxy === 'object') {
+          map.set(def.widgetIndex, proxy as ProxyWidgetRoute);
+        }
+      }
+    };
+    extract(allResolvedWidgets);
+    extract(inputWidgets);
+    return map;
+  }, [isPlaceholder, allResolvedWidgets, inputWidgets]);
+
+  const linkedSourceRoutes = useMemo(() => {
+    if (!isPlaceholder) {
+      // Inside a subgraph, a promoted widget's value lives on the placeholder
+      // instance this scope was entered through. Same route machinery the
+      // placeholder card uses to reach inner nodes, pointed the other way.
+      const promoted = new Map<number, LinkedWidgetRoute>();
+      for (const view of editablePromotedWidgets.values()) {
+        if (view.route) promoted.set(view.innerWidgetIndex, view.route);
+      }
+      return promoted;
+    }
+    const map = new Map<number, LinkedWidgetRoute>();
+    const extract = (defs: Array<{ widgetIndex: number; options?: Record<string, unknown> | unknown[] }>) => {
+      for (const def of defs) {
+        if (!def.options || Array.isArray(def.options)) continue;
+        const linkedSource = def.options.__linkedSource;
+        if (linkedSource && typeof linkedSource === 'object') {
+          map.set(def.widgetIndex, linkedSource as LinkedWidgetRoute);
+        }
+      }
+    };
+    extract(allResolvedWidgets);
+    extract(inputWidgets);
+    return map;
+  }, [isPlaceholder, allResolvedWidgets, inputWidgets, editablePromotedWidgets]);
+
+  const findLinkedSourceNode = useCallback(
+    (route: LinkedWidgetRoute): WorkflowNode | null => {
+      if (!workflow) return null;
+      const nodes = route.subgraphId == null
+        ? workflow.nodes
+        : workflow.definitions?.subgraphs?.find((sg) => sg.id === route.subgraphId)?.nodes;
+      return nodes?.find((candidate) =>
+        candidate.id === route.nodeId ||
+        Boolean(route.itemKey && candidate.itemKey === route.itemKey)
+      ) ?? null;
+    },
+    [workflow]
+  );
+
+  const readLinkedSourceValue = useCallback(
+    (route: LinkedWidgetRoute): unknown => {
+      const sourceNode = findLinkedSourceNode(route);
+      if (!sourceNode) return undefined;
+      const values = sourceNode.widgets_values;
+      if (Array.isArray(values)) {
+        if (route.widgetIndex >= 0 && route.widgetIndex < values.length) {
+          return values[route.widgetIndex];
+        }
+        return route.widgetIndex !== 0 ? values[0] : undefined;
+      }
+      if (values && typeof values === 'object') {
+        const record = values as Record<string, unknown>;
+        if (route.widgetName && record[route.widgetName] !== undefined) {
+          return record[route.widgetName];
+        }
+        return record[String(route.widgetIndex)];
+      }
+      return undefined;
+    },
+    [findLinkedSourceNode]
+  );
+
+  const updateLinkedSourceWidget = useCallback(
+    (route: LinkedWidgetRoute, value: unknown): boolean => {
+      if (route.subgraphId != null) {
+        updateSubgraphInnerNodeWidget(
+          route.subgraphId,
+          route.nodeId,
+          route.widgetIndex,
+          value,
+          route.widgetName,
+        );
+        return true;
+      }
+      const sourceNode = findLinkedSourceNode(route);
+      const sourceItemKey = route.itemKey ?? sourceNode?.itemKey;
+      if (!sourceItemKey) return false;
+      updateNodeWidget(
+        sourceItemKey,
+        route.widgetIndex,
+        value,
+        route.widgetName,
+      );
+      return true;
+    },
+    [findLinkedSourceNode, updateNodeWidget, updateSubgraphInnerNodeWidget]
+  );
+
+  // Resolve a widget value, following promoted/proxy routes to source nodes when needed.
+  const resolveWidgetValue = useCallback(
+    (widgetIndex: number): unknown => {
+      const proxy = proxyRoutes.get(widgetIndex);
+      if (proxy && workflow) {
+        const sg = workflow.definitions?.subgraphs?.find((s) => s.id === proxy.subgraphId);
+        const innerNode = sg?.nodes?.find((n) => n.id === proxy.innerNodeId);
+        if (innerNode) {
+          const values = Array.isArray(innerNode.widgets_values) ? innerNode.widgets_values : [];
+          return values[proxy.innerWidgetIndex];
+        }
+      }
+      const linkedSource = linkedSourceRoutes.get(widgetIndex);
+      if (linkedSource) {
+        const linkedValue = readLinkedSourceValue(linkedSource);
+        if (linkedValue !== undefined) return linkedValue;
+      }
+      const values = Array.isArray(node.widgets_values) ? node.widgets_values : [];
+      return values[widgetIndex];
+    },
+    [linkedSourceRoutes, node.widgets_values, readLinkedSourceValue, workflow, proxyRoutes]
+  );
+
+  const handleUpdateNodeWidget = useCallback(
+    (widgetIndex: number, value: unknown, widgetName?: string) => {
+      // Picking a wildcard appends it to the prompt box rather than being
+      // stored: that dropdown is a menu, not a value. Its own slot keeps the
+      // placeholder, which is what desktop persists too, so a workflow edited
+      // here round-trips unchanged. Rewriting the target up front rather than
+      // writing directly lets the proxy/linked-source routing below apply to
+      // the prompt box exactly as it would to any other edit.
+      let index = widgetIndex;
+      let nextValue = value;
+      let name = widgetName;
+      if (
+        wildcardRoute
+        && widgetIndex === wildcardRoute.selectorIndex
+        && typeof value === 'string'
+        && value !== WILDCARD_SELECT_SENTINEL
+      ) {
+        index = wildcardRoute.targetIndex;
+        nextValue = appendWildcard(resolveWidgetValue(index), value);
+        name = wildcardRoute.targetName;
+      }
+
+      const proxy = proxyRoutes.get(index);
+      if (proxy) {
+        updateSubgraphInnerNodeWidget(
+          proxy.subgraphId,
+          proxy.innerNodeId,
+          proxy.innerWidgetIndex,
+          nextValue,
+          proxy.innerWidgetName ?? name,
+        );
+      } else {
+        const linkedSource = linkedSourceRoutes.get(index);
+        if (linkedSource && updateLinkedSourceWidget(linkedSource, nextValue)) {
+          return;
+        }
+        updateNodeWidget(nodeHierarchicalKey, index, nextValue, name);
+      }
+    },
+    [
+      linkedSourceRoutes,
+      nodeHierarchicalKey,
+      proxyRoutes,
+      resolveWidgetValue,
+      updateLinkedSourceWidget,
+      updateNodeWidget,
+      updateSubgraphInnerNodeWidget,
+      wildcardRoute,
+    ]
+  );
+
+  const handleUpdateNodeWidgets = useCallback(
+    (updates: Record<number, unknown>) => {
+      const directUpdates: Record<number, unknown> = {};
+      for (const [idxStr, value] of Object.entries(updates)) {
+        const widgetIndex = Number.parseInt(idxStr, 10);
+        if (!Number.isFinite(widgetIndex)) continue;
+        const proxy = proxyRoutes.get(widgetIndex);
+        if (proxy) {
+          updateSubgraphInnerNodeWidget(
+            proxy.subgraphId,
+            proxy.innerNodeId,
+            proxy.innerWidgetIndex,
+            value,
+            proxy.innerWidgetName,
+          );
+        } else {
+          const linkedSource = linkedSourceRoutes.get(widgetIndex);
+          if (linkedSource && updateLinkedSourceWidget(linkedSource, value)) {
+            continue;
+          }
+          directUpdates[widgetIndex] = value;
+        }
+      }
+      if (Object.keys(directUpdates).length > 0) {
+        updateNodeWidgets(nodeHierarchicalKey, directUpdates);
+      }
+    },
+    [
+      linkedSourceRoutes,
+      nodeHierarchicalKey,
+      proxyRoutes,
+      updateLinkedSourceWidget,
+      updateNodeWidgets,
+      updateSubgraphInnerNodeWidget,
+    ]
+  );
+  const handleSetSeedMode = useCallback(
+    (nodeId: number, mode: 'fixed' | 'randomize' | 'increment' | 'decrement') => {
+      if (!workflow || !nodeTypes) return;
+      const route = promotedSeedModeRoute?.nodeId === nodeId ? promotedSeedModeRoute : null;
+      const seedWidgetIndex = route?.widgetIndex ?? findSeedWidgetIndex(workflow, nodeTypes, node, {
+          widgetDescriptors: [...inputWidgets, ...widgets],
+        });
+      setSeedMode(nodeId, mode, {
+        workflow,
+        nodeTypes,
+        node: route ? findLinkedSourceNode(route) ?? undefined : node,
+        seedWidgetIndex,
+        // A promoted seed has no companion control slot on the placeholder;
+        // encode the mode in that instance's seed value just like its own card.
+        // On the placeholder's own card the same holds unless the subgraph
+        // explicitly promoted a control_after_generate — resolve that from the
+        // descriptor list rather than letting the store fall back to the
+        // seed-adjacent slot, which is another promoted widget here.
+        controlWidgetIndex: route
+          ? null
+          : isPlaceholder
+            ? findSeedControlWidgetIndex([...inputWidgets, ...widgets])
+            : undefined,
+        updateNodeWidgets: (_rawNodeId, updates) => {
+          if (!route) {
+            handleUpdateNodeWidgets(updates);
+            return;
+          }
+          for (const [index, value] of Object.entries(updates)) {
+            updateLinkedSourceWidget(
+              { ...route, widgetIndex: Number(index) },
+              value,
+            );
+          }
+        },
+      });
+    },
+    [
+      workflow,
+      nodeTypes,
+      node,
+      inputWidgets,
+      widgets,
+      isPlaceholder,
+      promotedSeedModeRoute,
+      findLinkedSourceNode,
+      setSeedMode,
+      handleUpdateNodeWidgets,
+      updateLinkedSourceWidget,
+    ]
+  );
+  const showHighlightLabel = Boolean(highlightLabel && !/^error\b/i.test(highlightLabel));
+  const rawNodeColor = (typeof node.bgcolor === 'string' && node.bgcolor.trim())
+    ? node.bgcolor.trim()
+    : (typeof node.color === 'string' ? node.color.trim() : '');
+  const nodeColor = resolveWorkflowColor(rawNodeColor);
+  const nodeTintColor = hexToRgba(nodeColor, 0.4);
+  const nodeHeaderBorderColor = themeColors.border.nodeHeaderTint;
+  const canUseNodeTint =
+    !isBypassed &&
+    !hasErrors &&
+    !isMissingNode &&
+    !isConnectionHighlighted &&
+    !isExecuting &&
+    rawNodeColor.length > 0;
+  const nodeCardBorderClass = hasErrors || isMissingNode
+    ? '!border !border-red-600'
+    : isConnectionHighlighted
+      ? 'border-cyan-400 shadow-cyan-900/20'
+      : isExecuting
+        ? 'border-emerald-500 shadow-emerald-900/20'
+        : isPlaceholder
+          ? 'border-cyan-400/50 shadow-cyan-900/20'
+          : 'border-white/10';
+  return (
+    <div
+      id={`node-card-wrapper-${node.id}`}
+      className="relative node-card-outer"
+    >
+      <div id={`node-anchor-${node.id}`} className="absolute -top-3 left-0 right-0 h-0 node-scroll-anchor" />
+
+      {showHighlightLabel && (
+        <ErrorHighlightBadge
+          label={highlightLabel ?? ''}
+          overlapHeader={highlightLabel === 'Running'}
+        />
+      )}
+
+      {errorBadgeLabel && (
+        <div className="absolute top-2 right-2 z-[110] animate-in fade-in duration-150">
+          <div className="bg-red-600 text-white text-[10px] font-black px-2 py-0.5 rounded-full shadow-lg whitespace-nowrap uppercase tracking-tighter ring-2 ring-white">
+            {errorBadgeLabel}
+          </div>
+        </div>
+      )}
+
+
+      <div
+        id={`node-card-${node.id}`}
+        className={`
+        node-card-inner
+        ${inGroup ? `rounded-lg shadow-sm ${isCollapsed && isBypassed ? 'pt-1 pb-0' : 'py-1'}` : `rounded-xl shadow-md px-2 ${isCollapsed && isBypassed ? 'pt-1 pb-0' : 'py-1'} mb-3`}
+        border
+        ${nodeCardBorderClass}
+        ${selectionMode && isNodeSelected ? 'ring-4 ring-cyan-400 ring-offset-2 ring-offset-slate-950' : ''}
+        ${isBypassed ? 'bg-purple-950/35' : 'bg-slate-900/95'}
+      `}
+        style={{
+          overflow: 'hidden',
+          ...(canUseNodeTint
+            ? {
+                backgroundColor: nodeTintColor,
+              }
+            : {}),
+        }}
+      >
+      <NodeCardHeader
+        nodeId={node.id}
+        displayName={displayName}
+        instanceBadge={instanceInfo && onEnterSubgraph ? (
+          <button
+            type="button"
+            // Every placeholder gets this: going in is the point of a subgraph
+            // card, and leaving it to the overflow menu made the first thing
+            // anyone does after creating one a hunt.
+            className="subgraph-instance-badge flex items-center gap-1 shrink-0 cursor-pointer rounded-full border border-cyan-400/30 bg-cyan-400/10 px-1.5 py-0.5 text-[10px] font-medium text-cyan-200 hover:bg-cyan-400/20"
+            title={
+              instanceInfo.total > 1
+                ? t('Shared subgraph type — {count} instances', { count: instanceInfo.total })
+                : t('Enter subgraph')
+            }
+            aria-label={t('Enter subgraph')}
+            onClick={(event) => {
+              event.stopPropagation();
+              onEnterSubgraph?.();
+            }}
+          >
+            <ArrowRightIcon className="w-3 h-3" />
+            {instanceInfo.number != null
+              ? `${instanceInfo.number}/${instanceInfo.total}`
+              : String(instanceInfo.total)}
+          </button>
+        ) : undefined}
+        isEditingLabel={isEditingLabel}
+        labelValue={labelValue}
+        labelInputRef={labelInputRef}
+        onLabelChange={setLabelValue}
+        onLabelBlur={handleLabelBlur}
+        isCollapsed={isCollapsed}
+        isBypassed={isBypassed}
+        isExecuting={isExecuting}
+        overallProgress={overallProgress}
+        hasErrors={hasErrors}
+        isMissing={isMissingNode}
+        errorIconRef={errorIconRef}
+        errorPopoverOpen={errorPopoverOpen}
+        setErrorPopoverOpen={setErrorPopoverOpen}
+        toggleNodeFold={() => {
+          const willUnfold = isCollapsed;
+          setItemCollapsed(nodeHierarchicalKey, !isCollapsed);
+          if (!willUnfold) return;
+          // Unfolding a node reveals everything: open all of its nested foldable
+          // sections (expand* is idempotent, so already-open ones are untouched)
+          // and reset nested in-Parameters folds (e.g. CR-LoRA groups) to open.
+          expandParametersSection(nodeHierarchicalKey);
+          expandConnectionsSection(nodeHierarchicalKey);
+          setUnfoldNonce((n) => n + 1);
+        }}
+        expandedBorderColor={canUseNodeTint ? nodeHeaderBorderColor : undefined}
+        rightSlot={selectionMode ? (
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              className={`hidden h-8 w-8 cursor-pointer items-center justify-center rounded-md lg:flex ${
+                isNodeBookmarked ? 'text-amber-500' : 'text-slate-400'
+              } disabled:cursor-not-allowed disabled:opacity-35`}
+              aria-pressed={isNodeBookmarked}
+              aria-label={isNodeBookmarked ? t('Remove bookmark') : t('Bookmark node')}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleBookmark(nodeHierarchicalKey);
+              }}
+            >
+              {isNodeBookmarked ? (
+                <BookmarkIconSvg className="h-5 w-5" />
+              ) : (
+                <BookmarkOutlineIcon className="h-5 w-5" />
+              )}
+            </button>
+            <SelectionCheckbox
+              selected={isNodeSelected}
+              ariaLabel={isNodeSelected ? t('Deselect') : t('Select')}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleSelectionKey(nodeHierarchicalKey);
+              }}
+            />
+          </div>
+        ) : (
+          <NodeCardMenu
+            nodeId={node.id}
+            nodeHierarchicalKey={nodeHierarchicalKey}
+            nodeType={node.type}
+            isLoraManagerNode={isLoraManagerNode}
+            showFastGroupsConfigAction={isFastGroupsBypasser}
+            isBypassed={isBypassed}
+            onEnterSubgraph={onEnterSubgraph}
+            onReplaceSubgraph={
+              isPlaceholder && replaceOptions.length > 0
+                ? () => setShowReplaceModal(true)
+                : undefined
+            }
+            onDissolveSubgraph={isPlaceholder ? () => setShowDissolveModal(true) : undefined}
+            onEditSubgraphLabels={
+              isPlaceholder && subgraphLabelRows.length > 0
+                ? () => setShowLabelsModal(true)
+                : undefined
+            }
+            onPopOutToRoot={
+              popOutTerminalKind ? () => popNodeOutToRoot(nodeHierarchicalKey) : undefined
+            }
+            onEditLabel={handleEditLabel}
+            onEditSetName={
+              isSetNode(node)
+                ? () => {
+                    expandConnectionsSection(nodeHierarchicalKey);
+                    startEditSetGetName(nodeHierarchicalKey);
+                  }
+                : undefined
+            }
+            onEditFastGroupsConfig={() => setShowFastGroupConfig(true)}
+            nodeColor={nodeColor}
+            onChangeColor={(color) => updateWorkflowItemColor(nodeHierarchicalKey, color)}
+            pinnableWidgets={pinnableWidgets}
+            singlePinnableWidget={singlePinnableWidget}
+            isSingleWidgetPinned={isSingleWidgetPinned}
+            hasPinnedWidget={hasPinnedWidget}
+            toggleWidgetPin={toggleWidgetPin}
+            setPinnedWidget={handleSetPinnedWidget}
+            promotableWidgets={promotableWidgets}
+            onPromoteWidget={(widget) => {
+              promoteWidget({
+                nodeKey: nodeHierarchicalKey,
+                inputName: widget.inputName,
+                inputType: widget.type,
+                value: widget.value,
+              });
+            }}
+            isNodeBookmarked={isNodeBookmarked}
+            onToggleNodeBookmark={() => toggleBookmark(nodeHierarchicalKey)}
+            toggleBypass={toggleBypass}
+            setItemHidden={setItemHidden}
+            onDeleteNode={() => setShowDeleteModal(true)}
+            onDuplicateNode={() => duplicateNode(nodeHierarchicalKey)}
+            onCopyNode={() => {
+              if (!workflow) return;
+              const payload = buildNodeClipboardPayload(workflow, nodeHierarchicalKey);
+              if (payload) setClipboardPayload(payload);
+            }}
+            onPasteBelow={() => pasteClipboard(nodeHierarchicalKey)}
+            pasteSummary={clipboardSummary}
+            onMoveNode={onMoveNode ?? (() => {})}
+            onMoveIntoSubgraph={onMoveIntoSubgraph}
+            onConvertImageOutputNode={(target) =>
+              convertImageOutputNode(nodeHierarchicalKey, target)
+            }
+            connectionHighlightMode={connectionHighlightMode}
+            setConnectionHighlightMode={setConnectionHighlightMode}
+            leftLineCount={leftLineCount}
+            rightLineCount={rightLineCount}
+          />
+        )}
+      />
+
+      <div
+        className={`grid transition-[grid-template-rows] duration-200 ease-out ${
+          isCollapsed ? "grid-rows-[0fr]" : "grid-rows-[1fr]"
+        }`}
+      >
+        <div
+          className={`collapse-container overflow-hidden transition-opacity px-1 duration-200 ease-out ${
+            isCollapsed ? "opacity-0" : "opacity-100"
+          }`}
+        >
+          <div id={`node-content-${node.id}`} className={`node-expanded-content ${isBypassed ? 'opacity-60 grayscale' : ''}`}>
+            {isMissingNode ? (
+              <div className="missing-node-body px-2 py-3 text-center">
+                <div className="text-sm font-semibold text-red-300">{t('Missing Node')}</div>
+                <div className="mt-0.5 font-mono text-xs text-slate-400 [overflow-wrap:anywhere]">{node.type}</div>
+                <div className="mt-1 text-xs text-slate-500">{t('Not installed — tap the red icon to install.')}</div>
+              </div>
+            ) : (
+            <>
+            <NodeCardConnectionsSection
+              nodeId={node.id}
+              nodeHierarchicalKey={nodeHierarchicalKey}
+              nodeType={node.type}
+              inputs={connectionInputs}
+              outputs={visibleOutputs}
+              allInputs={node.inputs}
+              allOutputs={node.outputs}
+            />
+
+            {!isSetGet && <NodeCardParameters
+              node={node}
+              isBypassed={isBypassed}
+              isKSampler={isKSampler}
+              workflowExists={Boolean(workflow)}
+              nodeTypesExists={Boolean(nodeTypes)}
+              visibleInputWidgets={inputWidgetsWithWildcards}
+              visibleWidgets={widgetsWithWildcardPrompts}
+              errorInputNames={errorInputNames}
+              onUpdateNodeWidget={handleUpdateNodeWidget}
+              onUpdateNodeWidgets={handleUpdateNodeWidgets}
+              getWidgetIndexForInput={handleGetWidgetIndexForInput}
+              findSeedWidgetIndex={handleFindSeedWidgetIndex}
+              findSeedControlWidgetIndex={handleFindSeedControlWidgetIndex}
+              promotedSeedModeNodeId={promotedSeedModeRoute?.nodeId}
+              isPlaceholder={isPlaceholder}
+              setSeedMode={handleSetSeedMode}
+              isWidgetPinned={isWidgetPinned}
+              toggleWidgetPin={toggleWidgetPin}
+              resolveWidgetValue={resolveWidgetValue}
+              showFastGroupConfig={showFastGroupConfig}
+              setShowFastGroupConfig={setShowFastGroupConfig}
+              unfoldNonce={unfoldNonce}
+              promotableWidgets={promotableWidgets}
+              promotedWidgetForms={promotedWidgetForms}
+              promotedBoundaryLabels={promotedBoundaryLabels}
+              promotedBoundarySlots={promotedBoundarySlots}
+              boundaryTargetNames={boundaryTargetNames}
+              instanceCount={subgraphInstanceCount}
+              onPromoteWidget={(widget, form) => {
+                promoteWidget(
+                  {
+                    nodeKey: nodeHierarchicalKey,
+                    inputName: widget.inputName,
+                    inputType: widget.type,
+                    value: widget.value,
+                  },
+                  { form },
+                );
+              }}
+              onChangePromotedForm={(inputName, form) => {
+                setPromotedWidgetForm({ nodeKey: nodeHierarchicalKey, inputName }, form);
+              }}
+              onDemoteWidget={(inputName) => {
+                demoteWidget({ nodeKey: nodeHierarchicalKey, inputName });
+              }}
+              onMoveBoundarySlot={isPlaceholder ? (from, to) => {
+                moveBoundarySlot('input', from, to, { subgraphId: node.type });
+              } : undefined}
+              onRemoveBoundarySlot={isPlaceholder ? (slotIndex) => {
+                removeBoundarySlot('input', slotIndex, { subgraphId: node.type });
+              } : undefined}
+              onUnpromoteBoundarySlot={isPlaceholder ? (slotIndex) => {
+                // Only worth asking when the instances actually disagree: one
+                // instance, or several holding the same value, lose nothing.
+                const values = workflow
+                  ? collectInstancePromotedValues(workflow, node.type, slotIndex)
+                  : [];
+                // Only instances holding something OTHER than this one's value
+                // lose anything, so they are the whole reason to ask.
+                if (instancesLosingPromotedValue(values, node.id, currentSubgraphDefinition?.id ?? null).length > 0) {
+                  setUnpromoteSlot(slotIndex);
+                  return;
+                }
+                demoteWidget({
+                  subgraphId: node.type,
+                  boundarySlot: slotIndex,
+                  instanceNodeId: node.id,
+                  parentSubgraphId: currentSubgraphDefinition?.id ?? null,
+                });
+              } : undefined}
+              onRenameBoundarySlot={isPlaceholder ? (slotIndex) => {
+                setBoundaryLabelSlot(slotIndex);
+              } : undefined}
+              onRenameWidget={(inputName, label) => {
+                setWidgetLabel(nodeHierarchicalKey, inputName, label);
+              }}
+              hasOutputsBelow={
+                Boolean(noteText) ||
+                (showComparer && Boolean(comparerOutput)) ||
+                showImagePreview ||
+                showTextPreview ||
+                !!latentPreviewUrl ||
+                isBatchOutput ||
+                Boolean(revealFrontendPreviewUpdate)
+              }
+            />}
+            {noteText && (
+              <NodeCardNote
+                noteText={noteText}
+                noteBody={noteBody}
+                isMarkdown={isMarkdownNote}
+                noteWidgetIndex={noteWidgetIndex}
+                isEditingNote={isEditingNote}
+                setIsEditingNote={setIsEditingNote}
+                onUpdateNote={handleUpdateNote}
+                noteTextareaRef={noteTextareaRef}
+                onNoteTap={handleNoteTap}
+              />
+            )}
+
+            {revealFrontendPreviewUpdate && (
+              <button
+                type="button"
+                className="mb-3 w-full rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-sm text-slate-300"
+                onClick={() => {
+                  const widgetIndex = handleGetWidgetIndexForInput(
+                    revealFrontendPreviewUpdate.widgetName,
+                  );
+                  updateNodeWidget(
+                    nodeHierarchicalKey,
+                    widgetIndex ?? -1,
+                    revealFrontendPreviewUpdate.value,
+                    revealFrontendPreviewUpdate.widgetName,
+                  );
+                }}
+              >
+                {t('Show video preview')}
+              </button>
+            )}
+
+            {showComparer && comparerOutput && (
+              isDenoVideoCompare && comparerOutput.video ? (
+                <DenoVideoCompare
+                  output={comparerOutput}
+                  displayName={displayName}
+                  onWidgetChange={(widgetName, value) => {
+                    const widgetIndex = handleGetWidgetIndexForInput(widgetName);
+                    if (widgetIndex === null) return;
+                    handleUpdateNodeWidget(widgetIndex, value, widgetName);
+                  }}
+                />
+              ) : (
+                <NodeCardImageComparer
+                  show={showComparer}
+                  aImages={comparerOutput.a}
+                  bImages={comparerOutput.b}
+                  displayName={displayName}
+                  onOpenViewer={onImageClick}
+                />
+              )
+            )}
+
+            <NodeCardOutputPreview
+              show={showImagePreview || showTextPreview || !!latentPreviewUrl || isBatchOutput}
+              previewImage={effectivePreviewImage}
+              previewImages={batchTiles}
+              frontendPreview={effectiveFrontendMediaPreview}
+              latentPreviewUrl={latentPreviewUrl}
+              latentPreviewTiles={latentPreviewTiles}
+              previewText={showTextPreview ? nodeTextOutput : null}
+              displayName={displayName}
+              onImageClick={() => onImageClick?.(previewList, 0, !inputImagePreview)}
+              onPreviewImageClick={(i) => onImageClick?.(previewList, i, !inputImagePreview)}
+              onEditMask={handleEditMask}
+              isExecuting={Boolean(isExecuting)}
+              overallProgress={overallProgress}
+              displayNodeProgress={displayNodeProgress}
+              videoAutoPlay={frontendPreviewPolicy?.autoPlay ?? true}
+              videoLoop={frontendPreviewPolicy?.loop ?? false}
+              videoPlaybackRate={frontendPreviewPolicy?.playbackRate ?? 1}
+              onFrontendPreviewStateChange={isOasisMediaPreview
+                ? handleFrontendPreviewStateChange
+                : undefined}
+            />
+            </>
+            )}
+          </div>
+          {nodeTitle && (
+            <div className="node-card-subtitle text-[10px] text-center font-semibold uppercase tracking-wider text-slate-500 mb-1">
+              {typeDef?.display_name || node.type}
+            </div>
+          )}
+        </div>
+      </div>
+      </div>
+
+      <NodeCardErrorPopover
+        nodeId={node.id}
+        open={errorPopoverOpen && (hasErrors || isMissingNode)}
+        errors={nodeErrors ?? []}
+        isMissing={isMissingNode}
+        nodeType={node.type}
+        onInstall={() => {
+          resetErrorPopover();
+          // Open the manager filtered to Missing AND searched for this exact node
+          // type, so the pack that installs it is front and center.
+          openCustomNodesManager('Missing', node.type);
+        }}
+        anchorRef={errorIconRef}
+        onClose={resetErrorPopover}
+      />
+
+      {unpromoteSlot !== null && isPlaceholder && (
+        <UnpromoteSharedWidgetDialog
+          subgraphId={node.type}
+          instanceNodeId={node.id}
+          parentSubgraphId={currentSubgraphDefinition?.id ?? null}
+          boundarySlot={unpromoteSlot}
+          slotLabel={
+            node.inputs?.[unpromoteSlot]?.label
+            ?? node.inputs?.[unpromoteSlot]?.name
+            ?? String(unpromoteSlot)
+          }
+          onConfirm={() => demoteWidget({
+            subgraphId: node.type,
+            boundarySlot: unpromoteSlot,
+            instanceNodeId: node.id,
+            parentSubgraphId: currentSubgraphDefinition?.id ?? null,
+          })}
+          onClose={() => setUnpromoteSlot(null)}
+        />
+      )}
+
+      {boundaryLabelSlot !== null && isPlaceholder && (
+        <EditBoundarySlotLabelModal
+          onClose={() => setBoundaryLabelSlot(null)}
+          direction="input"
+          slotIndex={boundaryLabelSlot}
+          subgraphId={node.type}
+          instanceNodeId={node.id}
+        />
+      )}
+
+      {showDeleteModal && (
+        <DeleteNodeModal
+          nodeId={node.id}
+          displayName={displayName}
+          hasConnections={deletionOptions.hasConnections}
+          canReconnect={deletionOptions.canReconnect}
+          onCancel={() => setShowDeleteModal(false)}
+          onDelete={(reconnect) => {
+            deleteNode(nodeHierarchicalKey, reconnect);
+            setShowDeleteModal(false);
+          }}
+        />
+      )}
+
+      {showReplaceModal && (
+        <ReplaceSubgraphModal
+          options={replaceOptions}
+          onPick={(defId) => {
+            const drops = replaceSubgraphInstance(nodeHierarchicalKey, defId);
+            setShowReplaceModal(false);
+            if (drops && drops.length > 0) setReplaceDrops(drops);
+          }}
+          onCancel={() => setShowReplaceModal(false)}
+        />
+      )}
+
+      {replaceDrops && (
+        <Dialog
+          onClose={() => setReplaceDrops(null)}
+          title={t('Connections dropped')}
+          description={
+            <div className="replace-drop-summary mt-2 flex flex-col gap-1">
+              <div className="text-xs text-slate-400">
+                {t('These connections had no matching slot on the new subgraph type:')}
+              </div>
+              {replaceDrops.map((drop, index) => (
+                <div key={index} className="text-sm text-slate-200">
+                  {drop.direction === 'input' ? '→ ' : '← '}
+                  {drop.slotName} ({drop.slotType})
+                  {drop.peerNodeTitle ? ` — ${drop.peerNodeTitle}` : ''}
+                </div>
+              ))}
+            </div>
+          }
+          actions={[
+            { label: t('OK'), onClick: () => setReplaceDrops(null), variant: 'primary', autoFocus: true },
+          ]}
+        />
+      )}
+
+      {showLabelsModal && placeholderDef && (
+        <EditSubgraphLabelsModal
+          subgraphName={placeholderSubgraphName ?? node.type}
+          rows={subgraphLabelRows}
+          instanceCount={subgraphInstanceCount}
+          onSave={(changes, scope) => {
+            runUndoTransaction(() => {
+              for (const change of changes) {
+                if (scope === 'instance') {
+                  setInstanceWidgetLabel(nodeHierarchicalKey, change.target, change.label);
+                } else if (change.target.kind === 'proxy') {
+                  setPromotedWidgetLabel(node.type, change.target, change.label);
+                } else {
+                  setPromotedWidgetLabel(
+                    node.type,
+                    { kind: 'slot', slotName: change.target.slotName },
+                    change.label,
+                  );
+                }
+              }
+            }, 'Rename promoted widget');
+            setShowLabelsModal(false);
+          }}
+          onCancel={() => setShowLabelsModal(false)}
+        />
+      )}
+
+      {showDissolveModal && placeholderDef && (
+        <DeleteContainerModal
+          containerTypeLabel="subgraph"
+          containerIdLabel={String(node.id)}
+          displayName={placeholderSubgraphName ?? node.type}
+          nodeCount={(placeholderDef.nodes ?? []).length}
+          onCancel={() => setShowDissolveModal(false)}
+          onDeleteContainerOnly={() => {
+            if (placeholderDef.itemKey) deleteContainer(placeholderDef.itemKey, { deleteNodes: false });
+            setShowDissolveModal(false);
+          }}
+          onDeleteContainerAndNodes={() => {
+            if (placeholderDef.itemKey) deleteContainer(placeholderDef.itemKey, { deleteNodes: true });
+            setShowDissolveModal(false);
+          }}
+        />
+      )}
+    </div>
+  );
+});

@@ -1,0 +1,218 @@
+import { getImageUrl } from '@/api/client';
+import type { HistoryOutputImage } from '@/api/types';
+import { isHistoryEntryData, type QueueItemData, type UnifiedItem } from './types';
+import { isVideoFilename } from '@/utils/media';
+import { HIDDEN_WORKFLOW_EXTRA_DATA_KEY } from '@/utils/workflowHidden';
+
+interface QueueOutputDisplayOptions {
+  includeInputImages?: boolean;
+}
+
+const LOAD_IMAGE_INPUT_KEYS = ['image', 'filename', 'file'];
+
+const QUEUE_STATUS_ORDER: Record<UnifiedItem['status'], number> = {
+  pending: 0,
+  running: 1,
+  done: 2,
+};
+
+/**
+ * Display the queue as a downward-moving stack: newly appended prompts enter at
+ * the top, the next prompt to execute sits at the bottom of Pending immediately
+ * above the active generation, and completed history follows newest-first.
+ *
+ * ComfyUI pops the smallest pending queue number first, including increasingly
+ * negative front submissions. Sorting pending numbers descending is therefore
+ * deliberately the reverse of execution order; backend priority is unchanged.
+ */
+export function compareUnifiedQueueItems(a: UnifiedItem, b: UnifiedItem): number {
+  const statusDifference = QUEUE_STATUS_ORDER[a.status] - QUEUE_STATUS_ORDER[b.status];
+  if (statusDifference !== 0) return statusDifference;
+  if (a.status === 'pending') {
+    return (b.data as QueueItemData).number - (a.data as QueueItemData).number;
+  }
+  if (a.status === 'done') {
+    return (b.timestamp ?? 0) - (a.timestamp ?? 0);
+  }
+  return 0;
+}
+
+export function isQueueItemHidden(item: UnifiedItem): boolean {
+  if (isHistoryEntryData(item.data)) return Boolean(item.data.hidden);
+  return item.data.extra?.[HIDDEN_WORKFLOW_EXTRA_DATA_KEY] === true;
+}
+
+// Above this many queued jobs the Pending block is taller than the screen on a
+// phone, pushing the generating card out of view — so it arrives folded. Two or
+// fewer sit comfortably above the running card and stay visible.
+export const PENDING_AUTO_COLLAPSE_THRESHOLD = 2;
+
+/**
+ * Whether the Pending section renders folded. An explicit user fold/unfold wins
+ * while it stands; with no choice on record the count decides, so a big batch
+ * arrives folded and a small one doesn't.
+ *
+ * The count only ever decides *once*, because the caller latches the answer
+ * (see `shouldLatchPendingAutoCollapse`). Left underived, this reads the count
+ * afresh on every render and so unfolds again on the way back down — a queue
+ * draining past the threshold would drop its remaining cards into the top of
+ * the list with nobody having asked for it.
+ */
+export function isPendingSectionCollapsed(
+  override: boolean | null,
+  pendingCount: number,
+): boolean {
+  return override ?? pendingCount > PENDING_AUTO_COLLAPSE_THRESHOLD;
+}
+
+/**
+ * Whether the automatic fold above should be written down as the standing
+ * choice. Folding is one-way: a batch big enough to bury the running card
+ * arrives folded, and from then on only the reader can open it. Nothing that
+ * happens to the queue afterwards — draining, or being added to — unfolds a
+ * section that is folded.
+ */
+export function shouldLatchPendingAutoCollapse(
+  override: boolean | null,
+  pendingCount: number,
+): boolean {
+  return override === null && pendingCount > PENDING_AUTO_COLLAPSE_THRESHOLD;
+}
+
+export function isDisplayableQueueOutput(
+  img: HistoryOutputImage,
+  options: QueueOutputDisplayOptions = {},
+): boolean {
+  if (!img.filename.trim()) return false;
+  if (img.type === 'output') return true;
+  if (img.type === 'input') return Boolean(options.includeInputImages);
+
+  // Video-combine nodes can emit temporary video refs for previews/intermediate
+  // values even when they were not saved as real outputs. Those refs often are
+  // not durable/viewable and they crowd out the running progress UI.
+  return !isVideoFilename(img.filename);
+}
+
+export function getDisplayableQueueOutputs(
+  images: HistoryOutputImage[],
+  options: QueueOutputDisplayOptions = {},
+): HistoryOutputImage[] {
+  return images.filter((img) => isDisplayableQueueOutput(img, options));
+}
+
+export function dedupeQueueImages(images: HistoryOutputImage[]): HistoryOutputImage[] {
+  const seen = new Set<string>();
+  return images.filter((img) => {
+    const key = getQueueImageKey(img);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function getQueueImageKey(img: HistoryOutputImage): string {
+  return `${img.type}/${img.subfolder}/${img.filename}`;
+}
+
+export function preserveQueueImageOrder(
+  previousKeys: string[],
+  images: HistoryOutputImage[],
+): HistoryOutputImage[] {
+  if (previousKeys.length === 0 || images.length < 2) return images;
+  const previousIndex = new Map(previousKeys.map((key, index) => [key, index]));
+  return images
+    .map((image, index) => ({ image, index }))
+    .sort((a, b) => {
+      const aPrevious = previousIndex.get(getQueueImageKey(a.image));
+      const bPrevious = previousIndex.get(getQueueImageKey(b.image));
+      if (aPrevious !== undefined && bPrevious !== undefined) return aPrevious - bPrevious;
+      if (aPrevious !== undefined) return -1;
+      if (bPrevious !== undefined) return 1;
+      return a.index - b.index;
+    })
+    .map(({ image }) => image);
+}
+
+export function getPromptInputImages(prompt: Record<string, unknown>): HistoryOutputImage[] {
+  const images: HistoryOutputImage[] = [];
+  const seen = new Set<string>();
+
+  for (const node of Object.values(prompt)) {
+    const record = asRecord(node);
+    if (!record || !isLoadImagePromptNode(record)) continue;
+    const inputs = asRecord(record.inputs);
+    if (!inputs) continue;
+
+    for (const key of LOAD_IMAGE_INPUT_KEYS) {
+      const parsed = parsePromptInputImage(inputs[key]);
+      if (!parsed) continue;
+      const imageKey = `${parsed.type}/${parsed.subfolder}/${parsed.filename}`;
+      if (seen.has(imageKey)) continue;
+      seen.add(imageKey);
+      images.push(parsed);
+      break;
+    }
+  }
+
+  return images;
+}
+
+export function getBatchSources(promptId: string, list: UnifiedItem[]): string[] {
+  const match = list.find((item) => item.id === promptId);
+  if (!match || match.status !== 'done') return [];
+  if (!isHistoryEntryData(match.data)) return [];
+  const images = getDisplayableQueueOutputs(match.data.outputs.images ?? []);
+  return images
+    .filter((img: HistoryOutputImage) => img.type === 'output')
+    .map((img: HistoryOutputImage) => (
+      getImageUrl(img.filename, img.subfolder, img.type, img.cacheToken)
+    ));
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function isLoadImagePromptNode(node: Record<string, unknown>): boolean {
+  const classType = typeof node.class_type === 'string' ? node.class_type : '';
+  const meta = asRecord(node._meta);
+  const title = typeof meta?.title === 'string' ? meta.title : '';
+  return /load[\s_-]*image/i.test(`${classType} ${title}`);
+}
+
+function parsePromptInputImage(value: unknown): HistoryOutputImage | null {
+  if (typeof value === 'string' && value.trim()) {
+    const { filename, subfolder } = splitSubfolder(value.trim());
+    return { filename, subfolder, type: 'input' };
+  }
+  const record = asRecord(value);
+  if (!record) return null;
+  const rawFilename = typeof record.filename === 'string'
+    ? record.filename
+    : typeof record.name === 'string'
+      ? record.name
+      : null;
+  if (!rawFilename?.trim()) return null;
+  const { filename, subfolder } = splitSubfolder(rawFilename.trim());
+  const explicitSubfolder = typeof record.subfolder === 'string' ? record.subfolder : '';
+  const type = typeof record.type === 'string' && record.type.trim()
+    ? record.type.trim()
+    : 'input';
+  return {
+    filename,
+    subfolder: explicitSubfolder || subfolder,
+    type,
+  };
+}
+
+function splitSubfolder(path: string): { filename: string; subfolder: string } {
+  const normalized = path.replace(/^\/+/, '');
+  const parts = normalized.split('/').filter(Boolean);
+  if (parts.length <= 1) {
+    return { filename: normalized, subfolder: '' };
+  }
+  const filename = parts.pop() ?? normalized;
+  return { filename, subfolder: parts.join('/') };
+}

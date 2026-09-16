@@ -1,0 +1,269 @@
+// Workflow JSON types (matching ComfyUI format)
+
+export interface WorkflowInput {
+  name: string;
+  type: string;
+  link: number | null;
+  label?: string;
+  localized_name?: string;
+  widget?: {
+    name: string;
+  };
+}
+
+export interface WorkflowOutput {
+  name: string;
+  type: string;
+  links: number[] | null;
+  slot_index?: number;
+  label?: string;
+  localized_name?: string;
+}
+
+export interface WorkflowNode {
+  id: number;
+  itemKey?: string;
+  title?: string;
+  type: string;
+  pos: [number, number];
+  size: [number, number];
+  flags: Record<string, unknown>;
+  order: number;
+  mode: number;
+  inputs: WorkflowInput[];
+  outputs: WorkflowOutput[];
+  properties: Record<string, unknown>;
+  // Optional: some nodes (e.g. an empty rgthree Fast Groups Bypasser) carry no
+  // widgets_values; normalization may omit it entirely. Access via the
+  // Array.isArray / isRecord guards in workflowInputs rather than assuming shape.
+  widgets_values?: unknown[] | Record<string, unknown>;
+  color?: string;
+  bgcolor?: string;
+}
+
+// Link format: [link_id, source_node, source_slot, target_node, target_slot, type]
+export type WorkflowLink = [number, number, number, number, number, string];
+
+export interface WorkflowGroup {
+  id: number;
+  itemKey?: string;
+  title: string;
+  bounding: [number, number, number, number]; // [x, y, width, height]
+  color: string;
+  font_size?: number;
+  flags?: Record<string, unknown>;
+}
+
+export interface WorkflowSubgraphLink {
+  id: number;
+  origin_id: number;
+  origin_slot: number;
+  target_id: number;
+  target_slot: number;
+  type: string;
+}
+
+export interface WorkflowSubgraphDefinition {
+  id: string;
+  itemKey?: string;
+  name?: string;
+  version?: number;
+  state?: WorkflowGraphState;
+  revision?: number;
+  config?: Record<string, unknown>;
+  inputNode?: { id?: number; bounding?: [number, number, number, number]; pinned?: boolean };
+  outputNode?: { id?: number; bounding?: [number, number, number, number]; pinned?: boolean };
+  inputs?: Array<{
+    id?: string;
+    name?: string;
+    type?: string;
+    linkIds?: number[];
+    label?: string;
+    localized_name?: string;
+    pos?: [number, number];
+  }>;
+  outputs?: Array<{
+    id?: string;
+    name?: string;
+    type?: string;
+    linkIds?: number[];
+    label?: string;
+    localized_name?: string;
+    pos?: [number, number];
+  }>;
+  widgets?: unknown[];
+  definitions?: {
+    subgraphs?: WorkflowSubgraphDefinition[];
+  };
+  nodes: WorkflowNode[];
+  groups?: WorkflowGroup[];
+  links: WorkflowSubgraphLink[];
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * LiteGraph's id allocators, shared by the root graph and every subgraph.
+ * Open-ended because a subgraph definition's `state` also carries this app's
+ * own item colour (see `updateWorkflowItemColor`).
+ */
+export interface WorkflowGraphState {
+  lastGroupId?: number;
+  lastNodeId?: number;
+  lastLinkId?: number;
+  lastRerouteId?: number;
+  [key: string]: unknown;
+}
+
+export interface Workflow {
+  id?: string;
+  revision?: number;
+  last_node_id: number;
+  last_link_id: number;
+  state?: WorkflowGraphState;
+  nodes: WorkflowNode[];
+  links: WorkflowLink[];
+  groups: WorkflowGroup[];
+  config: Record<string, unknown>;
+  definitions?: {
+    subgraphs?: WorkflowSubgraphDefinition[];
+  };
+  widget_idx_map?: Record<string, Record<string, number>>;
+  extra?: Record<string, unknown>;
+  version: number;
+}
+
+// Node type definitions from /object_info
+// COMBO inputs put the option list (e.g. ['euler', 'dpmpp_2m']) in the first
+// slot instead of a type-name string, so the entry type accepts either form.
+export type NodeInputEntry = [string | unknown[], Record<string, unknown>?];
+
+export interface NodeInputDefinition {
+  required?: Record<string, NodeInputEntry>;
+  optional?: Record<string, NodeInputEntry>;
+  hidden?: Record<string, string>;
+}
+
+export interface NodeTypeDefinition {
+  input: NodeInputDefinition;
+  input_order?: {
+    required?: string[];
+    optional?: string[];
+  };
+  output: string[];
+  output_is_list?: boolean[];
+  output_name?: string[];
+  output_tooltips?: string[];
+  name: string;
+  display_name: string;
+  description: string;
+  python_module: string;
+  category: string;
+  output_node?: boolean;
+}
+
+export type NodeTypes = Record<string, NodeTypeDefinition>;
+
+// Queue types
+export interface QueueItem {
+  prompt_id: string;
+  number: number;
+  prompt: Record<string, unknown>;
+}
+
+export interface QueueStatus {
+  exec_info: {
+    queue_remaining: number;
+  };
+}
+
+export interface QueueInfo {
+  queue_running: Array<[number, string, unknown, Record<string, unknown>, string[]]>;
+  queue_pending: Array<[number, string, unknown, Record<string, unknown>, string[]]>;
+}
+
+// History types
+export interface HistoryOutputImage {
+  filename: string;
+  subfolder: string;
+  type: string;
+  // Per-execution identity propagated to preview/playback URLs so a second run
+  // cannot reuse the first run's browser cache entry when an output path is
+  // overwritten or reused (including after an out-of-app move/delete).
+  cacheToken?: string | number;
+  // Optional metadata emitted by custom video-preview nodes (for example
+  // DenoVideoPreview). Unknown output fields are retained by normalization.
+  frame_rate?: number;
+  width?: number;
+  height?: number;
+  frame_count?: number;
+  has_audio?: boolean;
+}
+
+export interface HistoryOutput {
+  images?: HistoryOutputImage[];
+  gifs?: HistoryOutputImage[];
+  videos?: HistoryOutputImage[];
+  // Image Comparer (rgthree) emits its two sides separately rather than in `images`.
+  a_images?: HistoryOutputImage[];
+  b_images?: HistoryOutputImage[];
+  [key: string]: unknown;
+}
+
+export interface HistoryItem {
+  prompt: [number, string, Record<string, unknown>, Record<string, string>, string[]];
+  outputs: Record<string, HistoryOutput>;
+  status?: {
+    status_str: string;
+    completed: boolean;
+    messages: Array<[string, Record<string, unknown>]>;
+  };
+}
+
+export type History = Record<string, HistoryItem>;
+
+// WebSocket message types
+export interface WSMessage {
+  type: string;
+  data: Record<string, unknown>;
+}
+
+export interface WSStatusMessage extends WSMessage {
+  type: 'status';
+  data: {
+    status: QueueStatus;
+    sid?: string;
+  };
+}
+
+export interface WSProgressMessage extends WSMessage {
+  type: 'progress';
+  data: {
+    value: number;
+    max: number;
+    prompt_id?: string;
+    node?: string;
+  };
+}
+
+export interface WSExecutingMessage extends WSMessage {
+  type: 'executing';
+  data: {
+    node: string | null;
+    display_node?: string;
+    prompt_id?: string;
+  };
+}
+
+export interface WSExecutedMessage extends WSMessage {
+  type: 'executed';
+  data: {
+    node: string;
+    display_node?: string;
+    /**
+     * Null when the node ran with nothing to show. The type said otherwise, so
+     * the handler indexed it and threw out of the whole message.
+     */
+    output: HistoryOutput | null;
+    prompt_id: string;
+  };
+}

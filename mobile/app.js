@@ -215,7 +215,11 @@
     });
     window.scrollTo({ top: 0, behavior: "auto" });
     // 高级页按 state.values 整块重渲染：生成页/草稿里的改动切过去就能看见。
-    if (target === "advanced") advancedPage?.show();
+    if (target === "advanced") {
+      // 面板按需加载（1.4MB，不切过去就不下载）。
+      setupAdvancedPage();
+      syncPanelWorkflow();
+    }
     // 反向同步：高级页改过值，切回生成页时重绘控件（值取自草稿，改值时会存草稿）。
     if (target === "generate" && advancedEdited) {
       advancedEdited = false;
@@ -224,44 +228,72 @@
     if (target === "history") loadJobs().catch(() => {});
   }
 
-  // 「高级」页（按组/节点浏览并编辑参数）实现全部在 mobile/advanced.js 里，
-  // 这里只注入依赖：它不认识 app.js 的内部变量，也不需要认识。
-  let advancedPage = null;
+  // 「高级」页 = 参考项目（comfyui-mobile-frontend, MIT）那套工作流面板的真实组件，
+  // 编译产物在 mobile/panel.js（源码 mobile/panel/src，npm run build 生成）。
+  // 面板自己负责取数据（/mobile/api/panel/workflow/<id> + /api/object_info）与回写
+  // 桌面指令，这里只负责在切到高级页时把它挂进 #view-advanced，并跟随工作流切换。
+  // 面板跑在 iframe 里（mobile/panel.html）：参考项目那套界面是"占满整页"的 App，
+  // 关进自己的文档后，它的整站样式与手机页互不影响，UI/交互才能保持原样。
+  let panelFrame = null;
+  let panelWorkflowId = "";
   // 高级页改过值 → 切回生成页时按最新值重绘控件，避免两边显示不一致。
   let advancedEdited = false;
-  function setupAdvancedPage() {
-    if (advancedPage) return advancedPage;
-    const api = globalThis.MobileAdvanced;
-    if (!api || typeof api.mount !== "function") return null;
+
+  function panelUrl(workflowId, locale) {
+    const params = new URLSearchParams();
+    if (workflowId) params.set("workflow", String(workflowId));
+    if (locale) params.set("locale", String(locale));
+    return `/mobile/assets/panel.html?v=${encodeURIComponent(uiVersion())}&${params.toString()}`;
+  }
+
+  function sendToPanel(action, value) {
+    const frame = panelFrame;
+    if (!frame || !frame.contentWindow) return;
     try {
-      advancedPage = api.mount({
-        document,
-        t,
-        $,
-        state,
-        renderField,
-        updateFieldValue,
-        onAction: (nodeId, action, value) => {
-          advancedEdited = true;
-          pushDesktopAction(nodeId, action, value);
-        },
-        // 组操作（改名 / 改颜色）：组 id 是 g<序号>，和电脑端 workflow.groups 的下标一致。
-        onGroupAction: (index, action, value) => {
-          advancedEdited = true;
-          pushDesktopAction("g" + String(index), action, value);
-        },
-        onEdit: (field, value) => {
-          advancedEdited = true;
-          // 「高级」页改的值必须送回电脑端：那边的自制节点要靠自己的回调重画面板，
-          // 光改手机这份快照是改不动它的。
-          if (field) pushDesktopCommand(field.node_id, field.input, value);
-        },
-        view: "view-advanced",
-      });
+      frame.contentWindow.postMessage({ type: "mtr-panel", action, value }, "*");
     } catch (error) {
-      console.warn("[Mobile Remote] advanced page failed to mount", error);
+      console.debug("[Mobile Remote] 通知面板失败", error);
     }
-    return advancedPage;
+  }
+
+  function setupAdvancedPage() {
+    const host = $("view-advanced");
+    if (!host || panelFrame) return panelFrame;
+    panelWorkflowId = String(state.workflow?.id || "");
+    const frame = document.createElement("iframe");
+    frame.className = "panel-frame";
+    frame.title = t("高级");
+    frame.setAttribute("allow", "clipboard-write");
+    frame.src = panelUrl(panelWorkflowId, currentLocaleId());
+    host.replaceChildren(frame);
+    panelFrame = frame;
+    return frame;
+  }
+
+  // 工作流换了就告诉面板重新取数据（首次打开时 iframe 的地址里已经带了）。 
+  function syncPanelWorkflow() {
+    const id = String(state.workflow?.id || "");
+    if (!panelFrame || !id || id === panelWorkflowId) return;
+    panelWorkflowId = id;
+    sendToPanel("workflow", id);
+  }
+
+  // 面板跟随手机页当前语言（本插件自己那套 locale id）。
+  function currentLocaleId() {
+    try {
+      const api = globalThis.MobileI18n;
+      return api && api.locale ? String(api.locale) : "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function bindPanelLocale() {
+    const api = globalThis.MobileI18n;
+    if (!api || typeof api.onChange !== "function") return;
+    api.onChange((locale) => {
+      if (panelFrame) sendToPanel("locale", String(locale || ""));
+    });
   }
 
   function uiVersion() {
@@ -1105,7 +1137,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610125", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610126", { cache: "no-store" });
       if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];
@@ -1731,7 +1763,7 @@
         state.presetTextarea = null;
         state.presetPanel = null;
         renderWorkflow(body.workflow);
-        advancedPage?.refresh();
+        syncPanelWorkflow();
       } finally {
         hydratingSettings -= 1;
       }
@@ -4222,7 +4254,7 @@
         toast(error.message || t("标签目录读取失败"), "error");
       }
       bindEvents();
-      setupAdvancedPage();
+      bindPanelLocale();
       applyPhonePreferences();
       connectWebSocket();
       await refreshAll();

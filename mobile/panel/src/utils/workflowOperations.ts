@@ -1,0 +1,134 @@
+import { getFileWorkflowMetadata, type AssetSource, type FileItem } from '@/api/client';
+import type { NodeTypes, Workflow, WorkflowNode } from '@/api/types';
+import { getWidgetIndexForInput } from '@/hooks/useWorkflow';
+import type { WorkflowSource } from '@/hooks/useWorkflow';
+import { getScopedWorkflowView } from '@/utils/canonicalWorkflowOps';
+import { resolveWorkflowNodeDisplayName } from '@/utils/subgraphPlaceholderLabels';
+import type { ViewerImage } from '@/utils/viewerImages';
+
+export type LoadWorkflowFn = (
+  workflow: Workflow,
+  filename?: string,
+  options?: { fresh?: boolean; source?: WorkflowSource; executedPrompt?: unknown }
+) => void;
+
+type HistoryWorkflowMatch = {
+  workflow?: Workflow;
+  prompt?: unknown;
+  promptId: string;
+  hidden?: boolean;
+};
+
+export function resolveFileSource(file: FileItem): AssetSource {
+  if (file.id.startsWith('input/')) return 'input';
+  if (file.id.startsWith('temp/')) return 'temp';
+  return 'output';
+}
+
+export function resolveFilePath(file: FileItem, source?: AssetSource): string {
+  const effectiveSource = source ?? resolveFileSource(file);
+  const prefix = `${effectiveSource}/`;
+  return file.id.startsWith(prefix) ? file.id.slice(prefix.length) : file.id;
+}
+
+export function resolveViewerItemWorkflowLoad(
+  item: ViewerImage,
+  historyWorkflowByFileId?: ReadonlyMap<string, HistoryWorkflowMatch>,
+): { workflow: Workflow; filename: string; source: WorkflowSource; executedPrompt?: unknown } | null {
+  const historyMatch =
+    item.file && historyWorkflowByFileId
+      ? historyWorkflowByFileId.get(item.file.id)
+      : null;
+  const workflowToLoad = item.workflow ?? historyMatch?.workflow;
+  const promptId = item.promptId ?? historyMatch?.promptId;
+  const executedPrompt = item.executedPrompt ?? historyMatch?.prompt;
+  if (!workflowToLoad) return null;
+  let source: WorkflowSource;
+  let filename: string;
+  if (promptId) {
+    const hidden = Boolean(item.file?.hidden || historyMatch?.hidden);
+    source = {
+      type: 'history',
+      promptId,
+      ...(hidden ? { hidden: true } : {}),
+    };
+    filename = `history-${promptId}.json`;
+  } else if (item.file) {
+    const assetSource = resolveFileSource(item.file);
+    const filePath = resolveFilePath(item.file, assetSource);
+    source = {
+      type: 'file',
+      filePath,
+      assetSource,
+      ...(item.file.hidden ? { hidden: true } : {}),
+    };
+    filename = filePath;
+  } else {
+    source = { type: 'other' };
+    filename = 'workflow.json';
+  }
+  return {
+    workflow: workflowToLoad,
+    filename,
+    source,
+    ...(executedPrompt !== undefined ? { executedPrompt } : {}),
+  };
+}
+
+export async function loadWorkflowFromFile(params: {
+  file: FileItem;
+  source?: AssetSource;
+  loadWorkflow: LoadWorkflowFn;
+  onLoaded?: () => void;
+  onError?: (error: unknown) => void;
+}): Promise<void> {
+  const { file, source, loadWorkflow, onLoaded, onError } = params;
+  try {
+    const effectiveSource = source ?? resolveFileSource(file);
+    const filePath = resolveFilePath(file, effectiveSource);
+    const metadata = await getFileWorkflowMetadata(filePath, effectiveSource);
+    loadWorkflow(metadata.workflow, filePath, {
+      source: {
+        type: 'file',
+        filePath,
+        assetSource: effectiveSource,
+        ...(file.hidden ? { hidden: true } : {}),
+      },
+      executedPrompt: metadata.prompt,
+    });
+    onLoaded?.();
+  } catch (err) {
+    onError?.(err);
+    throw err;
+  }
+}
+
+export function resolveInputWidget(params: {
+  workflow: Workflow | null;
+  nodeTypes: NodeTypes | null;
+  nodeId: number;
+  /** Owning subgraph definition id; null/undefined resolves against root nodes. */
+  subgraphId?: string | null;
+}): { node: WorkflowNode; index: number; name: string } | null {
+  const { workflow, nodeTypes, nodeId, subgraphId = null } = params;
+  if (!workflow || !nodeTypes) return null;
+  const scoped = getScopedWorkflowView(workflow, subgraphId);
+  const node = scoped.nodes.find((entry) => entry.id === nodeId);
+  if (!node) return null;
+  const inputNames = ['image', 'filename', 'file'];
+  for (const name of inputNames) {
+    const index = getWidgetIndexForInput(scoped, nodeTypes, node, name);
+    if (index !== null) {
+      return { node, index, name };
+    }
+  }
+  return null;
+}
+
+export function getNodeLabel(
+  node: WorkflowNode,
+  nodeTypes: NodeTypes | null,
+  workflow?: Workflow | null
+): string {
+  return resolveWorkflowNodeDisplayName(workflow ?? null, node, nodeTypes);
+}

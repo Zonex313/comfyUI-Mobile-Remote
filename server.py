@@ -3281,6 +3281,10 @@ _MOBILE_ASSET_FILES = {
     "app.js",
     "advanced.js",
     "advanced.css",
+    # 参考项目那套工作流面板的构建产物与宿主页（mobile/panel 源码 + npm run build 产出）。
+    "panel.html",
+    "panel.js",
+    "panel.css",
     "settings-sync.js",
     "preset-catalog.js",
     "preset-engine.js",
@@ -3738,6 +3742,37 @@ def register_routes() -> None:
                     # 「高级」页用：节点顺序、分组、连线关系
                     "graph": _workflow_graph(prompt, record.get("workflow"), fields),
                 },
+            },
+            headers=NO_CACHE,
+        )
+
+    @routes.get("/mobile/api/panel/workflow/{workflow_id}")
+    async def mobile_panel_workflow(request: web.Request) -> web.Response:
+        """给参考项目那套工作流面板用的原始（native）工作流。
+
+        「高级」页现在跑的是参考项目的真实组件，它吃的是 ComfyUI 原生工作流格式
+        （nodes[].inputs[].link / outputs[].links / links[] / widgets_values / mode …），
+        而不是我们给生成页用的那套 files+graph 精简结构。记录里同步下来的
+        record["workflow"] 就是电脑端 app.graph.serialize() 的结果，原样发过去即可。
+        """
+        workflow_id = request.match_info["workflow_id"]
+        try:
+            record = _load_record(workflow_id)
+        except ValueError:
+            return _json_error("工作流编号无效")
+        except FileNotFoundError:
+            return _json_error("工作流不存在", 404)
+        workflow = record.get("workflow") if isinstance(record, dict) else None
+        if not isinstance(workflow, dict) or not isinstance(workflow.get("nodes"), list):
+            return _json_error("这个工作流还没有同步到电脑端的原始图，请在电脑端打开它后重试。", 409)
+        return web.json_response(
+            {
+                "ok": True,
+                "id": workflow_id,
+                "name": record.get("name", ""),
+                "source": record.get("source", ""),
+                "synced_at": record.get("synced_at", 0),
+                "workflow": workflow,
             },
             headers=NO_CACHE,
         )

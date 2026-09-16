@@ -1,0 +1,414 @@
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { UnifiedItem } from '../types';
+import type { QueueWorkflowDiff } from '@/utils/workflowDiff';
+
+const mocks = vi.hoisted(() => ({
+  queueState: {
+    previewVisibility: {},
+    previewVisibilityDefault: false,
+    showQueueMetadata: false,
+    showQueueTimestamps: false,
+    showPromptPreview: true,
+    queueOutputLayout: 'tabbed' as const,
+    queueItemExpanded: {} as Record<string, boolean>,
+    queueItemUserToggled: {} as Record<string, boolean>,
+    queueItemHideImages: {},
+    completionDurations: {},
+    completing: [],
+    autoRestoredPromptIds: {},
+    queueMetadata: {},
+    workflowDiffs: {
+      'active-prompt': {
+        prompts: [{
+          nodeId: '2',
+          label: 'Positive prompt',
+          order: 0,
+          segments: [{ type: 'equal' as const, text: 'a bright red fox' }],
+          changed: false,
+        }],
+        nodeChanges: [],
+      },
+    } as Record<string, QueueWorkflowDiff>,
+    setQueueItemExpanded: vi.fn(),
+    setQueueItemUserToggled: vi.fn(),
+  },
+  outputsState: {
+    favorites: [],
+    rejected: [],
+    toggleFavorite: vi.fn(),
+    toggleRejected: vi.fn(),
+  },
+  workflowState: {
+    promptToSession: {},
+    sessions: [],
+    activeSessionId: null,
+    parkedSessions: {},
+    currentFilename: null,
+    workflowSource: null,
+    latentPreviewByPrompt: {},
+  },
+}));
+
+vi.mock('@/hooks/useQueue', () => ({
+  useQueueStore: (selector: (state: typeof mocks.queueState) => unknown) =>
+    selector(mocks.queueState),
+}));
+
+vi.mock('@/hooks/useOutputs', () => ({
+  useOutputsStore: (selector: (state: typeof mocks.outputsState) => unknown) =>
+    selector(mocks.outputsState),
+}));
+
+vi.mock('@/hooks/useWorkflow', () => ({
+  useWorkflowStore: (selector: (state: typeof mocks.workflowState) => unknown) =>
+    selector(mocks.workflowState),
+}));
+
+import { QueueCard } from '../QueueCard';
+
+const prompt = {
+  '1': {
+    class_type: 'LoadImage',
+    inputs: { image: 'references/source image.png' },
+  },
+};
+
+function makeItem(status: 'pending' | 'running'): UnifiedItem {
+  return {
+    id: 'active-prompt',
+    status,
+    data: {
+      number: 1,
+      prompt_id: 'active-prompt',
+      prompt,
+      extra: {},
+      outputs_to_execute: [],
+    },
+  };
+}
+
+function makeDoneItem(): UnifiedItem {
+  return {
+    id: 'active-prompt',
+    status: 'done',
+    data: {
+      prompt_id: 'active-prompt',
+      timestamp: Date.now(),
+      outputs: { images: [] },
+      prompt,
+    },
+  };
+}
+
+describe('QueueCard active prompt preview', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    mocks.queueState.showPromptPreview = true;
+    mocks.queueState.queueItemExpanded = {};
+    mocks.queueState.queueItemUserToggled = {};
+    mocks.queueState.setQueueItemExpanded.mockClear();
+    mocks.queueState.setQueueItemUserToggled.mockClear();
+    delete mocks.queueState.workflowDiffs['active-prompt'].seeds;
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    vi.restoreAllMocks();
+  });
+
+  it.each(['pending', 'running'] as const)(
+    'defaults a new %s item open so its prompt preview is visible',
+    async (status) => {
+      await act(async () => {
+        root.render(
+          <QueueCard
+            item={makeItem(status)}
+            isActuallyRunning={status === 'running'}
+            progress={0}
+            viewerImages={[]}
+            runningImages={[]}
+            onOpenMenu={() => {}}
+            isTopDoneItem={false}
+          />,
+        );
+      });
+
+      expect(mocks.queueState.setQueueItemExpanded).toHaveBeenCalledWith(
+        'active-prompt',
+        true,
+      );
+    },
+  );
+
+  it('keeps the compact default for a pending item when prompt previews are disabled', async () => {
+    mocks.queueState.showPromptPreview = false;
+    await act(async () => {
+      root.render(
+        <QueueCard
+          item={makeItem('pending')}
+          isActuallyRunning={false}
+          progress={0}
+          viewerImages={[]}
+          runningImages={[]}
+          onOpenMenu={() => {}}
+          isTopDoneItem={false}
+        />,
+      );
+    });
+
+    expect(mocks.queueState.setQueueItemExpanded).toHaveBeenCalledWith(
+      'active-prompt',
+      false,
+    );
+  });
+
+  it('defaults an actively generating item open even when prompt previews are disabled', async () => {
+    mocks.queueState.showPromptPreview = false;
+    await act(async () => {
+      root.render(
+        <QueueCard
+          item={makeItem('running')}
+          isActuallyRunning
+          progress={25}
+          viewerImages={[]}
+          runningImages={[]}
+          onOpenMenu={() => {}}
+          isTopDoneItem={false}
+        />,
+      );
+    });
+
+    expect(mocks.queueState.setQueueItemExpanded).toHaveBeenCalledWith(
+      'active-prompt',
+      true,
+    );
+  });
+
+  it.each([
+    ['running', makeItem('running'), true],
+    ['completed', makeDoneItem(), false],
+  ] as const)(
+    'reopens a stale automatic fold when the item is already %s',
+    async (_label, item, isActuallyRunning) => {
+      mocks.queueState.showPromptPreview = false;
+      mocks.queueState.queueItemExpanded = { 'active-prompt': false };
+      await act(async () => {
+        root.render(
+          <QueueCard
+            item={item}
+            isActuallyRunning={isActuallyRunning}
+            progress={0}
+            viewerImages={[]}
+            runningImages={[]}
+            onOpenMenu={() => {}}
+            isTopDoneItem={false}
+          />,
+        );
+      });
+
+      expect(mocks.queueState.setQueueItemExpanded).toHaveBeenCalledWith(
+        'active-prompt',
+        true,
+      );
+    },
+  );
+
+  it.each([
+    ['running', makeItem('running'), true],
+    ['completed', makeDoneItem(), false],
+  ] as const)(
+    'preserves an explicit fold when the item is %s',
+    async (_label, item, isActuallyRunning) => {
+      mocks.queueState.showPromptPreview = false;
+      mocks.queueState.queueItemExpanded = { 'active-prompt': false };
+      mocks.queueState.queueItemUserToggled = { 'active-prompt': true };
+      await act(async () => {
+        root.render(
+          <QueueCard
+            item={item}
+            isActuallyRunning={isActuallyRunning}
+            progress={0}
+            viewerImages={[]}
+            runningImages={[]}
+            onOpenMenu={() => {}}
+            isTopDoneItem={false}
+          />,
+        );
+      });
+
+      expect(mocks.queueState.setQueueItemExpanded).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves an explicit collapsed state when prompt previews are enabled', async () => {
+    mocks.queueState.queueItemExpanded = { 'active-prompt': false };
+    mocks.queueState.queueItemUserToggled = { 'active-prompt': true };
+    await act(async () => {
+      root.render(
+        <QueueCard
+          item={makeItem('pending')}
+          isActuallyRunning={false}
+          progress={0}
+          viewerImages={[]}
+          runningImages={[]}
+          onOpenMenu={() => {}}
+          isTopDoneItem={false}
+        />,
+      );
+    });
+
+    expect(mocks.queueState.setQueueItemExpanded).not.toHaveBeenCalled();
+  });
+
+  it('opens an automatically compact pending item when prompt previews turn on', async () => {
+    mocks.queueState.showPromptPreview = false;
+    mocks.queueState.queueItemExpanded = { 'active-prompt': false };
+    const item = makeItem('pending');
+
+    await act(async () => {
+      root.render(
+        <QueueCard
+          item={item}
+          isActuallyRunning={false}
+          progress={0}
+          viewerImages={[]}
+          runningImages={[]}
+          onOpenMenu={() => {}}
+          isTopDoneItem={false}
+        />,
+      );
+    });
+    expect(mocks.queueState.setQueueItemExpanded).not.toHaveBeenCalled();
+
+    mocks.queueState.showPromptPreview = true;
+    await act(async () => {
+      root.render(
+        <QueueCard
+          item={item}
+          isActuallyRunning={false}
+          progress={0}
+          viewerImages={[]}
+          runningImages={[]}
+          onOpenMenu={() => {}}
+          isTopDoneItem={false}
+        />,
+      );
+    });
+
+    expect(mocks.queueState.setQueueItemExpanded).toHaveBeenCalledWith(
+      'active-prompt',
+      true,
+    );
+  });
+
+  it.each(['pending', 'running'] as const)(
+    'shows prompt text and queued input images for an expanded %s item',
+    async (status) => {
+      mocks.queueState.queueItemExpanded = { 'active-prompt': true };
+      await act(async () => {
+        root.render(
+          <QueueCard
+            item={makeItem(status)}
+            isActuallyRunning={status === 'running'}
+            progress={0}
+            viewerImages={[]}
+            runningImages={[]}
+            onOpenMenu={() => {}}
+            isTopDoneItem={false}
+          />,
+        );
+      });
+
+      const promptPreviewButton = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent?.includes('Prompt preview'),
+      );
+      expect(promptPreviewButton).toBeDefined();
+
+      await act(async () => {
+        promptPreviewButton?.click();
+      });
+
+      expect(container.textContent).toContain('a bright red fox');
+      expect(container.querySelector<HTMLImageElement>('img[alt="Generation input"]')
+        ?.getAttribute('src')).toBe(
+        '/mobile/api/preview?filename=source%20image.png&subfolder=references&type=input&maxedge=1280',
+      );
+    },
+  );
+
+  it('lists the seeds the run executed with, including one inside a subgraph', async () => {
+    // The seeds a run is given never have to reach widgets_values — a promoted
+    // or special-value seed is applied as an override at queue time, and a seed
+    // on a node inside a subgraph definition is invisible to the node diff — so
+    // the preview renders the list recorded from the built prompt.
+    mocks.queueState.workflowDiffs['active-prompt'].seeds = [
+      { nodeId: '3', label: 'Sampler', field: 'seed', value: 987654321 },
+      { nodeId: '50:7', label: 'Video model / High noise', field: 'noise_seed', value: 4242 },
+    ];
+
+    await act(async () => {
+      root.render(
+        <QueueCard
+          item={makeItem('running')}
+          isActuallyRunning
+          progress={0}
+          viewerImages={[]}
+          runningImages={[]}
+          onOpenMenu={() => {}}
+          isTopDoneItem={false}
+        />,
+      );
+    });
+
+    const rows = [...container.querySelectorAll('.queue-seed-row')];
+    expect(rows.map((row) => row.textContent)).toEqual([
+      'Sampler987654321',
+      'Video model / High noise4242',
+    ]);
+  });
+
+  it('reads the seeds back out of the stored prompt when none were recorded', async () => {
+    // Runs queued before the recording shipped (or from another device) have no
+    // seeds in their diff — but the server still hands back the API prompt they
+    // executed, and every seed in it is already resolved.
+    const item: UnifiedItem = {
+      id: 'active-prompt',
+      status: 'done',
+      data: {
+        prompt_id: 'active-prompt',
+        timestamp: Date.now(),
+        outputs: { images: [] },
+        prompt: {
+          '3': { class_type: 'KSampler', inputs: { seed: 24680, steps: 20 } },
+        },
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        <QueueCard
+          item={item}
+          isActuallyRunning={false}
+          progress={0}
+          viewerImages={[]}
+          runningImages={[]}
+          onOpenMenu={() => {}}
+          isTopDoneItem={false}
+        />,
+      );
+    });
+
+    const rows = [...container.querySelectorAll('.queue-seed-row')];
+    expect(rows.map((row) => row.textContent)).toEqual(['KSampler24680']);
+  });
+});

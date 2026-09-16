@@ -1,0 +1,291 @@
+import { MenuSubPageHeader } from './MenuSubPageHeader';
+import {
+  useGenerationSettingsStore,
+  type PreviewMethod,
+} from '@/hooks/useGenerationSettings';
+import {
+  menuMutedTextClassName,
+  menuPanelDivideClassName,
+  menuSectionHeaderClassName,
+  menuTextClassName,
+} from './menuStyles';
+import { NotificationsSettings } from './NotificationsSettings';
+import { useAutocompleteStore } from '@/hooks/useAutocompleteStore';
+import {
+  AUTO_HIDE_MINUTE_CHOICES,
+  DEFAULT_AUTO_HIDE_MINUTES,
+  useShowHiddenStore,
+} from '@/hooks/useShowHidden';
+import { useEffect, type ReactNode } from 'react';
+import { useI18n } from '@/i18n';
+
+interface GenerationSettingsPanelProps {
+  onBack: () => void;
+}
+
+interface PreferenceSectionProps {
+  label: string;
+  description?: string;
+  checked: boolean;
+  onToggle: () => void;
+  children?: ReactNode;
+}
+
+function PreferenceSection({
+  label,
+  description,
+  checked,
+  onToggle,
+  children,
+}: PreferenceSectionProps) {
+  return (
+    <div>
+      <div className={menuPanelDivideClassName}>
+        <div className="flex items-center justify-between px-4 py-3">
+          <div>
+            <div className={`text-sm ${menuTextClassName}`}>{label}</div>
+            {description && (
+              <div className={`text-xs ${menuMutedTextClassName} mt-0.5`}>{description}</div>
+            )}
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={checked}
+            className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ${
+              checked ? 'bg-cyan-500' : 'bg-slate-700'
+            }`}
+            onClick={onToggle}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform duration-200 ${
+                checked ? 'translate-x-5' : 'translate-x-0'
+              }`}
+            />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+export function GenerationSettingsPanel({ onBack }: GenerationSettingsPanelProps) {
+  const { t } = useI18n();
+  const infiniteModeEnabled = useGenerationSettingsStore((s) => s.infiniteModeEnabled);
+  const setInfiniteModeEnabled = useGenerationSettingsStore((s) => s.setInfiniteModeEnabled);
+  const previewMethod = useGenerationSettingsStore((s) => s.previewMethod);
+  const setPreviewMethod = useGenerationSettingsStore((s) => s.setPreviewMethod);
+  const autoHideMinutes = useShowHiddenStore((s) => s.autoHideMinutes);
+  const setAutoHideMinutes = useShowHiddenStore((s) => s.setAutoHideMinutes);
+  const followIntoSubgraphs = useGenerationSettingsStore((s) => s.followIntoSubgraphs);
+  const setFollowIntoSubgraphs = useGenerationSettingsStore((s) => s.setFollowIntoSubgraphs);
+  const webpPreviewEnabled = useGenerationSettingsStore((s) => s.webpPreviewEnabled);
+  const setWebpPreviewEnabled = useGenerationSettingsStore((s) => s.setWebpPreviewEnabled);
+  const hideBottomBarWhenViewerIdle = useGenerationSettingsStore(
+    (s) => s.hideBottomBarWhenViewerIdle,
+  );
+  const setHideBottomBarWhenViewerIdle = useGenerationSettingsStore(
+    (s) => s.setHideBottomBarWhenViewerIdle,
+  );
+  const autoRestoreLostQueueJobs = useGenerationSettingsStore((s) => s.autoRestoreLostQueueJobs);
+  const setAutoRestoreLostQueueJobs = useGenerationSettingsStore((s) => s.setAutoRestoreLostQueueJobs);
+  const obfuscateSharedInputPaths = useGenerationSettingsStore((s) => s.obfuscateSharedInputPaths);
+  const setObfuscateSharedInputPaths = useGenerationSettingsStore((s) => s.setObfuscateSharedInputPaths);
+  const marketingNoteEnabled = useGenerationSettingsStore((s) => s.marketingNoteEnabled);
+  const setMarketingNoteEnabled = useGenerationSettingsStore((s) => s.setMarketingNoteEnabled);
+  // Autocomplete opt-in (server-synced). Only surfaced when a supported source
+  // node (ComfyUI-Autocomplete-Plus and/or ComfyUI-Custom-Scripts) is detected
+  // on this server.
+  const autocompleteAvailable = useAutocompleteStore((s) => s.available);
+  const autocompletePlus = useAutocompleteStore((s) => s.plusAvailable);
+  const autocompleteCustomScripts = useAutocompleteStore((s) => s.customScriptsAvailable);
+  const autocompleteEnabled = useAutocompleteStore((s) => s.enabled);
+  const setAutocompleteEnabled = useAutocompleteStore((s) => s.setEnabled);
+  const ensureAutocompleteInit = useAutocompleteStore((s) => s.ensureInitialized);
+  useEffect(() => {
+    void ensureAutocompleteInit();
+  }, [ensureAutocompleteInit]);
+
+  const previewEnabled = previewMethod !== 'none';
+  const previewMethodOptions: Array<{
+    value: Exclude<PreviewMethod, 'none'>;
+    label: string;
+    description: string;
+  }> = [
+    {
+      value: 'latent2rgb',
+      label: t('Fast'),
+      description: t('Approximate latent2rgb previews'),
+    },
+    {
+      value: 'taesd',
+      label: t('Accurate'),
+      description: t('Higher quality TAESD previews'),
+    },
+  ];
+
+  return (
+    // Solid, full-height background so the area below the cards stays opaque
+    // instead of letting the translucent slide panel show the backdrop through.
+    // -m-4 bleeds over the slide panel's p-4; min-h calc(100%+2rem) + p-4 makes
+    // the fill span the full padding box (all four edges) while keeping insets.
+    <div className="flex flex-col min-h-[calc(100%+2rem)] -m-4 p-4 bg-slate-950">
+      <MenuSubPageHeader title={t('Preferences')} onBack={onBack} />
+
+      <div className="space-y-4">
+        <PreferenceSection
+          label={t('Fast image previews')}
+          description={t('Load lightweight WebP previews instead of full-size originals. Turn off if images look wrong. Downloads always use the original.')}
+          checked={webpPreviewEnabled}
+          onToggle={() => setWebpPreviewEnabled(!webpPreviewEnabled)}
+        />
+
+        <PreferenceSection
+          label={t('Show latent previews')}
+          checked={previewEnabled}
+          onToggle={() => setPreviewMethod(previewEnabled ? 'none' : 'latent2rgb')}
+        >
+          {/* Method picker — only visible when enabled */}
+          {previewEnabled && (
+            <div className="px-4 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className={`text-sm ${menuTextClassName}`}>{t('Method')}</div>
+                <div className={`text-xs ${menuMutedTextClassName} mt-0.5`}>
+                  {previewMethod === 'latent2rgb'
+                    ? t('Fast approximate preview')
+                    : t('Higher quality, slightly slower')}
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2" role="radiogroup" aria-label={t('Latent preview method')}>
+                {previewMethodOptions.map((option) => {
+                  const isActive = previewMethod === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="radio"
+                      aria-checked={isActive}
+                      onClick={() => setPreviewMethod(option.value)}
+                      className={`min-h-[64px] rounded-lg border px-3 py-2 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-400 ${
+                        isActive
+                          ? 'border-cyan-400 bg-cyan-500 text-slate-950 shadow-sm'
+                          : 'border-white/10 bg-slate-950/70 text-slate-100 hover:bg-slate-800/95'
+                      }`}
+                    >
+                      <span className="block text-sm font-semibold">{option.label}</span>
+                      <span className={`mt-0.5 block text-xs ${isActive ? 'text-slate-900' : 'text-slate-400'}`}>
+                        {option.description}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </PreferenceSection>
+
+        <PreferenceSection
+          label={t('Restore lost queue after restart')}
+          description={t('Automatically re-enqueue pending jobs this device saw if ComfyUI restarts and loses them.')}
+          checked={autoRestoreLostQueueJobs}
+          onToggle={() => setAutoRestoreLostQueueJobs(!autoRestoreLostQueueJobs)}
+        />
+
+        <PreferenceSection
+          label={t('Alias filepaths in embedded metadata')}
+          description={t('Hide input paths and output filename prefixes in shared workflow metadata.')}
+          checked={obfuscateSharedInputPaths}
+          onToggle={() => setObfuscateSharedInputPaths(!obfuscateSharedInputPaths)}
+        />
+
+        <PreferenceSection
+          label={t('Credit comfyui-mobile-frontend in workflows')}
+          description={t('Embed a hidden note linking this project into the workflow saved with your outputs. Never shown in the app.')}
+          checked={marketingNoteEnabled}
+          onToggle={() => setMarketingNoteEnabled(!marketingNoteEnabled)}
+        />
+
+        <PreferenceSection
+          label={t('Enable infinite mode')}
+          checked={infiniteModeEnabled}
+          onToggle={() => setInfiniteModeEnabled(!infiniteModeEnabled)}
+        />
+
+        <PreferenceSection
+          label={t('Hide bottom bar when viewer is idle')}
+          description={t('Fade the bottom bar with the image viewer controls after a few seconds without interaction.')}
+          checked={hideBottomBarWhenViewerIdle}
+          onToggle={() => setHideBottomBarWhenViewerIdle(!hideBottomBarWhenViewerIdle)}
+        />
+
+        <PreferenceSection
+          label={t('Follow into subgraphs')}
+          description={t('Navigate into subgraph scopes when following execution')}
+          checked={followIntoSubgraphs}
+          onToggle={() => setFollowIntoSubgraphs(!followIntoSubgraphs)}
+        />
+
+        {autocompleteAvailable && (
+          <PreferenceSection
+            label={t('Tag autocomplete')}
+            description={
+              autocompletePlus && autocompleteCustomScripts
+                ? t('Suggest Danbooru tags, your custom words, LoRAs, and embeddings while typing prompts. Powered by the detected ComfyUI-Autocomplete-Plus and ComfyUI-Custom-Scripts nodes.')
+                : autocompleteCustomScripts
+                  ? t('Suggest your custom word list, LoRAs, and embeddings while typing prompts. Powered by the detected ComfyUI-Custom-Scripts node.')
+                  : t('Suggest Danbooru tags, LoRAs, and embeddings while typing prompts. Powered by the detected ComfyUI-Autocomplete-Plus node.')
+            }
+            checked={autocompleteEnabled}
+            onToggle={() => void setAutocompleteEnabled(!autocompleteEnabled)}
+          />
+        )}
+
+        <PreferenceSection
+          label={t('Re-hide hidden files when you leave')}
+          description={t('Showing hidden files stays on until you turn it off. Switch this on to have it turn itself off once the app has been in the background for a while.')}
+          checked={autoHideMinutes !== null}
+          onToggle={() => setAutoHideMinutes(
+            autoHideMinutes === null ? DEFAULT_AUTO_HIDE_MINUTES : null,
+          )}
+        >
+          {autoHideMinutes !== null && (
+            <div className="px-4 py-3">
+              <div className={`text-sm ${menuTextClassName}`}>{t('After')}</div>
+              <div
+                className="mt-3 grid grid-cols-4 gap-2"
+                role="radiogroup"
+                aria-label={t('Time away before hidden files are hidden again')}
+              >
+                {AUTO_HIDE_MINUTE_CHOICES.map((minutes) => {
+                  const isActive = autoHideMinutes === minutes;
+                  return (
+                    <button
+                      key={minutes}
+                      type="button"
+                      role="radio"
+                      aria-checked={isActive}
+                      onClick={() => setAutoHideMinutes(minutes)}
+                      className={`auto-hide-choice min-h-[44px] rounded-lg border px-2 py-2 text-center text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-cyan-400 ${
+                        isActive
+                          ? 'border-cyan-400 bg-cyan-500 text-slate-950 shadow-sm'
+                          : 'border-white/10 bg-slate-950/70 text-slate-100 hover:bg-slate-800/95'
+                      }`}
+                    >
+                      {minutes === 0 ? t('At once') : t('{n} min', { n: minutes })}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </PreferenceSection>
+
+        <div className="pt-2">
+          <div className={menuSectionHeaderClassName}>{t('Notifications')}</div>
+          <NotificationsSettings />
+        </div>
+      </div>
+    </div>
+  );
+}
