@@ -8,6 +8,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -722,7 +723,12 @@ def _workflow_graph(prompt: Any, workflow: Any, fields: list[dict[str, Any]]) ->
     节点来自 API 格式的 prompt（class_type + inputs，连线就是 [节点, 槽位]），
     分组与画布坐标来自原生图的 groups/nodes：按节点中心是否落在组框内判断，
     落在多个组里时取面积最小的那个（也就是最内层），和电脑端看到的一致。
-    可编辑输入不在这里重复传值——fields 里已经有了，这里只给结构。
+
+    每个节点还带上 inputs：把该节点在 prompt 里出现的**所有**输入都列出来（连被
+    NODE_HIDDEN_INPUTS 藏掉、fields 里没有的也在内），类型/候选值/范围直接来自节点类
+    自己的 INPUT_TYPES()，这样「高级」页就能和电脑画布上的节点一一对应。
+    另外补上前端专有控件（frontend=true，例如种子模式 control_after_generate）：
+    它们不在 API prompt 里，值只能从原生图的 widgets_values 定位。
     """
     if not isinstance(prompt, dict):
         prompt = {}
@@ -770,6 +776,7 @@ def _workflow_graph(prompt: Any, workflow: Any, fields: list[dict[str, Any]]) ->
         resolved_group[node_id] = value[0] if isinstance(value, tuple) else str(value)
 
     nodes_out: list[dict[str, Any]] = []
+    schema_memo: dict[str, dict[str, dict[str, Any]]] = {}
     for node_id, node in prompt.items():
         if not isinstance(node, dict):
             continue
@@ -778,17 +785,42 @@ def _workflow_graph(prompt: Any, workflow: Any, fields: list[dict[str, Any]]) ->
         pos = native.get("pos") if isinstance(native.get("pos"), list) else None
         meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
         inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        class_type = str(node.get("class_type") or "")
+        specs = schema_memo.get(class_type)
+        if specs is None:
+            specs = _input_specs(class_type)
+            schema_memo[class_type] = specs
         links = []
+        inputs_out: list[dict[str, Any]] = []
+        # 前端专有控件（种子模式）：API prompt 里没有，值只能从原生图的 widgets_values 拿
+        frontend_controls = _frontend_control_entries(specs, native_nodes.get(key), inputs)
         for name, value in inputs.items():
             if isinstance(value, (list, tuple)) and len(value) == 2 and isinstance(value[0], (str, int)):
                 links.append({"name": str(name), "node": str(value[0]), "slot": int(value[1]) if str(value[1]).isdigit() else 0})
+            input_name = str(name)
+            linked = _is_link(value, prompt)
+            # 输入顺序就是 prompt 里的顺序：和画布上的槽位顺序一致，前端照抄即可。
+            entry: dict[str, Any] = {
+                "name": input_name,
+                # 被连线接管的输入，值没有意义（前端只读显示连线来源），别把 ["4", 0] 这种数组丢过去。
+                "value": None if linked else value,
+            }
+            entry.update(_input_descriptor(specs.get(input_name)))
+            if linked:
+                entry["link"] = {"node": str(value[0]), "slot": int(value[1])}
+            inputs_out.append(entry)
+            # 紧跟在 seed / noise_seed 后面：画布上它就在那儿（frontend=true，不参与提交）
+            control = frontend_controls.get(input_name)
+            if control is not None:
+                inputs_out.append(dict(control))
         nodes_out.append({
             "id": key,
-            "type": str(node.get("class_type") or ""),
+            "type": class_type,
             "title": str(meta.get("title") or node.get("class_type") or key),
             "pos": [int(pos[0]), int(pos[1])] if isinstance(pos, list) and len(pos) >= 2 else None,
             "group": resolved_group.get(key, ""),
             "links": links,
+            "inputs": inputs_out,
             "field_ids": [field_id for field_id in editable if editable[field_id].get("node_id") == key],
             "has_editable": any(editable[field_id].get("node_id") == key for field_id in editable),
         })
@@ -841,16 +873,39 @@ def _tailscale_ips() -> list[str]:
         return list(TAILSCALE_CACHE[1])
 
 
+# 节点类的输入声明：INPUT_TYPES() 有的要现扫模型/插件目录，很贵，按 class_type 缓存。
+# 缓存里只放「类确实找到了」的结果；类还没登记（启动早期）或 INPUT_TYPES() 抛异常时
+# 返回空表且不缓存，等节点都挂上以后再问一次就能对上。
+_INPUT_SPECS_CACHE: dict[str, dict[str, dict[str, Any]]] = {}
+_INPUT_SPECS_LOCK = threading.Lock()
+
+
 def _input_specs(class_type: str) -> dict[str, dict[str, Any]]:
+    key = str(class_type or "")
+    if not key:
+        return {}
+    cached = _INPUT_SPECS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    specs = _read_input_specs(key)
+    if specs is None:
+        return {}
+    with _INPUT_SPECS_LOCK:
+        _INPUT_SPECS_CACHE.setdefault(key, specs)
+        return _INPUT_SPECS_CACHE[key]
+
+
+def _read_input_specs(class_type: str) -> dict[str, dict[str, Any]] | None:
+    """直接问节点类要 INPUT_TYPES()；类不存在或读不出来时返回 None（调用方不缓存）。"""
     try:
         import nodes
 
         node_class = nodes.NODE_CLASS_MAPPINGS.get(class_type)
         if node_class is None:
-            return {}
+            return None
         raw = node_class.INPUT_TYPES()
     except Exception:
-        return {}
+        return None
 
     specs: dict[str, dict[str, Any]] = {}
     if not isinstance(raw, dict):
@@ -870,10 +925,16 @@ def _input_specs(class_type: str) -> dict[str, dict[str, Any]]:
                 token = spec
             options: list[Any] = []
             if isinstance(token, (list, tuple, set)) and not isinstance(token, str):
+                # 老式写法 (["a", "b"], {...})：候选值就是那个 list。
                 options = [item for item in token if isinstance(item, (str, int, float, bool))]
-                type_name = "ENUM"
+                type_name = "COMBO"
             else:
                 type_name = getattr(token, "value", None) or str(token or "")
+                if str(type_name).upper() in {"COMBO", "ENUM"}:
+                    # 新式写法 ("COMBO", {"options": [...]})：候选值在 config 里。
+                    configured = config.get("options")
+                    if isinstance(configured, (list, tuple)):
+                        options = [item for item in configured if isinstance(item, (str, int, float, bool))]
             specs[str(name)] = {
                 "required": section == "required",
                 "type": str(type_name).upper(),
@@ -881,6 +942,156 @@ def _input_specs(class_type: str) -> dict[str, dict[str, Any]]:
                 "config": config,
             }
     return specs
+
+
+_UNSET = object()
+
+
+def _value_type_hint(value: Any) -> str:
+    """没拿到节点声明时，按当前值的 Python 类型猜一个。
+
+    自制节点在测试进程里不一定登记在 NODE_CLASS_MAPPINGS 上，没有这层兜底
+    就会把 true 这种开关值写成字符串 "True"。
+    """
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, int):
+        return "INT"
+    if isinstance(value, float):
+        return "FLOAT"
+    return "STRING"
+
+
+def _input_descriptor(spec: Any, current: Any = _UNSET) -> dict[str, Any]:
+    """INPUT_TYPES() 的一条声明 → 手机端 schema：type/options/min/max/step/multiline。
+
+    只放这个输入确实有的键：COMBO 才给 options，INT/FLOAT 才给 min/max/step，
+    STRING 且声明了 multiline 才给 multiline。查不到节点类时退化成 STRING。
+    """
+    data = spec if isinstance(spec, dict) else {}
+    config = data.get("config")
+    if not isinstance(config, dict):
+        config = {}
+    type_name = str(data.get("type") or "")
+    if not type_name:
+        type_name = "STRING" if current is _UNSET else _value_type_hint(current)
+    descriptor: dict[str, Any] = {"type": type_name}
+    if type_name == "COMBO":
+        options = data.get("options")
+        descriptor["options"] = [item for item in options] if isinstance(options, (list, tuple)) else []
+    elif type_name in {"INT", "FLOAT"}:
+        for name in ("min", "max", "step"):
+            configured = config.get(name)
+            if isinstance(configured, (int, float)) and not isinstance(configured, bool):
+                descriptor[name] = configured
+    elif type_name == "STRING" and bool(config.get("multiline")):
+        descriptor["multiline"] = True
+    return descriptor
+
+
+# 前端专有控件：电脑画布上有，API prompt 里没有，值只在原生图的 widgets_values 里。
+# 目前只做种子模式 control_after_generate（跟着 seed / noise_seed 后面那一格）。
+CONTROL_WIDGET_NAME = "control_after_generate"
+CONTROL_WIDGET_OPTIONS = ("fixed", "increment", "decrement", "randomize")
+CONTROL_WIDGET_DEFAULT = "randomize"
+SEED_INPUT_NAMES = frozenset({"seed", "noise_seed"})
+# 画布上会变成控件的类型；MODEL/CLIP/IMAGE 这类只能连线的没有控件，不占 widgets_values 的格子。
+WIDGET_INPUT_TYPES = frozenset({"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"})
+
+
+def _seed_control_slot(name: str, config: dict[str, Any]) -> bool:
+    """这个控件后面还有没有一格「种子模式」。节点自己声明了 control_after_generate 就听它的，
+    没声明才按名字（seed / noise_seed）当成有——和电脑端前端建控件的规则一致。"""
+    declared = config.get("control_after_generate")
+    if declared is not None:
+        return bool(declared)
+    return name in SEED_INPUT_NAMES
+
+
+def _widget_slot_names(specs: dict[str, dict[str, Any]], include_forced: bool) -> list[str]:
+    """按 INPUT_TYPES 顺序排出画布上的控件槽位，顺序和 widgets_values 一一对应。"""
+    slots: list[str] = []
+    for name, spec in specs.items():
+        if not isinstance(spec, dict):
+            continue
+        if str(spec.get("type") or "") not in WIDGET_INPUT_TYPES:
+            continue
+        config = spec.get("config")
+        if not isinstance(config, dict):
+            config = {}
+        if not include_forced and bool(config.get("forceInput")):
+            # forceInput 的输入在画布上没有控件，老流程存的 widgets_values 里却可能留着它的值，
+            # 所以两种排法都试（见 _frontend_control_entries）。
+            continue
+        slots.append(name)
+        if _seed_control_slot(name, config):
+            slots.append(CONTROL_WIDGET_NAME)
+    return slots
+
+
+def _frontend_control_entries(
+    specs: dict[str, dict[str, Any]],
+    native_node: Any,
+    inputs: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """给「有 seed 的节点」补一条前端专有的种子模式控件，键 = 它跟着的那个输入名。
+
+    widgets_values 是纯位置数组，只有槽位数量能对上才敢用：数量不一致就说明这个 class
+    在画布上的控件排布和我们理解的不一样（前端扩展插了控件、老工作流存过脏数据……），
+    此时宁可不插（宁可少一个控件，也不能把别的控件的值当成种子模式显示）。
+    唯一的例外是数组正好停在种子那一格（老工作流没存这个控件），此时按默认值 randomize 补。
+    """
+    if not specs or not isinstance(native_node, dict):
+        return {}
+    widgets_values = native_node.get("widgets_values")
+    if not isinstance(widgets_values, list):
+        return {}
+    fallback: dict[str, dict[str, Any]] = {}
+    for include_forced in (False, True):
+        slots = _widget_slot_names(specs, include_forced)
+        aligned = len(slots) == len(widgets_values)
+        entries = _control_entries_from_slots(slots, widgets_values, inputs, aligned)
+        if entries and aligned:
+            return entries
+        if entries and not fallback:
+            fallback = entries
+    return fallback
+
+
+def _control_entries_from_slots(
+    slots: list[str],
+    widgets_values: list[Any],
+    inputs: dict[str, Any],
+    aligned: bool,
+) -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
+    for index, slot_name in enumerate(slots):
+        if slot_name != CONTROL_WIDGET_NAME or index == 0:
+            continue
+        if not aligned and index != len(widgets_values):
+            # 整份槽位数组对不上时，只有「数组正好停在种子这一格」才能认定是旧工作流
+            # 没存这个控件的值（值缺失 → randomize）；别的位置一律不插，免得错位。
+            continue
+        owner = slots[index - 1]
+        if owner not in inputs or index - 1 >= len(widgets_values):
+            # prompt 里没有这个输入（没被提交过），或者数组根本不到种子那一格
+            continue
+        if owner in SEED_INPUT_NAMES:
+            raw = widgets_values[index - 1]
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                # 槽位上不是种子该有的整数：八成是排布对不上，不插
+                continue
+        value = widgets_values[index] if index < len(widgets_values) else None
+        if value not in CONTROL_WIDGET_OPTIONS:
+            value = CONTROL_WIDGET_DEFAULT
+        entries[owner] = {
+            "name": CONTROL_WIDGET_NAME,
+            "type": "COMBO",
+            "options": list(CONTROL_WIDGET_OPTIONS),
+            "value": value,
+            "frontend": True,
+        }
+    return entries
 
 
 def _is_link(value: Any, prompt: dict[str, Any]) -> bool:
@@ -1088,6 +1299,148 @@ def _coerce_value(value: Any, field: dict[str, Any]) -> Any:
         else:
             raise ValueError(_t("{label} 的选项无效", label=_translated_field_label(field)))
     return result
+
+
+# 「节点id::输入名」的提交键：节点号只允许 ComfyUI 真会用到的字符（数字/UUID/下划线），
+# 输入名不许带冒号。长度也封顶——高级页能显示的输入比 fields 多，键是手机上直接传上来的。
+SUBMIT_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,64}::[^:]{1,128}$")
+SUBMIT_KEY_MAX_LENGTH = 200
+SUBMIT_TEXT_MAX_LENGTH = 200000   # 和 _coerce_value 的字符串上限保持一致
+
+
+def _split_submit_key(key: str) -> tuple[str, str] | None:
+    """把提交键拆成 (节点id, 输入名)；形状不合法（太长、字符集不对、缺一半）返回 None。"""
+    if not key or len(key) > SUBMIT_KEY_MAX_LENGTH:
+        return None
+    if SUBMIT_KEY_PATTERN.fullmatch(key) is None:
+        return None
+    node_id, _, input_name = key.rpartition("::")
+    if not node_id or not input_name:
+        return None
+    return node_id, input_name
+
+
+def _as_number(value: Any) -> int | float | None:
+    """手机端传回来的一律是字符串，这里宽松地当数字看；不是数字返回 None。"""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return int(text, 10)
+        except ValueError:
+            pass
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        return number if math.isfinite(number) else None
+    return None
+
+
+def _as_bool(value: Any) -> bool | None:
+    """和 _coerce_value 认同一套写法（1/true/yes/on、0/false/no/off）。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _pick_option(value: Any, options: list[Any]) -> tuple[bool, Any]:
+    """COMBO 只能在候选里挑：先按原值比，再按字符串比（手机端传回来的是字符串）。"""
+    if value is None or isinstance(value, (list, tuple, dict, set)):
+        return False, None
+    if not options:
+        # 候选是动态填的（例如没扫描到任何模型），此时不拦，交给 ComfyUI 自己校验。
+        return True, str(value)
+    if value in options:
+        return True, value
+    by_text = {str(item): item for item in options}
+    if str(value) in by_text:
+        return True, by_text[str(value)]
+    return False, None
+
+
+def _convert_submitted_value(value: Any, descriptor: dict[str, Any]) -> tuple[bool, Any]:
+    """按 schema 转换值，返回 (是否可用, 转换后的值)。
+
+    数字越界就夹到 min/max；转不动（类型对不上、选项不在候选里、文本超长）返回 False，
+    由调用方跳过这一条，而不是把整个提交打回去。
+    """
+    type_name = str(descriptor.get("type") or "STRING")
+    if type_name == "BOOLEAN":
+        parsed = _as_bool(value)
+        if parsed is None:
+            return False, None
+        return True, parsed
+    if type_name in {"INT", "FLOAT"}:
+        number = _as_number(value)
+        if number is None:
+            return False, None
+        minimum = descriptor.get("min")
+        maximum = descriptor.get("max")
+        if isinstance(minimum, (int, float)) and not isinstance(minimum, bool) and number < minimum:
+            number = minimum
+        if isinstance(maximum, (int, float)) and not isinstance(maximum, bool) and number > maximum:
+            number = maximum
+        return True, int(number) if type_name == "INT" else float(number)
+    if type_name == "COMBO":
+        return _pick_option(value, descriptor.get("options") or [])
+    # STRING 和其它一切类型都按文本收：真正的合法性由 ComfyUI 自己的 prompt 校验兜底。
+    if value is None or isinstance(value, (list, tuple, dict, set)):
+        return False, None
+    text = str(value)
+    if len(text) > SUBMIT_TEXT_MAX_LENGTH:
+        return False, None
+    return True, text
+
+
+def _apply_submitted_input(prompt: dict[str, Any], key: str, value: Any) -> tuple[bool, Any]:
+    """把「节点id::输入名」按 schema 写回 prompt，返回 (是否写入, 写入的值)。
+
+    安全底线：键形状必须合法、节点必须已经存在、输入名必须是该节点 inputs 里已有的键，
+    一条不满足就跳过——绝不允许凭提交内容造出新节点或新输入（也不用 getattr 之类的动态取用）。
+    已经被连线接管的输入同样跳过：画布上它是插槽不是控件，写值等于把线剪断。
+    graph 里 frontend=true 的控件（例如 control_after_generate）在 API prompt 里本来就不存在，
+    走到这里自然会因为「输入名不存在」被安静跳过，不报错。
+    """
+    if not isinstance(prompt, dict):
+        return False, None
+    parsed = _split_submit_key(str(key))
+    if parsed is None:
+        return False, None
+    node_id, input_name = parsed
+    node = prompt.get(node_id)
+    if not isinstance(node, dict):
+        return False, None
+    inputs = node.get("inputs")
+    if not isinstance(inputs, dict) or input_name not in inputs:
+        return False, None
+    current = inputs[input_name]
+    if _is_link(current, prompt):
+        return False, None
+    spec = _input_specs(str(node.get("class_type") or "")).get(input_name)
+    applied, converted = _convert_submitted_value(value, _input_descriptor(spec, current))
+    if not applied:
+        return False, None
+    inputs[input_name] = converted
+    return True, converted
 
 
 async def _enqueue_prompt(
@@ -3143,12 +3496,19 @@ def register_routes() -> None:
         submitted: dict[str, Any] = {}
         try:
             for field_id, incoming in values.items():
-                field = field_map.get(str(field_id))
-                if field is None:
+                key = str(field_id)
+                field = field_map.get(key)
+                if field is not None:
+                    converted = _coerce_value(incoming, field)
+                    prompt[field["node_id"]]["inputs"][field["input"]] = converted
+                    submitted[key] = converted
                     continue
-                converted = _coerce_value(incoming, field)
-                prompt[field["node_id"]]["inputs"][field["input"]] = converted
-                submitted[field_id] = converted
+                # 「高级」页能编辑的输入比 fields 多（被 NODE_HIDDEN_INPUTS 藏起来的、
+                # 自制节点自己的控件……），所以任意合法的「节点id::输入名」都要收下：
+                # 节点或输入不存在、值转不动就跳过这一条，不报错也不动 prompt。
+                applied, converted = _apply_submitted_input(prompt, key, incoming)
+                if applied:
+                    submitted[key] = converted
         except (TypeError, ValueError) as exc:
             return _json_error(str(exc))
 

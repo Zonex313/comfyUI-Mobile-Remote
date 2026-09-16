@@ -274,6 +274,180 @@
   font-size: 12px;
 }
 
+/* -------------------------------------------------------- 节点输入控件（1:1） */
+
+/* 一个输入一行：上行 = 输入名（不翻译，和画布/API 一致）+ 类型小字，下行 = 控件。 */
+.advanced-input {
+  padding: 4px 0 5px;
+}
+
+.advanced-input-head {
+  min-height: 18px;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.advanced-input-name {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 590;
+  overflow-wrap: anywhere;
+}
+
+.advanced-input-type {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  background: var(--surface-raised);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.advanced-input-control {
+  display: block;
+  min-width: 0;
+}
+
+/* 节点一展开控件很多，比生成页紧凑一点。 */
+.advanced-input-control > input,
+.advanced-input-control > textarea,
+.advanced-input-control > select {
+  min-height: 40px;
+  font-size: 13px;
+}
+
+.advanced-input-textarea {
+  min-height: 48px;
+  overflow: auto;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+/* 前端专有控件（种子模式之类）：下拉旁边一句灰字，窄屏放不下就换行。 */
+.advanced-input-control.is-frontend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.advanced-input-control.is-frontend > select {
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.advanced-input-note {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* BOOLEAN 复选框：沿用项目配色（和 styles.css 的 .toggle 同款）。 */
+.advanced-input-toggle {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+}
+
+.advanced-checkbox {
+  position: relative;
+  width: 46px;
+  height: 26px;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.35);
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.advanced-checkbox::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #9fa6bc;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1), background-color 180ms ease;
+}
+
+.advanced-checkbox:checked {
+  border-color: rgba(240, 180, 196, 0.55);
+  background: var(--btn-grad);
+  box-shadow: 0 0 12px rgba(126, 180, 212, 0.32);
+}
+
+.advanced-checkbox:checked::after {
+  background: #ffffff;
+  transform: translateX(20px);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+/* 被连线接管的输入：只读芯片，点一下跳到源节点。 */
+.advanced-input-control > .advanced-input-link {
+  display: flex;
+  width: 100%;
+  min-height: 38px;
+  border-radius: 11px;
+}
+
+/* 类型不认识：只读回显 + 灰字提示。 */
+.advanced-input-readonly {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 11px;
+  background: var(--surface-soft);
+}
+
+.advanced-input-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.advanced-input-hint {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* 数字输入空着或填了非数字：只在控件下面提示，不写进 state.values。 */
+.advanced-input-warning {
+  display: none;
+  margin: 4px 0 0;
+  color: var(--warning);
+  font-size: 11px;
+}
+
+.advanced-input.is-invalid .advanced-input-warning {
+  display: block;
+}
+
+.advanced-input.is-invalid .advanced-input-control > input[type="number"] {
+  border-color: rgba(240, 180, 196, 0.55);
+}
+
 /* ------------------------------------------------------------------ 连线 */
 
 .advanced-node-links {

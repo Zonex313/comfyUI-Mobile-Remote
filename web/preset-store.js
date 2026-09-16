@@ -1,5 +1,5 @@
-import { t } from "./i18n.js?v=202609306";
-import "/mobile/assets/preset-catalog.js?v=202609306";
+import { t } from "./i18n.js?v=202609307";
+import "/mobile/assets/preset-catalog.js?v=202609307";
 
 const Model = globalThis.MobilePresetCatalog;
 const LEGACY_KEY = "comfy-mobile-remote.catalog-editor.v2";

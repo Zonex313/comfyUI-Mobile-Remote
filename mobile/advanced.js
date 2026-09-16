@@ -1,21 +1,27 @@
 /* ComfyUI 手机端「高级」页：按组/节点浏览、搜索并编辑工作流参数。
  *
- * 与生成页解耦的三条硬规则：
+ * 与生成页解耦的四条硬规则：
  *  1. 页面 DOM 全部由本模块创建（#advancedList / #advancedStatus / #advancedSearch /
  *     #advancedEmpty / #advancedExpandButton），不依赖 index.html 里已有的元素；
  *     宿主里若已存在同 id 的元素则直接复用，不会产生重复 id。
- *  2. 依赖一律通过 mount() 注入（t / state / $ / renderField / updateFieldValue），
- *     本模块不引用 app.js 里的任何变量。
- *  3. 样式表由 mount() 自己挂 <link>，不改 mobile/styles.css。
+ *  2. 依赖一律通过 mount() 注入（t / state / updateFieldValue），
+ *     本模块不引用 app.js 里的任何变量，也不用生成页的 renderField。
+ *  3. 控件 1:1 照着 graph.nodes[].inputs 自己渲染：画布上的节点有几个输入就是几个控件、
+ *     什么类型就是什么类型；节点的 inputs 缺失（旧服务端）时退化成 field_ids 那套字段。
+ *  4. 样式表由 mount() 自己挂 <link>，不改 mobile/styles.css。
  *
- * 数据来源：GET /mobile/api/workflows/<id> 返回的 workflow.graph（nodes/groups）
- * 与 workflow.fields。字段值只有一份真相：state.values[field.id]，
- * 所以高级页改完，回到生成页点生成即生效。
+ * 数据来源：GET /mobile/api/workflows/<id> 返回的 workflow.graph（nodes/groups）。
+ * 每个输入一个控件，值写进 state.values["<节点 id>::<输入名>"]（键的形状与 API prompt 的
+ * inputs 键一致），提交时服务端按这个形状应用；节点自身 inputs 缺失的旧数据继续用字段 id。
+ *
+ * 两个页面互相同步：改一个控件的值只做局部更新（不整块重渲染，不打断输入），
+ * 整块 render() 会记住并恢复正在编辑的控件焦点与光标；对外的同步入口是
+ * syncValue(fieldId, value) / syncAll()（只对齐已渲染的控件，不碰 state.values）。
  */
 (() => {
   "use strict";
 
-  const VERSION = "202609306";
+  const VERSION = "202609307";
   const STYLE_ID = "mtr-advanced-styles";
   const DEFAULT_STYLE_HREF = "/mobile/assets/advanced.css?v=" + VERSION;
   // 组折叠状态：{ "<工作流 id>": { "<组 id>": true|false } }
@@ -23,6 +29,8 @@
   const UNGROUPED_ID = "__ungrouped__";
   const FLASH_MS = 1200;
   const SVG_NS = "http://www.w3.org/2000/svg";
+  // 只读回显要限长：自定义节点可能把整个对象塞进一个不认识的输入。
+  const MAX_READONLY_CHARS = 240;
 
   const ICONS = {
     chevron: ["m6 9 6 6 6-6"],
@@ -37,13 +45,13 @@
   const deps = {
     doc: null,
     t: null,
-    $: null,
     state: null,
-    renderField: null,
     updateFieldValue: null,
     onEdit: null,
     window: null,
     storage: undefined,
+    view: null,
+    styleHref: null,
   };
 
   const els = {
@@ -51,11 +59,13 @@
     toolbar: null, search: null, status: null, list: null, empty: null, emptyTitle: null,
   };
 
-  // 本模块自己的控件表（生成页那份 state.fieldControls 不碰）。
+  // 本模块自己的控件表（生成页那份 state.fieldControls 一律不碰），键 = 值键 "<节点>::<输入名>"。
   const controls = new Map();
+  const inputRows = new Map();
   const cards = new Map();
   const expandedNodes = new Set();
   const groupState = new Map();
+  let entryIndex = new Map();
   let groupScope = null;
   let query = "";
   let autoExpandedFor = null;
@@ -75,17 +85,6 @@
 
   const win = () => deps.window || (typeof window !== "undefined" ? window : globalThis);
   const state = () => deps.state || {};
-
-  function pick(id) {
-    if (typeof deps.$ === "function") {
-      try {
-        const found = deps.$(id);
-        if (found) return found;
-      } catch (error) { /* 注入的 $ 只认自己的表，找不到就退回 document */ }
-    }
-    // 生成页的控件在另一个 view 里，必须查整篇文档。
-    return deps.doc ? deps.doc.getElementById(id) : null;
-  }
 
   /* ------------------------------------------------------------- DOM 小工具 */
 
@@ -179,14 +178,105 @@
     return String(node.title || node.type || node.id || "");
   }
 
+  function normaliseType(value) {
+    return String(value === undefined || value === null ? "" : value).trim().toUpperCase();
+  }
+
+  function optionList(input) {
+    return Array.isArray(input && input.options) ? input.options : [];
+  }
+
+  // 画布上的控件类型 → 本模块的控件种类。
+  function kindForType(type, multiline, options) {
+    if (type === "BOOLEAN" || type === "BOOL") return "toggle";
+    if (type === "INT" || type === "FLOAT") return "number";
+    if (type === "COMBO" || type === "ENUM" || options.length) return "select";
+    if (type === "STRING" || type === "TEXT") return multiline ? "textarea" : "text";
+    return "readonly";
+  }
+
+  // 旧服务端只会给 field_ids：把生成页那套字段定义翻译成同样的控件条目。
+  const LEGACY_KIND = { number: "number", toggle: "toggle", select: "select", textarea: "textarea", image: "readonly" };
+  const LEGACY_TYPE = { number: "NUMBER", toggle: "BOOLEAN", select: "COMBO", textarea: "STRING", image: "IMAGE" };
+
+  function legacyEntry(nodeId, field) {
+    const kind = LEGACY_KIND[field.kind] || (field.kind === "image" ? "readonly" : "text");
+    return {
+      key: String(field.id),
+      nodeId,
+      name: String(field.input || field.id),
+      type: LEGACY_TYPE[field.kind] || "STRING",
+      options: Array.isArray(field.options) ? field.options : [],
+      min: field.min,
+      max: field.max,
+      step: field.step,
+      multiline: kind === "textarea",
+      link: null,
+      kind,
+      initial: field.value,
+      frontend: false,
+      legacy: true,
+    };
+  }
+
+  function buildInputEntries(node, fieldById) {
+    const id = String(node.id);
+    const raw = Array.isArray(node.inputs) ? node.inputs : null;
+    if (raw && raw.length) {
+      const out = [];
+      for (const item of raw) {
+        if (!item || typeof item !== "object") continue;
+        const name = String(item.name === undefined || item.name === null ? "" : item.name);
+        if (!name) continue;
+        const type = normaliseType(item.type);
+        const options = optionList(item);
+        const multiline = Boolean(item.multiline);
+        const linkNode = item.link && typeof item.link === "object" && item.link.node !== undefined && item.link.node !== null
+          ? String(item.link.node)
+          : "";
+        out.push({
+          key: id + "::" + name,
+          nodeId: id,
+          name,
+          type,
+          options,
+          min: item.min,
+          max: item.max,
+          step: item.step,
+          multiline,
+          link: linkNode ? { node: linkNode, slot: item.link.slot } : null,
+          kind: kindForType(type, multiline, options),
+          initial: item.value,
+          // 前端专有控件（例如种子模式 control_after_generate）：值只存在手机端，
+          // 仍然照 COMBO 渲染成下拉，旁边标一句灰字。
+          frontend: Boolean(item.frontend),
+        });
+      }
+      return out;
+    }
+    // 旧数据：节点只有 field_ids。仍然自己渲染控件，不去碰生成页的 renderField。
+    const ids = Array.isArray(node.field_ids) ? node.field_ids : [];
+    const out = [];
+    const seen = new Set();
+    for (const rawId of ids) {
+      const key = String(rawId);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const field = fieldById.get(key);
+      if (!field) continue;   // 字段表里没有的 id 直接跳过，不能让整页白屏
+      out.push(legacyEntry(id, field));
+    }
+    return out;
+  }
+
   function collectModel() {
     const current = state();
     const workflow = current.workflow || null;
     const graph = (workflow && workflow.graph) || null;
     const fields = Array.isArray(workflow && workflow.fields) ? workflow.fields : [];
     const fieldById = new Map();
-    fields.forEach((field, index) => {
-      if (field && field.id !== undefined && field.id !== null) fieldById.set(String(field.id), { field, index });
+    fields.forEach((field) => {
+      if (field && field.id !== undefined && field.id !== null) fieldById.set(String(field.id), field);
     });
 
     const nodes = (Array.isArray(graph && graph.nodes) ? graph.nodes : []).filter(Boolean);
@@ -253,33 +343,30 @@
     if (ungrouped.nodes.length) visible.push(ungrouped);
     for (const bucket of visible) groupOf.set(bucket.id, bucket.id);
 
+    // 每个节点的输入 → 控件条目（顺序照抄服务端给的 inputs）。
+    const entriesByNode = new Map();
+    const index = new Map();
     let editableCount = 0;
-    const seen = new Set();
     for (const node of nodes) {
-      const ids = Array.isArray(node.field_ids) ? node.field_ids : [];
-      for (const id of ids) {
-        const key = String(id);
-        if (seen.has(key) || !fieldById.has(key)) continue;
-        seen.add(key);
-        editableCount += 1;
+      const id = String(node.id);
+      const list = buildInputEntries(node, fieldById);
+      entriesByNode.set(id, list);
+      for (const entry of list) {
+        if (!index.has(entry.key)) index.set(entry.key, entry);
+        if (entry.kind !== "readonly" && !entry.link) editableCount += 1;
       }
     }
+    entryIndex = index;
 
-    return { workflow, graph, fields, fieldById, nodes, byId, orderIndex, outgoing, groups: visible, groupOf, editableCount };
+    return {
+      workflow, graph, fields, fieldById, nodes, byId, orderIndex, outgoing,
+      groups: visible, groupOf, entriesByNode, editableCount,
+    };
   }
 
-  function nodeFields(node) {
-    const ids = Array.isArray(node && node.field_ids) ? node.field_ids : [];
-    const out = [];
-    const seen = new Set();
-    for (const id of ids) {
-      const key = String(id);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const entry = model && model.fieldById.get(key);
-      if (entry) out.push(entry);
-    }
-    return out;
+  function nodeInputs(node) {
+    if (!node || !model) return [];
+    return model.entriesByNode.get(String(node.id)) || [];
   }
 
   function values() {
@@ -300,19 +387,31 @@
     return String(left) === String(right);
   }
 
-  function fieldValue(field) {
+  // 当前值 = state.values["<节点>::<输入名>"] ?? inputs[].value（服务器给的初始值）。
+  function currentValue(entry) {
     const table = values();
-    return Object.prototype.hasOwnProperty.call(table, field.id) ? table[field.id] : field.value;
+    return Object.prototype.hasOwnProperty.call(table, entry.key) ? table[entry.key] : entry.initial;
   }
 
-  function isModified(field) {
-    const table = values();
-    if (!Object.prototype.hasOwnProperty.call(table, field.id)) return false;
-    return !sameValue(table[field.id], field.value);
+  function entryModified(entry) {
+    return !sameValue(currentValue(entry), entry.initial);
   }
 
   function nodeModified(node) {
-    return nodeFields(node).some(({ field }) => isModified(field));
+    return nodeInputs(node).some(entryModified);
+  }
+
+  function displayValue(value) {
+    if (value === undefined || value === null) return "";
+    if (typeof value === "object") {
+      try {
+        const text = JSON.stringify(value);
+        if (typeof text === "string") {
+          return text.length > MAX_READONLY_CHARS ? text.slice(0, MAX_READONLY_CHARS) + "…" : text;
+        }
+      } catch (error) { /* 循环引用之类：退回 String() */ }
+    }
+    return String(value);
   }
 
   /* -------------------------------------------------------------- 搜索与高亮 */
@@ -586,77 +685,322 @@
 
   function renderBody(node) {
     const body = el("div", "advanced-node-body");
-    const fields = nodeFields(node);
-    if (!fields.length) {
+    const list = nodeInputs(node);
+    if (!list.length) {
       body.append(el("p", "advanced-node-empty", t("无可调参数")));
       return body;
     }
-    for (const entry of fields) body.append(renderControl(entry.field, entry.index));
+    for (const entry of list) body.append(renderInput(entry));
     return body;
   }
 
-  function sharedControlMap() {
-    const current = state();
-    return current && current.fieldControls && typeof current.fieldControls.get === "function"
-      ? current.fieldControls
-      : null;
+  // 一个输入一行：上行是输入名（不翻译，必须与画布/API 一致）+ 类型小字，下行是控件。
+  function renderInput(entry) {
+    const wrap = el("div", "advanced-input");
+    wrap.dataset.valueKey = entry.key;
+    wrap.dataset.inputName = entry.name;
+    if (entry.type) wrap.dataset.inputType = entry.type;
+    const head = el("div", "advanced-input-head");
+    head.append(el("span", "advanced-input-name", entry.name));
+    if (entry.type) head.append(el("span", "advanced-input-type", entry.type));
+    const slot = el("div", "advanced-input-control");
+    if (entry.frontend) {
+      wrap.dataset.inputFrontend = "1";
+      slot.classList.add("is-frontend");
+    }
+    wrap.append(head, slot);
+    inputRows.set(entry.key, wrap);
+
+    if (entry.link) {
+      slot.append(linkChip(entry));
+      return wrap;
+    }
+    const control = buildControl(entry);
+    if (control) slot.append(control);
+    // 前端专有控件（种子模式之类）只影响手机端，旁边灰字说明一句。
+    if (entry.frontend) slot.append(el("span", "advanced-input-note", t("仅手机端设置")));
+    if (entry.kind === "number") wrap.append(el("p", "advanced-input-warning", t("输入值无效")));
+    return wrap;
   }
 
-  function fallbackField(field) {
-    const wrapper = el("label", "field");
-    wrapper.dataset.input = String(field.input || "");
-    const row = el("span", "field-label-row");
-    row.append(el("span", "field-label", t(field.label || field.id)));
-    const input = el("input");
-    input.type = field.kind === "number" ? "number" : "text";
-    const current = fieldValue(field);
-    input.value = current === undefined || current === null ? "" : String(current);
-    wrapper.append(row, input);
-    return wrapper;
+  // 被连线接管的输入：只读芯片，点一下仍然跳到源节点。
+  function linkChip(entry) {
+    const source = model && entry.link ? model.byId.get(String(entry.link.node)) : null;
+    const nodeId = String(entry.link ? entry.link.node : "");
+    const name = source ? nodeTitle(source) : "#" + nodeId;
+    const button = el("button", "advanced-chip is-in advanced-input-link");
+    button.type = "button";
+    button.dataset.jump = nodeId;
+    button.title = "#" + nodeId;
+    button.append(el("span", "advanced-chip-text", t("已连接：来自 {name}", { name })));
+    return button;
   }
 
-  function renderControl(field, index) {
-    const before = controls.get(field.id) || null;
-    const shared = sharedControlMap();
-    const sharedBefore = shared ? shared.get(field.id) || null : null;
+  function numericAttr(value) {
+    if (value === undefined || value === null || value === "") return null;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? String(numeric) : null;
+  }
 
-    let wrapper = null;
-    if (typeof deps.renderField === "function") {
+  function buildControl(entry) {
+    const current = currentValue(entry);
+    if (entry.kind === "readonly") {
+      const box = el("div", "advanced-input-readonly");
+      box.append(el("span", "advanced-input-value", displayValue(current)));
+      box.append(el("span", "advanced-input-hint", t("此类型暂不支持编辑")));
+      return box;
+    }
+    if (entry.kind === "select") {
+      const select = el("select", "advanced-input-select");
+      const options = entry.options.map((value) => String(value));
+      const text = displayValue(current);
+      // 当前值不在候选里（换过模型/自定义值）也要能显示，补一个当前值项在最前面。
+      if (!options.includes(text)) options.unshift(text);
+      for (const value of options) {
+        const option = el("option", null, value);
+        option.value = value;
+        select.append(option);
+      }
+      select.value = text;
+      controls.set(entry.key, select);
+      return select;
+    }
+    if (entry.kind === "toggle") {
+      const label = el("label", "advanced-input-toggle");
+      const box = el("input", "advanced-checkbox");
+      box.type = "checkbox";
+      box.checked = Boolean(current);
+      box.setAttribute("aria-label", entry.name);
+      label.append(box);
+      controls.set(entry.key, box);
+      return label;
+    }
+    if (entry.kind === "number") {
+      const input = el("input", "advanced-input-number");
+      input.type = "number";
+      const min = numericAttr(entry.min);
+      const max = numericAttr(entry.max);
+      const step = numericAttr(entry.step);
+      if (min !== null) input.min = min;
+      if (max !== null) input.max = max;
+      if (step !== null) input.step = step;
+      input.inputMode = "decimal";
+      input.autocomplete = "off";
+      input.value = current === undefined || current === null || typeof current === "object" ? "" : String(current);
+      controls.set(entry.key, input);
+      return input;
+    }
+    if (entry.kind === "textarea") {
+      const area = el("textarea", "advanced-input-textarea");
+      area.rows = 2;
+      area.spellcheck = false;
+      area.value = displayValue(current);
+      controls.set(entry.key, area);
+      growLater(area);
+      return area;
+    }
+    const input = el("input", "advanced-input-text");
+    input.type = "text";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.value = displayValue(current);
+    controls.set(entry.key, input);
+    return input;
+  }
+
+  /* ------------------------------------------------------------ 值的读写 */
+
+  // 合成 field：id = "<节点>::<输入名>"，服务端按这个形状应用到 prompt 上。
+  function fieldForEntry(entry) {
+    return {
+      id: entry.key,
+      node_id: entry.nodeId,
+      input: entry.name,
+      kind: entry.kind === "readonly" ? "text" : entry.kind,
+      value: entry.initial,
+    };
+  }
+
+  function parseNumber(value) {
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    const text = String(value === undefined || value === null ? "" : value).trim();
+    if (!text) return null;
+    const numeric = Number(text);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  function markInvalid(key, invalid) {
+    const wrap = inputRows.get(String(key));
+    if (wrap) wrap.classList.toggle("is-invalid", Boolean(invalid));
+  }
+
+  function applyEdit(key, raw) {
+    const entry = entryIndex.get(String(key));
+    if (!entry || entry.link || entry.kind === "readonly") return;
+    let next = raw;
+    if (entry.kind === "number") {
+      const parsed = parseNumber(raw);
+      // 空/非数字：不写进 state.values（提交上去也是错的），只在控件下面提示。
+      if (parsed === null) { markInvalid(entry.key, true); return; }
+      next = parsed;
+    } else if (entry.kind === "toggle") {
+      next = Boolean(raw);
+    } else {
+      next = raw === undefined || raw === null ? "" : String(raw);
+    }
+    markInvalid(entry.key, false);
+    const table = values();
+    if (table && typeof table === "object") table[entry.key] = next;
+    const field = fieldForEntry(entry);
+    if (typeof deps.updateFieldValue === "function") {
       try {
-        // 第 4 个参数是生成页 renderField 新增的可选控件表；旧版本会忽略它，
-        // 这时控件会被塞进 state.fieldControls，下面负责还回去。
-        wrapper = deps.renderField(field, index, false, controls);
-      } catch (error) {
-        wrapper = null;
+        deps.updateFieldValue(field, next);
+      } catch (error) { /* 生成页的副作用失败也不能拦住高级页自己的改动 */ }
+    }
+    paintNodeFlag(entry.nodeId);
+    if (typeof deps.onEdit === "function") {
+      try {
+        deps.onEdit(field, next);
+      } catch (error) { /* 回调由调用方负责 */ }
+    }
+  }
+
+  function paintNodeFlag(nodeId) {
+    const card = cards.get(String(nodeId));
+    if (!card) return;
+    const node = model ? model.byId.get(String(nodeId)) : null;
+    const modified = node ? nodeModified(node) : false;
+    card.classList.toggle("is-modified", modified);
+    const toggle = card.querySelector(".advanced-node-toggle");
+    if (!toggle) return;
+    const star = toggle.querySelector(".advanced-node-modified");
+    if (modified && !star) toggle.append(modifiedStar());
+    else if (!modified && star) star.remove();
+  }
+
+  function selectHasOption(select, value) {
+    for (const option of select.options) {
+      if (option.value === value) return true;
+    }
+    return false;
+  }
+
+  // 只改显示，不碰 state.values（调用方负责那份数据）。
+  function setControlValue(entry, control, value) {
+    if (!control) return;
+    if (entry.kind === "toggle") {
+      control.checked = Boolean(value);
+      return;
+    }
+    if (entry.kind === "select") {
+      const text = displayValue(value);
+      if (!selectHasOption(control, text)) {
+        const option = el("option", null, text);
+        option.value = text;
+        control.prepend(option);
       }
+      control.value = text;
+      return;
     }
-    if (!wrapper || !wrapper.nodeType) wrapper = fallbackField(field);
-
-    let control = null;
-    const mine = controls.get(field.id);
-    if (mine && wrapper.contains(mine)) control = mine;
-    if (!control && shared) {
-      const candidate = shared.get(field.id);
-      if (candidate && wrapper.contains(candidate)) control = candidate;
+    if (control.value === undefined) return;
+    const text = displayValue(value);
+    if (control.value === text) return;
+    // 正在这个控件里打字时别把光标甩到末尾。
+    const focused = deps.doc && deps.doc.activeElement === control;
+    const start = focused ? control.selectionStart : null;
+    const end = focused ? control.selectionEnd : null;
+    control.value = text;
+    if (typeof start === "number" && typeof control.setSelectionRange === "function") {
+      try { control.setSelectionRange(start, end); } catch (error) { /* number 之类不支持选区 */ }
     }
-    if (!control) control = wrapper.querySelector("input, textarea, select");
-    if (control) controls.set(field.id, control);
+  }
 
-    // 注入的 renderField 若不认第 4 个参数，会把生成页那份引用覆盖掉：恢复它，
-    // 免得生成页的尺寸预设等逻辑写到高级页的控件上。
-    if (shared && control) {
-      const sharedAfter = shared.get(field.id) || null;
-      if (sharedAfter === control && sharedAfter !== sharedBefore) {
-        if (sharedBefore) shared.set(field.id, sharedBefore);
-        else shared.delete(field.id);
+  // 生成页改了值（多模型轮换、草稿、尺寸预设……）时，只对齐这一个已渲染的控件。
+  function syncValue(fieldId, value) {
+    const entry = entryIndex.get(String(fieldId));
+    if (!entry || entry.link) return api;
+    const control = controls.get(entry.key);
+    if (!control || control.isConnected === false) return api;
+    setControlValue(entry, control, value);
+    markInvalid(entry.key, false);
+    paintNodeFlag(entry.nodeId);
+    return api;
+  }
+
+  // 切页时把当前已渲染的控件按 state.values 全部对齐一遍（不整块重渲染）。
+  function syncAll() {
+    if (!mounted) return api;
+    for (const [key, control] of controls) {
+      const entry = entryIndex.get(key);
+      if (!entry || !control || control.isConnected === false) continue;
+      setControlValue(entry, control, currentValue(entry));
+      markInvalid(key, false);
+    }
+    if (model) {
+      for (const node of model.nodes) paintNodeFlag(String(node.id));
+    }
+    return api;
+  }
+
+  // 多行文本按内容长高（量不到高度就算了，CSS 里有 min-height 兜底）。
+  function growArea(area) {
+    if (!area) return;
+    area.style.height = "auto";
+    const height = area.scrollHeight;
+    if (typeof height !== "number" || height <= 0) {
+      area.style.height = "";
+      return;
+    }
+    area.style.height = height + "px";
+  }
+
+  function growLater(area) {
+    const timer = win();
+    if (!timer || typeof timer.requestAnimationFrame !== "function") return;
+    timer.requestAnimationFrame(() => growArea(area));
+  }
+
+  // 节点里的小按钮（例如数字步进）可能绕过 input 事件直接改值：点完统一回读一次。
+  function readBack(key) {
+    const timer = win();
+    if (!timer || typeof timer.setTimeout !== "function") return;
+    timer.setTimeout(() => {
+      const entry = entryIndex.get(String(key));
+      if (!entry || entry.link || entry.kind === "readonly") return;
+      const control = controls.get(String(key));
+      if (!control || control.isConnected === false) return;
+      applyEdit(key, readControlValue(control));
+    }, 0);
+  }
+
+  function readControlValue(control) {
+    if (!control) return "";
+    if (control.type === "checkbox") return Boolean(control.checked);
+    return control.value === undefined ? "" : control.value;
+  }
+
+  function onListEvent(event) {
+    const target = event.target;
+    if (!target || typeof target.closest !== "function") return;
+    if (event.type === "click") {
+      const chip = target.closest("[data-jump]");
+      if (chip) {
+        event.preventDefault();
+        openNode(chip.dataset.jump);
+        return;
       }
+      const row = target.closest("[data-value-key]");
+      if (row) readBack(row.dataset.valueKey);
+      return;
     }
-
-    wrapper.dataset.fieldId = String(field.id);
-    // 生成页的控件 id 是 field-<下标>，高级页再来一份会撞车（getElementById 只认第一个），
-    // 所以这里摘掉自己的 id，两个页面各更新各的。
-    if (control && control.id) control.removeAttribute("id");
-    return wrapper;
+    const row = target.closest("[data-value-key]");
+    if (!row) return;
+    const tag = target.tagName;
+    const toggleLike = tag === "SELECT" || target.type === "checkbox" || target.type === "radio";
+    if (event.type === "input" && toggleLike) return;
+    if (event.type === "change" && !toggleLike) return;
+    applyEdit(row.dataset.valueKey, readControlValue(target));
+    if (event.type === "input" && tag === "TEXTAREA") growArea(target);
   }
 
   function renderLinks(node) {
@@ -738,123 +1082,6 @@
     return card;
   }
 
-  function readControlValue(control) {
-    if (!control) return "";
-    if (control.type === "checkbox") return Boolean(control.checked);
-    return control.value === undefined ? "" : control.value;
-  }
-
-  function isImageField(field) {
-    return Boolean(field) && (field.kind === "image" || field.input === "image");
-  }
-
-  // 和生成页保持同一种取值形态（数字字段给 number、开关给 boolean），
-  // 否则 state.values 里会混进字符串，提交给 ComfyUI 的类型就对不上了。
-  function normaliseValue(field, value) {
-    if (field && field.kind === "number") {
-      const numeric = Number(value);
-      return Number.isFinite(numeric) ? numeric : value;
-    }
-    if (field && field.kind === "toggle") return Boolean(value);
-    return value;
-  }
-
-  function applyEdit(fieldId, value) {
-    const entry = model ? model.fieldById.get(String(fieldId)) : null;
-    if (!entry) return;
-    const field = entry.field;
-    const next = normaliseValue(field, value);
-    const table = values();
-    if (table && typeof table === "object") table[field.id] = next;
-    if (typeof deps.updateFieldValue === "function") {
-      try {
-        deps.updateFieldValue(field, next);
-      } catch (error) { /* 生成页的副作用失败也不能拦住高级页自己的改动 */ }
-    }
-    syncGenerateControl(field, entry.index, next);
-    paintNodeFlag(nodeIdOfField(field));
-    if (typeof deps.onEdit === "function") {
-      try {
-        deps.onEdit(field, value);
-      } catch (error) { /* 回调由调用方负责 */ }
-    }
-  }
-
-  // 生成页对应控件 id 是 field-<该字段在 workflow.fields 里的下标>。
-  function syncGenerateControl(field, index, value) {
-    if (!Number.isInteger(index) || index < 0) return;
-    const node = pick("field-" + index);
-    if (!node || node === controls.get(field.id)) return;
-    if (node.type === "checkbox") node.checked = Boolean(value);
-    else if ("value" in node) node.value = value === undefined || value === null ? "" : String(value);
-  }
-
-  // fields 里通常带 node_id；万一没有，就按 field_ids 反查。
-  function nodeIdOfField(field) {
-    if (field && field.node_id !== undefined && field.node_id !== null && field.node_id !== "") {
-      return String(field.node_id);
-    }
-    const id = String((field && field.id) || "");
-    for (const node of (model ? model.nodes : [])) {
-      const ids = Array.isArray(node.field_ids) ? node.field_ids : [];
-      if (ids.some((value) => String(value) === id)) return String(node.id);
-    }
-    return "";
-  }
-
-  function paintNodeFlag(nodeId) {
-    const card = cards.get(String(nodeId));
-    if (!card) return;
-    const node = model ? model.byId.get(String(nodeId)) : null;
-    const modified = node ? nodeModified(node) : false;
-    card.classList.toggle("is-modified", modified);
-    const toggle = card.querySelector(".advanced-node-toggle");
-    if (!toggle) return;
-    const star = toggle.querySelector(".advanced-node-modified");
-    if (modified && !star) toggle.append(modifiedStar());
-    else if (!modified && star) star.remove();
-  }
-
-  // 节点里的小按钮（例如数字步进）可能绕过 input 事件直接改值：点完统一回读一次。
-  function readBack(fieldId) {
-    const timer = win();
-    if (!timer || typeof timer.setTimeout !== "function") return;
-    timer.setTimeout(() => {
-      const entry = model ? model.fieldById.get(String(fieldId)) : null;
-      if (!entry || isImageField(entry.field)) return;
-      const control = controls.get(String(fieldId));
-      if (!control || control.isConnected === false) return;
-      applyEdit(fieldId, readControlValue(control));
-    }, 0);
-  }
-
-  function onListEvent(event) {
-    const target = event.target;
-    if (!target || typeof target.closest !== "function") return;
-    if (event.type === "click") {
-      const chip = target.closest("[data-jump]");
-      if (chip) {
-        event.preventDefault();
-        openNode(chip.dataset.jump);
-        return;
-      }
-      const wrapper = target.closest("[data-field-id]");
-      if (wrapper) readBack(wrapper.dataset.fieldId);
-      return;
-    }
-    const wrapper = target.closest("[data-field-id]");
-    if (!wrapper) return;
-    // 图像控件由生成页自己上传，这里既不读也不写。
-    if (target.type === "file") return;
-    const tag = target.tagName;
-    const toggleLike = tag === "SELECT" || target.type === "checkbox" || target.type === "radio";
-    if (event.type === "input" && toggleLike) return;
-    if (event.type === "change" && !toggleLike) return;
-    const entry = model ? model.fieldById.get(String(wrapper.dataset.fieldId)) : null;
-    if (entry && isImageField(entry.field)) return;
-    applyEdit(wrapper.dataset.fieldId, readControlValue(target));
-  }
-
   /* -------------------------------------------------------------- 渲染 */
 
   function paintChrome() {
@@ -886,6 +1113,36 @@
     }
   }
 
+  // 整块重渲染（搜索/展开收起/切页）时记住正在编辑的控件，重建后把焦点和光标还回去，
+  // 免得用户打到一半被踢出输入框。
+  function focusSnapshot() {
+    const doc = deps.doc;
+    const active = doc && doc.activeElement;
+    if (!active || !els.list || !els.list.contains(active)) return null;
+    const row = typeof active.closest === "function" ? active.closest("[data-value-key]") : null;
+    if (!row) return null;
+    const snapshot = { key: row.dataset.valueKey };
+    if (typeof active.selectionStart === "number") {
+      snapshot.start = active.selectionStart;
+      snapshot.end = active.selectionEnd;
+    }
+    return snapshot;
+  }
+
+  function restoreFocus(snapshot) {
+    if (!snapshot) return;
+    const control = controls.get(snapshot.key);
+    if (!control || typeof control.focus !== "function") return;
+    try {
+      control.focus({ preventScroll: true });
+    } catch (error) {
+      try { control.focus(); } catch (inner) { return; }
+    }
+    if (typeof snapshot.start === "number" && typeof control.setSelectionRange === "function") {
+      try { control.setSelectionRange(snapshot.start, snapshot.end); } catch (error) { /* number 之类不支持选区 */ }
+    }
+  }
+
   function render() {
     if (!mounted) return api;
     if (groupScope !== scopeId()) loadGroupState();
@@ -902,6 +1159,8 @@
 
     paintChrome();
     cards.clear();
+    controls.clear();
+    inputRows.clear();
     if (!els.list) return api;
     const fragment = deps.doc.createDocumentFragment();
     let shown = 0;
@@ -917,7 +1176,9 @@
       fragment.append(renderGroup(group, entries, tokens.length > 0));
     }
     if (tokens.length && !shown) fragment.append(el("p", "advanced-nomatch", t("没有匹配的节点")));
+    const focused = focusSnapshot();
     els.list.replaceChildren(fragment);
+    restoreFocus(focused);
     return api;
   }
 
@@ -947,10 +1208,9 @@
     const doc = settings.document || (typeof document !== "undefined" ? document : null);
     if (!doc) throw new Error("MobileAdvanced.mount 需要一个 document");
     deps.doc = doc;
+    // settings.renderField / settings.$ 仍然接受但不再使用：控件由本模块自己渲染。
     if (settings.t) deps.t = settings.t;
-    if (settings.$) deps.$ = settings.$;
     if (settings.state) deps.state = settings.state;
-    if (settings.renderField) deps.renderField = settings.renderField;
     if (settings.updateFieldValue) deps.updateFieldValue = settings.updateFieldValue;
     if (settings.onEdit) deps.onEdit = settings.onEdit;
     if (settings.window) deps.window = settings.window;
@@ -996,9 +1256,11 @@
     const link = deps.doc && deps.doc.getElementById(STYLE_ID);
     if (link && link.parentNode) link.parentNode.removeChild(link);
     controls.clear();
+    inputRows.clear();
     cards.clear();
     expandedNodes.clear();
     groupState.clear();
+    entryIndex = new Map();
     groupScope = null;
     model = null;
     mounted = false;
@@ -1014,6 +1276,8 @@
     show,
     destroy,
     openNode,
+    syncValue,
+    syncAll,
     setQuery,
     getQuery: () => query,
     toggleAll,

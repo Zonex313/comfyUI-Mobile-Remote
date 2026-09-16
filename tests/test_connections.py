@@ -122,6 +122,8 @@ class MobileGatewayTests(unittest.IsolatedAsyncioTestCase):
             "/mobile/assets/preset-engine.js",
             "/mobile/assets/settings-sync.js",
             "/mobile/assets/progress-sync.js",
+            # 「高级」页模块：按画布节点 1:1 渲染控件
+            "/mobile/assets/advanced.js",
             "/mobile/assets/app.js",
         ])
         paths = ["/mobile", "/mobile/", *boot,

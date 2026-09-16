@@ -36,6 +36,17 @@ class MobileAssetTests(unittest.TestCase):
             path = server._SHARED_ASSET_FILES.get(name) or (ROOT / "mobile" / name)
             self.assertTrue(path.is_file(), f"{name} 在白名单里但文件不存在：{path}")
 
+    def test_assets_are_reachable_through_the_public_tunnel(self):
+        """公网隧道走的是另一份白名单（connections.GET_PATHS），也漏过一次。"""
+        import re as _re
+        text = (ROOT / "connections.py").read_text(encoding="utf-8")
+        match = _re.search(r"GET_PATHS = \((.*?)\)\n", text, _re.S)
+        self.assertIsNotNone(match, "connections.py 里找不到 GET_PATHS")
+        pattern = "|".join(_re.findall(r'"(.*?)"', match.group(1)))
+        compiled = _re.compile(pattern)
+        missing = [name for name in sorted(set(server._MOBILE_ASSET_FILES)) if not compiled.search("/mobile/assets/" + name)]
+        self.assertEqual(missing, [], f"这些资源过不了公网隧道白名单：{missing}")
+
     def test_advanced_page_assets_are_served(self):
         # 「高级」页依赖这两个文件，漏一个就是整页空白
         self.assertIn("advanced.js", server._MOBILE_ASSET_FILES)

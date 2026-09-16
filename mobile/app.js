@@ -216,12 +216,19 @@
     window.scrollTo({ top: 0, behavior: "auto" });
     // 高级页按 state.values 整块重渲染：生成页/草稿里的改动切过去就能看见。
     if (target === "advanced") advancedPage?.show();
+    // 反向同步：高级页改过值，切回生成页时重绘控件（值取自草稿，改值时会存草稿）。
+    if (target === "generate" && advancedEdited) {
+      advancedEdited = false;
+      if (state.workflow) renderWorkflow(state.workflow);
+    }
     if (target === "history") loadJobs().catch(() => {});
   }
 
   // 「高级」页（按组/节点浏览并编辑参数）实现全部在 mobile/advanced.js 里，
   // 这里只注入依赖：它不认识 app.js 的内部变量，也不需要认识。
   let advancedPage = null;
+  // 高级页改过值 → 切回生成页时按最新值重绘控件，避免两边显示不一致。
+  let advancedEdited = false;
   function setupAdvancedPage() {
     if (advancedPage) return advancedPage;
     const api = globalThis.MobileAdvanced;
@@ -234,6 +241,7 @@
         state,
         renderField,
         updateFieldValue,
+        onEdit: () => { advancedEdited = true; },
         view: "view-advanced",
       });
     } catch (error) {
@@ -1000,7 +1008,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609306", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202609307", { cache: "no-store" });
       if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];
