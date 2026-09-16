@@ -25,7 +25,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "202610122";
+  const VERSION = "202610123";
   const STYLE_ID = "mtr-advanced-styles";
   const DEFAULT_STYLE_HREF = "/mobile/assets/advanced.css?v=" + VERSION;
   // 组折叠状态：{ "<工作流 id>": { "<组 id>": true|false } }
@@ -84,6 +84,9 @@
   let jumpMenu = null;
   let jumpMenuAnchor = null;
   let jumpMenuOpenedAt = 0;
+  const undoStack = [];
+  const redoStack = [];
+  let applyingHistory = false;
 
   function t(text, params) {
     let value = text;
@@ -587,7 +590,20 @@
     // 图例：连线按钮上的箭头读作什么（灰字，随语言走）。
     const legend = el("p", "advanced-legend");
     legend.append(el("span", "advanced-legend-in"), el("span", "advanced-legend-out"));
-    wrap.append(field, legend);
+    const actions = el("div", "advanced-toolbar-actions");
+    const makeAction = (label, title, callback) => {
+      const button = el("button", "advanced-toolbar-button", label);
+      button.type = "button";
+      button.title = title;
+      button.addEventListener("click", callback);
+      actions.append(button);
+      return button;
+    };
+    makeAction("↶", "撤销", undoLast);
+    makeAction("↷", "重做", redoLast);
+    makeAction("展开", "展开全部节点", () => toggleAll(true));
+    makeAction("收起", "收起全部节点", () => toggleAll(false));
+    wrap.append(field, actions, legend);
     return wrap;
   }
 
@@ -653,6 +669,66 @@
 
   /* ------------------------------------------------------------ 卡片渲染 */
 
+  function renderGroupActions(group, entries, details) {
+    const wrap = el("div", "advanced-group-actions");
+    const menu = el("div", "advanced-group-menu");
+    const trigger = el("button", "advanced-group-menu-trigger", "⋯");
+    trigger.type = "button";
+    trigger.title = "组操作";
+    trigger.setAttribute("aria-label", "组操作");
+    trigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      menu.classList.toggle("is-open");
+    });
+    menu.append(trigger);
+    const close = () => menu.classList.remove("is-open");
+    const act = (label, callback) => {
+      const button = el("button", "advanced-group-action", label);
+      button.type = "button";
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        callback();
+        close();
+      });
+      menu.append(button);
+    };
+    act("展开/收起本组", () => {
+      details.open = !details.open;
+      details.dataset.mtrOpen = details.open ? "1" : "0";
+      setGroupOpen(group.id, details.open);
+    });
+    act("全部展开节点", () => {
+      for (const entry of entries) expandedNodes.add(String(entry.node.id));
+      render();
+    });
+    act("全部收起节点", () => {
+      for (const entry of entries) expandedNodes.delete(String(entry.node.id));
+      render();
+    });
+    act("旁路本组节点", () => {
+      for (const entry of entries) deps.onAction?.(String(entry.node.id), "bypass", true);
+    });
+    act("显示本组节点", () => {
+      for (const entry of entries) deps.onAction?.(String(entry.node.id), "hide", false);
+    });
+    act("选择本组节点", () => {
+      for (const entry of entries) deps.onAction?.(String(entry.node.id), "select", true);
+    });
+    act("收藏本组", () => {
+      const key = "comfy-mobile-remote.advancedBookmarks";
+      try {
+        const saved = JSON.parse(storageArea()?.getItem(key) || "[]");
+        const list = Array.isArray(saved) ? saved.map(String) : [];
+        if (!list.includes("group:" + group.id)) list.push("group:" + group.id);
+        storageArea()?.setItem(key, JSON.stringify(list));
+      } catch {}
+    });
+    wrap.append(menu);
+    return wrap;
+  }
+
   function renderGroup(group, entries, searching) {
     const doc = deps.doc;
     const details = el("details", "advanced-group");
@@ -671,7 +747,7 @@
     title.append(highlight(group.title || t("未分组"), null));
     const count = el("span", "advanced-group-count", String(entries.length));
     count.title = entries.length + " " + t("个节点");
-    summary.append(dot, title, count, icon("chevron", "advanced-group-chevron"));
+    summary.append(dot, title, count, renderGroupActions(group, entries, details), icon("chevron", "advanced-group-chevron"));
     details.append(summary);
 
     const body = el("div", "advanced-group-nodes");
@@ -717,8 +793,9 @@
     toggle.append(icon("chevron", "advanced-node-chevron"), head);
     if (nodeModified(node)) toggle.append(modifiedStar());
     toggle.addEventListener("click", () => toggleNode(id));
-    card.append(toggle);
-    card.append(renderNodeActions(node));
+    const header = el("div", "advanced-node-header");
+    header.append(toggle, renderNodeActions(node));
+    card.append(header);
 
     if (open) card.append(renderBody(node));
     // 出边区（卡片底部）：没有出边时整块不渲染。
@@ -821,7 +898,38 @@
     // 前端专有控件（种子模式之类）只影响手机端，旁边灰字说明一句。
     if (entry.frontend) slot.append(el("span", "advanced-input-note", t("仅手机端设置")));
     if (entry.kind === "number") wrap.append(el("p", "advanced-input-warning", t("输入值无效")));
+    const rowMenu = renderInputActions(entry, wrap);
+    if (rowMenu) head.append(rowMenu);
     return wrap;
+  }
+
+  function renderInputActions(entry, wrap) {
+    if (entry.link || entry.kind === "readonly") return null;
+    const menu = el("div", "advanced-input-menu");
+    const trigger = el("button", "advanced-input-menu-trigger", "⋯");
+    trigger.type = "button";
+    trigger.title = "参数操作";
+    trigger.setAttribute("aria-label", "参数操作");
+    trigger.addEventListener("click", (event) => {
+      event.preventDefault(); event.stopPropagation();
+      menu.classList.toggle("is-open");
+    });
+    menu.append(trigger);
+    const add = (label, callback) => {
+      const button = el("button", "advanced-input-action", label);
+      button.type = "button";
+      button.addEventListener("click", (event) => {
+        event.preventDefault(); event.stopPropagation(); callback(); menu.classList.remove("is-open");
+      });
+      menu.append(button);
+    };
+    add("恢复默认值", () => applyEdit(entry.key, entry.initial));
+    add("复制参数值", async () => {
+      const value = currentValue(entry);
+      try { await win().navigator?.clipboard?.writeText(String(value ?? "")); } catch {}
+    });
+    add("标记参数", () => wrap.classList.toggle("is-pinned"));
+    return menu;
   }
 
   // 对端节点标题：节点不在图里（脏数据）就退回 #编号。
@@ -964,6 +1072,43 @@
     if (wrap) wrap.classList.toggle("is-invalid", Boolean(invalid));
   }
 
+  function pushHistory(key, before, after) {
+    if (applyingHistory || Object.is(before, after)) return;
+    undoStack.push({ key: String(key), before, after });
+    if (undoStack.length > 50) undoStack.shift();
+    redoStack.length = 0;
+  }
+
+  function replayHistory(item, undo) {
+    if (!item) return;
+    const value = undo ? item.before : item.after;
+    const entry = entryIndex.get(item.key);
+    if (!entry) return;
+    applyingHistory = true;
+    try {
+      const table = values();
+      if (table && typeof table === "object") table[item.key] = value;
+      deps.updateFieldValue?.(fieldForEntry(entry), value);
+      deps.onEdit?.(fieldForEntry(entry), value);
+      syncValue(item.key, value);
+      paintNodeFlag(entry.nodeId);
+    } finally { applyingHistory = false; }
+  }
+
+  function undoLast() {
+    const item = undoStack.pop();
+    if (!item) return;
+    redoStack.push(item);
+    replayHistory(item, true);
+  }
+
+  function redoLast() {
+    const item = redoStack.pop();
+    if (!item) return;
+    undoStack.push(item);
+    replayHistory(item, false);
+  }
+
   function applyEdit(key, raw) {
     const entry = entryIndex.get(String(key));
     if (!entry || entry.link || entry.kind === "readonly") return;
@@ -980,6 +1125,8 @@
     }
     markInvalid(entry.key, false);
     const table = values();
+    const before = table && typeof table === "object" ? table[entry.key] : entry.initial;
+    pushHistory(entry.key, before, next);
     if (table && typeof table === "object") table[entry.key] = next;
     const field = fieldForEntry(entry);
     if (typeof deps.updateFieldValue === "function") {
