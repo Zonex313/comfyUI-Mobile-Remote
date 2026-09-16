@@ -31,7 +31,12 @@ const workflow = { id: "0a1b2c3d4e5f60718293", name: "Landscape workflow for lay
 const output = { filename: "layout.png", subfolder: "", type: "output", kind: "image" };
 // 10 个排队任务 = 连发 10 次之后的真实状态：底部导航角标会显示两位数。
 const pendingJobs = Array.from({ length: 10 }, (_, index) => ({
-  id: `layout-pending-${index}`, status: "pending", create_time: 1700000000000, workflow_name: workflow.name,
+  id: `layout-pending-${index}`,
+  status: "pending",
+  create_time: Date.now(),   // 刚入队：队列卡片只显示时分
+  workflow_name: workflow.name,
+  model_name: index % 2 ? "landscape-v2.safetensors" : "landscape.safetensors",
+  positive_prompt: `a landscape with mountains and a river, variation ${index}, highly detailed`,
 }));
 const jobs = [
   { id: "layout-completed", status: "completed", create_time: 1700000000000, workflow_name: workflow.name, workflow_id: workflow.id, gallery: [output], preview_output: output, seed: 123, positive_prompt: "A landscape" },

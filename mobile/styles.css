@@ -1943,18 +1943,18 @@ select:focus {
 }
 
 .job-list {
-  padding: 6px 0 12px;
+  padding: 2px 0 12px;
 }
 
+/* 队列卡片：两行信息（模型名 + 提示词），其余挤在右列，尽量压低高度。 */
 .job-card {
-  min-height: 80px;
-  margin-bottom: 10px;
-  padding: 12px 14px;
+  margin-bottom: 6px;
+  padding: 7px 9px;
   display: grid;
-  grid-template-columns: 50px minmax(0, 1fr) auto;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
-  border-radius: 14px;
+  gap: 8px;
+  border-radius: 12px;
   background: rgba(16, 19, 34, 0.75);
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
@@ -1986,13 +1986,13 @@ select:focus {
 
 .job-thumb {
   position: relative;
-  width: 50px;
-  height: 50px;
+  width: 36px;
+  height: 36px;
   display: grid;
   place-items: center;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
+  border-radius: 8px;
   color: var(--text-muted);
   background: rgba(255, 255, 255, 0.035);
 }
@@ -2008,43 +2008,85 @@ select:focus {
 }
 
 .job-thumb svg {
-  width: 24px;
-  height: 24px;
+  width: 18px;
+  height: 18px;
 }
 
 .job-copy {
   min-width: 0;
+  display: grid;
+  gap: 1px;
 }
 
-.job-copy strong,
-.job-copy span {
-  display: block;
+.job-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
 }
 
-.job-copy strong {
-  font-size: 13.5px;
+/* 两行都用省略号收尾：模型名一行、提示词一行（时间跟在提示词后面）。 */
+.job-model {
+  min-width: 0;
+  font-size: 12.5px;
   font-weight: 650;
   color: #f1f3fa;
   letter-spacing: 0.01em;
+  line-height: 1.35;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.job-copy span {
-  margin-top: 3px;
+.job-prompt {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
   color: #8c93ad;
-  font-size: 11px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-prompt[hidden] {
+  display: none;
+}
+
+.job-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.job-time {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.job-actions .job-cancel {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.job-actions .job-cancel svg {
+  width: 14px;
+  height: 14px;
 }
 
 .job-progress-wrap {
-  margin-top: 6px;
+  margin-top: 4px;
   width: 100%;
 }
 
 .job-progress-bar {
   width: 100%;
-  height: 5px;
+  height: 3px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   overflow: hidden;
@@ -2062,8 +2104,8 @@ select:focus {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-top: 4px;
-  font-size: 10px;
+  margin-top: 2px;
+  font-size: 9.5px;
   color: #94a3b8;
   font-weight: 650;
 }
@@ -2078,13 +2120,14 @@ select:focus {
 
 
 .job-status {
-  min-width: 58px;
-  padding: 4px 8px;
-  border-radius: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 6px;
   color: #cbd5e1;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 650;
   text-align: center;
 }

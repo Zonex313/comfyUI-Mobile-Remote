@@ -1837,6 +1837,33 @@ def _decorate_job(
     return _apply_favorite_meta(decorated, str(job.get("id", "")))
 
 
+def _decorate_queue_job(
+    job: dict[str, Any],
+    history_item: dict[str, Any] | None,
+    snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """排队中/运行中的任务：补上模型名与提示词。
+
+    这些任务还不在 history 里，_decorate_job 拿不到提示词，队列页就只剩兜底标题
+    （每张卡片都一样）。这里用队列快照补字段，不碰 gallery/preview——
+    队列卡片只显示图标，历史那套缩略图装饰在这里没有意义。
+    """
+    decorated = _decorate_job(job, history_item)
+    if isinstance(history_item, dict) or not isinstance(snapshot, dict):
+        return decorated
+    model_name = _history_model_name(snapshot)
+    if model_name:
+        decorated["model_name"] = model_name
+    prompt = _entry_positive_prompt(snapshot)
+    if prompt:
+        decorated["positive_prompt"] = prompt
+    extra_data = _entry_extra(snapshot)
+    remote = extra_data.get("mobile_remote") if isinstance(extra_data, dict) else None
+    if isinstance(remote, dict) and remote.get("workflow_name"):
+        decorated["workflow_name"] = str(remote["workflow_name"])
+    return decorated
+
+
 def _compact_json(value: Any, max_length: int = 4000) -> Any:
     if isinstance(value, str):
         return value if len(value) <= max_length else value[:max_length]
@@ -2293,7 +2320,11 @@ def _mobile_job_summary(job: dict[str, Any]) -> dict[str, Any]:
         "gallery",
         "favorite_extra",
     )
-    return {field: job[field] for field in fields if field in job}
+    summary = {field: job[field] for field in fields if field in job}
+    # 队列页要显示提示词；历史页不显示，别把几百条提示词塞进列表响应。
+    if str(job.get("status") or "") in {"pending", "in_progress"} and job.get("positive_prompt"):
+        summary["positive_prompt"] = job["positive_prompt"]
+    return summary
 
 
 def _history_cache_items() -> list[tuple[str, dict[str, Any]]]:
@@ -2382,6 +2413,11 @@ def _get_mobile_jobs_payload(
 
     running, pending, history = _queue_snapshot()
     _sync_history_from_live(maintenance=False)
+    # 队列里的任务不在 history 里：先把快照按 prompt_id 存下来，给它们补提示词与模型名。
+    live_prompts: dict[str, dict[str, Any]] = {}
+    for item in list(running) + list(pending):
+        if isinstance(item, (list, tuple)) and len(item) > 3 and isinstance(item[1], str):
+            live_prompts[item[1]] = {"prompt": list(item)}
     # limit=None：先拿全量轻量 job，切片留到最后。否则 total 只是实时任务数，
     # offset 也永远落不到恢复出来的历史条目上。
     live_jobs, _live_total = get_all_jobs(
@@ -2448,7 +2484,9 @@ def _get_mobile_jobs_payload(
     jobs_out: list[dict[str, Any]] = []
     for entry in page:
         if entry["kind"] == "live":
-            jobs_out.append(_decorate_job(entry["job"], history.get(entry["id"])))
+            jobs_out.append(_decorate_queue_job(
+                entry["job"], history.get(entry["id"]), live_prompts.get(entry["id"]),
+            ))
         elif entry["kind"] == "restored":
             jobs_out.append(_decorate_job(_persisted_job(entry["id"], entry["entry"]), entry["entry"]))
         else:

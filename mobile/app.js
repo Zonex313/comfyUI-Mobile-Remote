@@ -1855,16 +1855,43 @@
     }
   }
 
+  // 队列任务基本都是今天的：时间只显示时分，把宽度留给模型名和提示词。
+  function queueTimeLabel(value) {
+    const timestamp = Number(value || 0);
+    if (!timestamp) return "";
+    const date = new Date(timestamp);
+    const now = new Date();
+    const sameDay = date.getFullYear() === now.getFullYear()
+      && date.getMonth() === now.getMonth()
+      && date.getDate() === now.getDate();
+    return sameDay ? localeTime(date) : localeDateTime(date);
+  }
+
+  // 队列卡片第一行显示模型名（只取文件名），拿不到再退回工作流名。
+  function queueModelName(job) {
+    const raw = String(job.model_name || "").trim();
+    return raw ? raw.split(/[/\\]/).pop() : "";
+  }
+
   function updateQueueCard(card, job) {
     card.dataset.jobId = String(job.id);
     card.className = `job-card is-${job.status}`;
     const thumb = card.querySelector(".job-thumb");
-    const title = card.querySelector(".job-copy strong");
-    const time = card.querySelector(".job-copy > span");
+    const model = card.querySelector(".job-model");
+    const prompt = card.querySelector(".job-prompt");
+    const time = card.querySelector(".job-time");
     const status = card.querySelector(".job-status");
     if (thumb) thumb.innerHTML = job.status === "in_progress" ? ICONS.image : ICONS.queue;
-    if (title) title.textContent = job.workflow_name || t("电脑端任务");
-    if (time) time.textContent = formatTime(job.create_time);
+    const modelName = queueModelName(job);
+    if (model) model.textContent = modelName || job.workflow_name || t("电脑端任务");
+    if (prompt) {
+      // 第二行是提示词；提示词为空时退回工作流名，两行都放不下就用省略号。
+      const text = String(job.positive_prompt || "").trim()
+        || (modelName ? String(job.workflow_name || "").trim() : "");
+      prompt.textContent = text;
+      prompt.hidden = !text;
+    }
+    if (time) time.textContent = queueTimeLabel(job.create_time);
     if (status) {
       status.className = `job-status ${job.status}`;
       status.textContent = jobStatusLabel(job.status);
@@ -1889,16 +1916,24 @@
     thumb.className = "job-thumb";
     const copy = document.createElement("div");
     copy.className = "job-copy";
-    const title = document.createElement("strong");
+    // 第一行：模型名（占满整行）；第二行：提示词 + 时间。两行都是单行省略号。
+    const model = document.createElement("strong");
+    model.className = "job-model";
+    const sub = document.createElement("div");
+    sub.className = "job-sub";
+    const prompt = document.createElement("span");
+    prompt.className = "job-prompt";
     const time = document.createElement("span");
-    copy.append(title, time);
+    time.className = "job-time";
+    sub.append(prompt, time);
+    copy.append(model, sub);
     const actions = document.createElement("div");
     actions.className = "job-actions";
     const status = document.createElement("span");
     status.className = "job-status";
     const cancel = document.createElement("button");
     cancel.type = "button";
-    cancel.className = "icon-button";
+    cancel.className = "icon-button job-cancel";
     cancel.setAttribute("aria-label", t("停止任务"));
     cancel.title = t("停止任务");
     cancel.innerHTML = ICONS.stop;
@@ -3391,6 +3426,8 @@
           create_time: Date.now(),
           workflow_id: workflowId,
           workflow_name: String(body.workflow_name || t("手机工作流")),
+          model_name: state.modelField ? String(payload.values[state.modelField.id] ?? "") : "",
+          positive_prompt: state.presetField ? String(payload.values[state.presetField.id] ?? "") : "",
           outputs_count: 0,
           previewable_outputs_count: 0,
           gallery: [],
