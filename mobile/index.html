@@ -11,13 +11,13 @@
   <title>Comfy Remote</title>
   <link rel="manifest" href="/mobile/manifest.webmanifest">
   <link rel="icon" href="/mobile/assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202610128">
-  <script type="module" src="/mobile/assets/i18n.js?v=202610128"></script>
-  <script src="/mobile/assets/preset-catalog.js?v=202610128" defer></script>
-  <script src="/mobile/assets/preset-engine.js?v=202610128" defer></script>
-  <script src="/mobile/assets/settings-sync.js?v=202610128" defer></script>
-  <script src="/mobile/assets/progress-sync.js?v=202610128" defer></script>
-  <script src="/mobile/assets/app.js?v=202610128" defer></script>
+  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202610130">
+  <script type="module" src="/mobile/assets/i18n.js?v=202610130"></script>
+  <script src="/mobile/assets/preset-catalog.js?v=202610130" defer></script>
+  <script src="/mobile/assets/preset-engine.js?v=202610130" defer></script>
+  <script src="/mobile/assets/settings-sync.js?v=202610130" defer></script>
+  <script src="/mobile/assets/progress-sync.js?v=202610130" defer></script>
+  <script src="/mobile/assets/app.js?v=202610130" defer></script>
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -168,6 +168,11 @@
         <div class="settings-list">
           <p class="settings-hint" data-i18n="工作流处于打开状态才可以被手机读取">工作流处于打开状态才可以被手机读取</p>
           <div class="settings-row">
+            <span data-i18n="手机工作流副本">手机工作流副本</span>
+            <button id="workflowHelpButton" type="button" class="icon-button" aria-label="工作流关系说明" data-i18n-aria-label="工作流关系说明">ⓘ</button>
+          </div>
+          <button id="resetWorkflowButton" class="secondary-button full" type="button" data-i18n="重新同步电脑工作流">重新同步电脑工作流</button>
+          <div class="settings-row">
             <span data-i18n="手机设置同步">手机设置同步</span>
             <strong id="settingsSyncDetail">读取设置</strong>
           </div>
@@ -242,6 +247,18 @@
       </button>
     </nav>
   </div>
+
+  <dialog id="workflowHelpDialog" class="sheet-dialog workflow-help-dialog" aria-labelledby="workflowHelpTitle">
+    <div class="dialog-head">
+      <h2 id="workflowHelpTitle" data-i18n="手机与电脑的工作流">手机与电脑的工作流</h2>
+      <button id="closeWorkflowHelpButton" type="button" class="icon-button" aria-label="关闭" data-i18n-aria-label="关闭">×</button>
+    </div>
+    <p data-i18n="电脑工作流提供初始副本。手机生成页和高级页共用这一份手机设置，修改参数、启用或绕过节点都不会改变电脑画布。">电脑工作流提供初始副本。手机生成页和高级页共用这一份手机设置，修改参数、启用或绕过节点都不会改变电脑画布。</p>
+    <p data-i18n="电脑后续的修改不会自动覆盖手机副本。重新同步会读取电脑当前工作流，并清除当前工作流在手机上的参数修改、启用或绕过状态、折叠、隐藏和书签设置。">电脑后续的修改不会自动覆盖手机副本。重新同步会读取电脑当前工作流，并清除当前工作流在手机上的参数修改、启用或绕过状态、折叠、隐藏和书签设置。</p>
+    <p data-i18n="请先在电脑端打开对应的工作流。重置仅影响当前工作流的手机副本，不会删除生成历史、收藏或标签目录。">请先在电脑端打开对应的工作流。重置仅影响当前工作流的手机副本，不会删除生成历史、收藏或标签目录。</p>
+    <p id="workflowResetTarget" class="settings-hint"></p>
+    <button id="confirmWorkflowResetButton" class="secondary-button full" type="button" data-i18n="确认覆盖手机副本">确认覆盖手机副本</button>
+  </dialog>
 
   <dialog id="jobDialog" class="sheet-dialog">
     <div class="sheet-handle"></div>

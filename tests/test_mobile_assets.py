@@ -46,17 +46,20 @@ class MobileAssetTests(unittest.TestCase):
         compiled = _re.compile(pattern)
         missing = [name for name in sorted(set(server._MOBILE_ASSET_FILES)) if not compiled.search("/mobile/assets/" + name)]
         self.assertEqual(missing, [], f"这些资源过不了公网隧道白名单：{missing}")
+        self.assertTrue(compiled.match("/api/object_info"))
 
     def test_desktop_command_route_is_tunnel_safe(self):
-        """手机改节点设置要能过公网隧道，但确认接口(ack)绝不能暴露。"""
+        """手机只编辑本地副本，桌面指令和确认接口都不暴露。"""
         import re as _re
         text = (ROOT / "connections.py").read_text(encoding="utf-8")
         match = _re.search(r"POST_PATHS = \((.*?)\n\)", text, _re.S)
         self.assertIsNotNone(match, "connections.py 里找不到 POST_PATHS")
         pattern = "|".join(_re.findall(r'"(.*?)"', match.group(1)))
         compiled = _re.compile(pattern)
-        self.assertTrue(compiled.match("/mobile/api/desktop/commands"), "桌面指令接口没放行，隧道用户改不动节点")
+        self.assertFalse(compiled.match("/mobile/api/desktop/commands"), "手机端不应再暴露电脑画布写入接口")
         self.assertFalse(compiled.match("/mobile/api/desktop/commands/ack"), "ack 接口被暴露到公网了")
+        self.assertTrue(compiled.match("/mobile/api/workflows/" + "a" * 20 + "/refresh"))
+        self.assertFalse(compiled.match("/mobile/api/workflows/not-a-workflow/refresh"))
 
     def test_advanced_page_assets_are_served(self):
         # 「高级」页依赖这两个文件，漏一个就是整页空白

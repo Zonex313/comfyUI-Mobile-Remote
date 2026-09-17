@@ -612,6 +612,30 @@ def _list_records(include_hidden: bool = False) -> list[dict[str, Any]]:
     return records
 
 
+PHONE_SNAPSHOT_ROOT = PLUGIN_ROOT / ".runtime" / "phone_snapshots"
+_PHONE_SNAPSHOT_LOCK = threading.RLock()
+
+
+def _phone_source_record(workflow_id: str, snapshot: str = "") -> tuple[dict[str, Any], str]:
+    """Immutable source for a phone draft; ordinary desktop sync never replaces it."""
+    _record_path(workflow_id)  # validate identity before constructing any path
+    if snapshot and (not isinstance(snapshot, str) or re.fullmatch(r"[a-f0-9]{64}", snapshot) is None):
+        raise ValueError("Invalid phone workflow snapshot")
+    with _PHONE_SNAPSHOT_LOCK:
+        if snapshot:
+            record = _read_json(PHONE_SNAPSHOT_ROOT / workflow_id / (snapshot + ".json"))
+            if not isinstance(record, dict) or record.get("id") != workflow_id:
+                raise ValueError("Invalid phone workflow snapshot")
+            return record, snapshot
+        record = _load_record(workflow_id)
+        content = {key: record.get(key) for key in ("id", "name", "source", "prompt", "workflow")}
+        token = hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+        path = PHONE_SNAPSHOT_ROOT / workflow_id / (token + ".json")
+        if not path.exists():
+            _write_json_atomic(path, record)
+        return copy.deepcopy(record), token
+
+
 def _existing_record(workflow_id: str) -> dict[str, Any]:
     """读旧记录，用于覆盖时保留人工标记；读不到就当空记录。"""
     try:
@@ -3330,6 +3354,7 @@ def register_routes() -> None:
     from .progress_snapshot import ProgressSnapshotUnavailable, snapshot_progress
 
     routes = PromptServer.instance.routes
+    source_refreshes: dict[str, tuple[str, asyncio.Future]] = {}
     _install_locale_middleware(PromptServer.instance)
 
     @routes.get("/mobile")
@@ -3555,43 +3580,18 @@ def register_routes() -> None:
         return web.json_response({"ok": True, "sources": sources})
 
     @routes.post("/mobile/api/desktop/commands")
-    async def mobile_submit_desktop_command(request: web.Request) -> web.Response:
-        """手机端「高级」页改了值：排一条指令，等电脑端在它自己的画布上照做。
-
-        服务端只负责排队和校验，绝不自己去碰画布；真正的应用永远发生在用户自己那台电脑上。
-        """
-        try:
-            payload = await request.json()
-        except (json.JSONDecodeError, web.HTTPBadRequest):
-            payload = None
-        command, error, status, reason = _desktop_command_submit(payload)
-        if command is None:
-            return _json_error(error, status, {"reason": reason})
-        LOG.info(
-            "[Mobile Remote] desktop command queued: node %s %s",
-            command["node_id"], command["input"],
-        )
-        return web.json_response({"ok": True, "pending": _desktop_commands_count()}, headers=NO_CACHE)
+    async def mobile_submit_desktop_command(_request: web.Request) -> web.Response:
+        # Old cached phone pages must never enqueue changes to the desktop.
+        return _json_error("手机工作流已独立，请刷新页面后继续。", 410)
 
     @routes.get("/mobile/api/desktop/commands")
-    async def mobile_pending_desktop_commands(request: web.Request) -> web.Response:
-        """电脑端扩展领取待办（约 1 秒一次）。返回未执行的指令，领了不删。"""
-        body, error = _desktop_commands_pending_payload(request.query.get("workflow_id", ""))
-        if body is None:
-            return _json_error(error)
-        return web.json_response(body, headers=NO_CACHE)
+    async def mobile_pending_desktop_commands(_request: web.Request) -> web.Response:
+        # Do not drain persisted commands: even an old desktop tab receives none.
+        return web.json_response({"ok": True, "commands": []}, headers=NO_CACHE)
 
     @routes.post("/mobile/api/desktop/commands/ack")
-    async def mobile_ack_desktop_commands(request: web.Request) -> web.Response:
-        """电脑端确认这些指令已经落到画布上（或确认画布上找不到对应节点），可以删了。"""
-        try:
-            payload = await request.json()
-        except (json.JSONDecodeError, web.HTTPBadRequest):
-            payload = None
-        body, error = _desktop_commands_ack_payload(payload)
-        if body is None:
-            return _json_error(error)
-        return web.json_response(body, headers=NO_CACHE)
+    async def mobile_ack_desktop_commands(_request: web.Request) -> web.Response:
+        return web.json_response({"ok": True, "removed": 0}, headers=NO_CACHE)
 
     @routes.post("/mobile/api/workflows/sync")
     async def mobile_sync_workflow(request: web.Request) -> web.Response:
@@ -3620,6 +3620,9 @@ def register_routes() -> None:
             LOG.exception("[Mobile Remote] failed to store workflow")
             return _json_error("保存工作流失败", 500, str(exc))
         _remember_open_source(record["source"])
+        pending = source_refreshes.get(str(payload.get("refresh_request_id", "")))
+        if pending and pending[0] == record["id"] and not pending[1].done():
+            pending[1].set_result(copy.deepcopy(record))
         fields = _infer_fields(record["prompt"])
         return web.json_response(
             {
@@ -3634,6 +3637,31 @@ def register_routes() -> None:
             },
             headers=NO_CACHE,
         )
+
+    @routes.post("/mobile/api/workflows/{workflow_id}/refresh")
+    async def mobile_refresh_source(request: web.Request) -> web.Response:
+        workflow_id = request.match_info["workflow_id"]
+        try:
+            record = _load_record(workflow_id)
+        except (ValueError, FileNotFoundError):
+            return _json_error("工作流不存在", 404)
+        if len(source_refreshes) >= 8:
+            return _json_error("正在同步，请稍后重试。", 429)
+        request_id = uuid.uuid4().hex
+        future = asyncio.get_running_loop().create_future()
+        source_refreshes[request_id] = (workflow_id, future)
+        try:
+            PromptServer.instance.send_sync("mtr_refresh_source", {"source": record.get("source"), "request_id": request_id})
+            refreshed = await asyncio.wait_for(future, timeout=12)
+            # Persist the exact acknowledged source, not another tab's later sync.
+            content = {key: refreshed.get(key) for key in ("id", "name", "source", "prompt", "workflow")}
+            snapshot = hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+            await asyncio.to_thread(_write_json_atomic, PHONE_SNAPSHOT_ROOT / workflow_id / (snapshot + ".json"), refreshed)
+            return web.json_response({"ok": True, "snapshot": snapshot}, headers=NO_CACHE)
+        except asyncio.TimeoutError:
+            return _json_error("未收到电脑工作流，请在电脑端打开对应工作流并刷新页面后重试。手机副本未改变。", 409)
+        finally:
+            source_refreshes.pop(request_id, None)
 
     @routes.post("/mobile/api/workflows/import")
     async def mobile_import_workflow(request: web.Request) -> web.Response:
@@ -3713,7 +3741,7 @@ def register_routes() -> None:
     async def mobile_workflow_detail(request: web.Request) -> web.Response:
         workflow_id = request.match_info["workflow_id"]
         try:
-            record = _load_record(workflow_id)
+            record, snapshot = await asyncio.to_thread(_phone_source_record, workflow_id, request.query.get("snapshot", ""))
         except ValueError:
             return _json_error("工作流编号无效")
         except FileNotFoundError:
@@ -3738,6 +3766,8 @@ def register_routes() -> None:
                     "synced_at": record.get("synced_at", 0),
                     "node_count": len(prompt) if isinstance(prompt, dict) else 0,
                     "fields": fields,
+                    "snapshot": snapshot,
+                    "native_workflow": record.get("workflow", {}),
                     "node_titles": node_titles,
                     # 「高级」页用：节点顺序、分组、连线关系
                     "graph": _workflow_graph(prompt, record.get("workflow"), fields),
@@ -3826,16 +3856,21 @@ def register_routes() -> None:
         if not isinstance(preset, dict):
             preset = None
         try:
-            record = _load_record(workflow_id)
+            record, _snapshot = await asyncio.to_thread(_phone_source_record, workflow_id, payload.get("snapshot", ""))
         except ValueError:
-            return _json_error("工作流编号无效")
+            return _json_error("手机工作流副本无效，请在设置中重新同步。", 409)
         except FileNotFoundError:
-            return _json_error("工作流不存在", 404)
+            return _json_error("手机工作流副本已丢失，请在设置中重新同步。", 409)
 
-        prompt = copy.deepcopy(record.get("prompt", {}))
+        from .local_workflow import prepare_local_prompt, apply_named_values_to_native
+        try:
+            prompt, mobile_workflow = await asyncio.to_thread(prepare_local_prompt, record, payload.get("node_modes", {}), payload.get("widget_values", {}), input_specs=_read_input_specs)
+        except (ValueError, TypeError) as exc:
+            return _json_error(str(exc), 400)
         fields = _infer_fields(prompt)
         field_map = {field["id"]: field for field in fields}
         submitted: dict[str, Any] = {}
+        next_seed_values: dict[str, Any] = {}
         try:
             for field_id, incoming in values.items():
                 key = str(field_id)
@@ -3851,13 +3886,40 @@ def register_routes() -> None:
                 applied, converted = _apply_submitted_input(prompt, key, incoming)
                 if applied:
                     submitted[key] = converted
+            seed_modes = payload.get("seed_modes", {})
+            if not isinstance(seed_modes, dict) or len(seed_modes) > 2048:
+                raise ValueError("Invalid phone seed modes")
+            for key, mode in seed_modes.items():
+                parsed = _split_submit_key(key)
+                if not parsed or mode not in ("fixed", "randomize", "increment", "decrement"):
+                    raise ValueError("Invalid phone seed mode")
+                node_id, name = parsed
+                if not (name == "seed" or name.endswith("_seed")):
+                    raise ValueError("Invalid seed input")
+                node = prompt.get(node_id)
+                if node is None:  # A deliberately bypassed seed node does not execute.
+                    continue
+                current = node.get("inputs", {}).get(name)
+                if isinstance(current, list) or type(current) not in (int, float):
+                    raise ValueError("Seed mode requires an editable numeric seed")
+                spec = (_input_specs(node.get("class_type", "")) or {}).get(name, {})
+                config = spec.get("config", {})
+                low = max(0, int(config.get("min", 0)))
+                high = min(2**53 - 1, int(config.get("max", 2**53 - 1)))
+                if mode == "randomize":
+                    current = random.randint(low, high)
+                    node["inputs"][name] = current
+                submitted[key] = current
+                if mode in ("increment", "decrement"):
+                    next_seed_values[key] = max(low, min(high, int(current) + (1 if mode == "increment" else -1)))
         except (TypeError, ValueError) as exc:
             return _json_error(str(exc))
 
+        mobile_workflow = await asyncio.to_thread(apply_named_values_to_native, mobile_workflow, submitted, input_specs=_read_input_specs)
         result, error = await _enqueue_prompt(
             prompt=prompt,
             client_id=client_id,
-            workflow=record.get("workflow", {}),
+            workflow=mobile_workflow,
             workflow_id=workflow_id,
             workflow_name=str(record.get("name", "手机工作流")),
             submitted_values=submitted,
@@ -3865,6 +3927,7 @@ def register_routes() -> None:
         )
         if error is not None:
             return _json_error("ComfyUI 拒绝了这个工作流", 400, error)
+        result["next_seed_values"] = next_seed_values
         return web.json_response(result, headers=NO_CACHE)
 
     @routes.get("/mobile/api/jobs")

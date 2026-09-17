@@ -40,17 +40,14 @@ export function GraphContainerPlaceholder({
     >
       <button
         type="button"
-        onClick={onClick}
+        disabled
         className="w-full rounded-lg border-2 border-dashed bg-slate-950/40 flex flex-col items-center justify-center py-4 hover:bg-slate-900/70 transition-colors"
         style={{ borderColor: hexToRgba(color, 0.4) }}
       >
         <span className="text-sm text-slate-400 select-none">
           {resolveEmptyLabel()}
         </span>
-        <span className="text-xs text-slate-500 select-none mt-1 inline-flex items-center gap-1">
-          <PlusIcon className="w-3 h-3" />
-          {t('Click to add a node')}
-        </span>
+
       </button>
     </div>
   );

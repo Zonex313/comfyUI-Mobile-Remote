@@ -1,3 +1,4 @@
+import { phoneWidgetActions } from '@/hooks/phonePanelPolicy';
 import { useCallback, useMemo, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { ContextMenuButton } from '@/components/buttons/ContextMenuButton';
@@ -166,7 +167,7 @@ export function RowActionsMenu({
       result.push({ type: 'divider', key: 'row-type-divider' });
     }
     for (const sectionName of SECTION_ORDER) {
-      const visible = sections[sectionName].filter((item) => !item.hidden);
+      const visible = sections[sectionName].filter((item) => !item.hidden && phoneWidgetActions.has(item.key));
       if (visible.length === 0) continue;
       if (result.length > 0 && sectionName !== SECTION_ORDER[0]) {
         result.push({ type: 'divider', key: `widget-menu-${sectionName}` });

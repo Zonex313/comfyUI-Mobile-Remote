@@ -1,3 +1,4 @@
+import { phoneToolbarActions } from '@/hooks/phonePanelPolicy';
 import type { RefObject } from 'react';
 import { useCallback, useMemo, useState } from 'react';
 import { useWorkflowStore, getInputWidgetDefinitions, getWidgetDefinitions } from '@/hooks/useWorkflow';
@@ -474,7 +475,7 @@ export function WorkflowTopBarMenu({
                 onClick: handleRedoClick,
                 hidden: !canRedo
               }
-            ]}
+            ].filter(item => phoneToolbarActions.has(item.key))}
           />
         </div>
       )}

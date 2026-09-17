@@ -1,3 +1,4 @@
+import { phoneBlockedActions } from './phonePanelPolicy';
 import {create} from "zustand";
 import {persist} from "zustand/middleware";
 import {createThrottledPersistStorage} from "@/utils/idbStorage";
@@ -348,7 +349,9 @@ export const useWorkflowStore = create<WorkflowState>()(
       name: "workflow-storage",
       // IndexedDB-backed: the persisted payload (every open session's workflow,
       // layout, and node outputs) can exceed localStorage's quota.
-      storage: createThrottledPersistStorage(),
+      // Embedded panel receives authoritative phone snapshots from its host.
+      skipHydration: true,
+      storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
       partialize: (state) => ({
         // Active session lives in the flat fields; other open sessions are in
         // parkedSessions (which by invariant never contains the active id).
@@ -482,3 +485,6 @@ export const useWorkflowStore = create<WorkflowState>()(
     },
   ),
 );
+
+const phoneNoMutation = () => null;
+useWorkflowStore.setState(Object.fromEntries(phoneBlockedActions.map(name => [name, phoneNoMutation])) as never);

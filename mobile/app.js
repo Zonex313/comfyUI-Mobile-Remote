@@ -27,6 +27,7 @@
     workflows: [],
     workflow: null,
     values: {},
+    mobileDraft: { snapshot: "", node_modes: {}, widget_values: {}, seed_modes: {}, view: {} },
     jobs: [],
     totalJobs: 0,
     jobsFirstPage: [],
@@ -230,122 +231,106 @@
     if (target === "history") loadJobs().catch(() => {});
   }
 
-  // 「高级」页 = 参考项目（comfyui-mobile-frontend, MIT）那套工作流面板的真实组件，
-  // 编译产物在 mobile/panel.js（源码 mobile/panel/src，npm run build 生成）。
-  // 面板自己负责取数据（/mobile/api/panel/workflow/<id> + /api/object_info）与回写
-  // 桌面指令，这里只负责在切到高级页时把它挂进 #view-advanced，并跟随工作流切换。
-  // 面板跑在 iframe 里（mobile/panel.html）：参考项目那套界面是"占满整页"的 App，
-  // 关进自己的文档后，它的整站样式与手机页互不影响，UI/交互才能保持原样。
+  // Reference UI edits a phone-only draft. All messages are scoped to one
+  // immutable source and one load generation, including delayed responses.
   let panelFrame = null;
   let panelWorkflowId = "";
-  // 高级页改过值 → 切回生成页时按最新值重绘控件，避免两边显示不一致。
+  let panelEpoch = 0;
   let advancedEdited = false;
+  let workflowLoading = false;
+  let resettingWorkflow = false;
+  const panelFlushes = new Map();
 
-  function panelUrl(workflowId, locale) {
-    const params = new URLSearchParams();
-    if (workflowId) params.set("workflow", String(workflowId));
-    if (locale) params.set("locale", String(locale));
-    return `/mobile/assets/panel.html?v=${encodeURIComponent(uiVersion())}&${params.toString()}`;
+  function panelIdentity() {
+    return { workflowId: String(state.workflow?.id || ""), snapshot: state.mobileDraft.snapshot || "", epoch: panelEpoch };
   }
 
-  // ---- 「生成页」与「高级」的参数互通 --------------------------------------
-  // 高级面板跑在 iframe 里，有自己的 store，两边没法共用内存对象，所以用消息对齐：
-  //   面板改的值 → 写进手机草稿（回生成页点「生成」用的就是它）；
-  //   生成页改的值 → 推给面板显示。
-  // 只对齐「值」；旁路/隐藏/改名/颜色这类节点状态仍然只走面板 → 电脑端那条线。
-  const PANEL_PUSH_THROTTLE_MS = 300;
-  let panelPushTimer = 0;
-  let panelPendingValues = new Map();
-
-  // 值键就是 "<节点>::<输入名>"，和提交路径、服务端 graph.inputs 同一套形状。
-  function panelValueKeys() {
-    const out = {};
-    for (const [key, value] of Object.entries(state.values || {})) {
-      if (/^[A-Za-z0-9_.\-]+::.+/.test(key)) out[key] = value;
-    }
-    return out;
+  function sendToPanel(action, value, extra = {}) {
+    panelFrame?.contentWindow?.postMessage({ type: "mtr-panel", action, value, ...panelIdentity(), ...extra }, location.origin);
   }
 
-  function pushValueToPanel(key, value) {
-    if (!panelFrame || !key) return;
-    panelPendingValues.set(String(key), value);
-    if (panelPushTimer) return;
-    panelPushTimer = window.setTimeout(() => {
-      panelPushTimer = 0;
-      const payload = {};
-      for (const [item, val] of panelPendingValues) payload[item] = val;
-      panelPendingValues = new Map();
-      sendToPanel("values", payload);
-    }, PANEL_PUSH_THROTTLE_MS);
-  }
-
+  function panelValueKeys() { return { ...state.values }; }
+  function pushValueToPanel() { pushAllValuesToPanel(); }
   function pushAllValuesToPanel() {
-    if (!panelFrame) return;
-    sendToPanel("values", panelValueKeys());
+    if (!workflowLoading) sendToPanel("values", { values: panelValueKeys(), seed_modes: state.mobileDraft.seed_modes || {} });
   }
 
-  // 面板改的值写进手机这份：草稿一存，切回生成页重绘就用的是它，点「生成」自然带上。
   function applyPanelValue(nodeId, input, value) {
-    const id = String(nodeId ?? "");
-    const name = String(input ?? "");
-    if (!id || !name) return;
-    const key = id + "::" + name;
+    const key = String(nodeId) + "::" + String(input);
+    if (!String(input) || ["__proto__", "prototype", "constructor"].includes(String(input))) return;
+    if (value !== null && typeof value === "object") return;
     state.values[key] = value;
-    const fields = state.workflow?.fields || [];
-    const field = fields.find((item) => item.id === key)
-      || fields.find((item) => String(item.node_id) === id && String(item.input) === name);
-    if (field && value !== null && typeof value !== "object") {
-      const control = state.fieldControls.get(field.id);
-      if (control && "value" in control) control.value = String(value);
-      if (field.input === "width" || field.input === "height") syncSizePresetSelection();
+    if (state.presetField?.id === key) {
+      // Editing the actual prompt explicitly leaves tag composition mode.
+      state.presetEnabled = false;
+      state.mobileDraft.manual_prompt = true;
+      state.presetState.freeText = String(value ?? "");
+      savePresetState();
+      applyPresetMode();
     }
+    advancedEdited = true;
+  }
+
+  function onPanelMessage(event) {
+    if (!panelFrame || event.source !== panelFrame.contentWindow || event.origin !== location.origin) return;
+    const data = event.data;
+    if (!data || data.type !== "mtr-panel") return;
+    if (data.action === "ready") { syncPanelWorkflow(true); return; }
+    const identity = panelIdentity();
+    if (workflowLoading || resettingWorkflow || data.workflowId !== identity.workflowId || data.snapshot !== identity.snapshot || data.epoch !== identity.epoch) return;
+    if (data.action === "error") { toast(data.reason === "unsupported-edit" ? t("此修改涉及子图内部或连接结构，已撤销。请在电脑端修改后重新同步。") : String(data.message || t("高级面板加载失败，请刷新重试。")), "error"); return; }
+    if (data.action === "flushed") {
+      const resolve = panelFlushes.get(data.requestId);
+      if (resolve) { panelFlushes.delete(data.requestId); resolve(); }
+      return;
+    }
+    if (data.action !== "edit") return;
+    const changes = data.value || {};
+    for (const [key, value] of Object.entries(changes.values || {})) {
+      const split = key.lastIndexOf("::");
+      if (split > 0) applyPanelValue(key.slice(0, split), key.slice(split + 2), value);
+    }
+    if (changes.node_modes) Object.assign(state.mobileDraft.node_modes, changes.node_modes);
+    if (changes.widget_values) Object.assign(state.mobileDraft.widget_values, changes.widget_values);
+    if (changes.seed_modes) Object.assign(state.mobileDraft.seed_modes, changes.seed_modes);
+    if (changes.view) state.mobileDraft.view = changes.view;
     advancedEdited = true;
     saveDraft();
   }
 
-  function onPanelMessage(event) {
-    if (!panelFrame || event.source !== panelFrame.contentWindow) return;
-    const data = event.data;
-    if (!data || data.type !== "mtr-panel") return;
-    if (data.action === "ready") {
-      // 面板挂好（或刚重新载入工作流）：把手机这份值整批推过去。
-      pushAllValuesToPanel();
-      return;
-    }
-    if (data.action === "value") applyPanelValue(data.nodeId, data.input, data.value);
-  }
-
-  function sendToPanel(action, value) {
-    const frame = panelFrame;
-    if (!frame || !frame.contentWindow) return;
-    try {
-      frame.contentWindow.postMessage({ type: "mtr-panel", action, value }, "*");
-    } catch (error) {
-      console.debug("[Mobile Remote] 通知面板失败", error);
-    }
+  function flushPanel() {
+    if (!panelFrame || !Array.isArray(state.workflow?.native_workflow?.nodes) || panelWorkflowId !== state.workflow?.id) return Promise.resolve();
+    const requestId = String(Date.now()) + Math.random();
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => { panelFlushes.delete(requestId); reject(new Error(t("高级面板尚未就绪，请稍后重试。"))); }, 5000);
+      panelFlushes.set(requestId, () => { window.clearTimeout(timer); resolve(); });
+      sendToPanel("flush", null, { requestId });
+    });
   }
 
   function setupAdvancedPage() {
     const host = $("view-advanced");
     if (!host || panelFrame) return panelFrame;
-    panelWorkflowId = String(state.workflow?.id || "");
     const frame = document.createElement("iframe");
     frame.className = "panel-frame";
     frame.title = t("高级");
     frame.setAttribute("allow", "clipboard-write");
-    frame.src = panelUrl(panelWorkflowId, currentLocaleId());
+    frame.src = "/mobile/assets/panel.html?v=" + encodeURIComponent(uiVersion()) + "&locale=" + encodeURIComponent(currentLocaleId());
     host.replaceChildren(frame);
     panelFrame = frame;
     return frame;
   }
 
-  // 工作流换了就告诉面板重新取数据（首次打开时 iframe 的地址里已经带了）。 
-  function syncPanelWorkflow() {
+  function syncPanelWorkflow(force = false) {
     const id = String(state.workflow?.id || "");
-    if (!panelFrame || !id || id === panelWorkflowId) return;
+    if (!panelFrame || workflowLoading || (!force && id === panelWorkflowId)) return;
     panelWorkflowId = id;
-    sendToPanel("workflow", id);
+    sendToPanel("workflow", {
+      name: state.workflow?.name || "", workflow: state.workflow?.native_workflow || null,
+      values: panelValueKeys(), ...state.mobileDraft,
+    });
   }
+
 
   // 面板跟随手机页当前语言（本插件自己那套 locale id）。
   function currentLocaleId() {
@@ -355,6 +340,53 @@
     } catch (error) {
       return "";
     }
+  }
+
+  let resetTarget = "";
+  function openWorkflowHelp(reset = false) {
+    resetTarget = String($("workflowSelect")?.value || state.workflow?.id || "");
+    const target = state.workflows.find(item => item.id === resetTarget) || state.workflow;
+    setText("workflowResetTarget", resetTarget ? t("当前工作流：{name}", {name:target?.name || resetTarget}) : t("请先选择工作流"));
+    $("confirmWorkflowResetButton").hidden = !reset;
+    $("confirmWorkflowResetButton").classList.toggle("hidden", !reset);
+    $("confirmWorkflowResetButton").disabled = !resetTarget || submittingBatch || workflowLoading;
+    $("workflowHelpDialog").showModal();
+  }
+
+  async function resetPhoneWorkflow() {
+    const id = resetTarget;
+    if (!id || id !== String($("workflowSelect")?.value || state.workflow?.id || "") || submittingBatch || workflowLoading || resettingWorkflow) return;
+    resettingWorkflow = true;
+    const button = $("confirmWorkflowResetButton");
+    button.disabled = true;
+    try {
+      const refreshed = await requestJson("/mobile/api/workflows/" + encodeURIComponent(id) + "/refresh", {method:"POST"});
+      const body = await requestJson("/mobile/api/workflows/" + encodeURIComponent(id) + "?snapshot=" + encodeURIComponent(refreshed.snapshot));
+      if (String($("workflowSelect")?.value || state.workflow?.id || "") !== id) return;
+      panelEpoch += 1;
+      state.workflowLoadToken += 1;
+      sendToPanel("clear", null);
+      // Commit only after a fresh, complete source has arrived successfully.
+      phoneSettings.setItem(draftKey(id), JSON.stringify({__mobile:{snapshot:body.workflow.snapshot}}));
+      state.presetEnabled = false;
+      state.multiModelList = [];
+      hydratingSettings += 1;
+      try {
+        state.presetField = null; state.presetTextarea = null; state.presetPanel = null;
+        renderWorkflow(body.workflow, {resetPhoneOptions:true});
+      } finally { hydratingSettings -= 1; }
+      state.mobileDraft.manual_prompt = true;
+      state.presetState.freeText = String(state.values[state.presetField?.id] || "");
+      savePresetState();
+      saveDraft();
+      persistModelTools();
+      syncPanelWorkflow(true);
+      advancedEdited = false;
+      $("workflowHelpDialog").close();
+      toast(t("已用电脑工作流重置手机副本"), "success");
+    } catch (error) {
+      toast(error.message || t("同步失败，手机副本未改变。"), "error");
+    } finally { resettingWorkflow = false; button.disabled = false; }
   }
 
   function bindPanelLocale() {
@@ -405,36 +437,51 @@
 
   function saveDraft() {
     if (hydratingSettings || !state.workflow?.id) return;
-    phoneSettings.setItem(draftKey(state.workflow.id), JSON.stringify(state.values));
+    phoneSettings.setItem(draftKey(state.workflow.id), JSON.stringify({ ...state.values, __mobile: state.mobileDraft }));
     phoneSettings.setItem("comfy-mobile-remote.workflow", state.workflow.id);
   }
 
   function loadDraft(workflow, fields) {
+    state.mobileDraft = { snapshot: workflow.snapshot || "", node_modes: {}, widget_values: {}, seed_modes: {}, view: {} };
     // 生成页字段只是精选参数；高级页还会编辑 graph.inputs 里的其它输入。
     // 先把整张图的可编辑输入放进默认表，再用同一份草稿覆盖，避免切页后丢值。
     const defaults = Object.fromEntries(fields.map((field) => [field.id, field.value]));
+    const sourceSeedModes = {};
+    const seedKeys = new Set(fields.filter(field => /(?:^|_)seed$/.test(field.input)).map(field => field.id));
     const nodes = workflow && workflow.graph && Array.isArray(workflow.graph.nodes)
       ? workflow.graph.nodes
       : [];
     for (const node of nodes) {
       const nodeId = String(node && node.id !== undefined ? node.id : "");
       if (!nodeId || !Array.isArray(node && node.inputs)) continue;
-      for (const input of node.inputs) {
+      for (const [index, input] of node.inputs.entries()) {
+        const previousInput = node.inputs[index - 1];
+        if (input.frontend && input.name === "control_after_generate" && previousInput && !previousInput.link && /(?:^|_)seed$/.test(previousInput.name) && ["fixed", "randomize", "increment", "decrement"].includes(input.value)) {
+          sourceSeedModes[nodeId + "::" + previousInput.name] = input.value;
+        }
         const name = String(input && input.name !== undefined ? input.name : "");
         if (!name || input.link) continue;
         const key = nodeId + "::" + name;
+        if (/(?:^|_)seed$/.test(name)) seedKeys.add(key);
         if (!Object.hasOwn(defaults, key)) defaults[key] = input.value;
       }
     }
     try {
       const saved = JSON.parse(phoneSettings.getItem(draftKey(workflow.id)) || "{}");
       if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+        const raw = saved.__mobile || {};
+        state.mobileDraft = { snapshot: workflow.snapshot || "", node_modes: {}, widget_values: {}, seed_modes: {}, view: {}, ...raw, snapshot: workflow.snapshot || raw.snapshot || "" };
+        if (raw.manual_prompt) state.presetEnabled = false;
         for (const [key, value] of Object.entries(saved)) {
           // 只恢复当前工作流仍存在的键，避免旧工作流残留值污染新图。
-          if (Object.hasOwn(defaults, key)) defaults[key] = value;
+          if (key !== "__mobile" && (Object.hasOwn(defaults, key) || /::/.test(key))) {
+            defaults[key] = value;
+            if (seedKeys.has(key) && !state.mobileDraft.seed_modes[key]) state.mobileDraft.seed_modes[key] = value === "__random__" ? "randomize" : "fixed";
+          }
         }
       }
     } catch { /* Use workflow defaults if a cached draft is unreadable. */ }
+    for (const key of seedKeys) state.mobileDraft.seed_modes[key] ||= sourceSeedModes[key] || (defaults[key] === "__random__" ? "randomize" : "fixed");
     return defaults;
   }
 
@@ -454,77 +501,11 @@
 
   function updateFieldValue(field, value) {
     state.values[field.id] = value;
+    if (field.randomizable || /(?:^|_)seed$/.test(field.input)) state.mobileDraft.seed_modes[field.id] = value === "__random__" ? "randomize" : "fixed";
     saveDraft();
     // 生成页改的值也推给「高级」面板，两边显示保持一致（面板不会因此改电脑画布）。
     pushValueToPanel(field.id, value);
     if (field.input === "width" || field.input === "height") syncSizePresetSelection();
-  }
-
-  // ---- 手机 → 电脑端：把「高级」页的改动送回电脑端画布 --------------------
-  // 手机端拿到的是电脑端同步过来的**快照**：改值只写进 state.values，电脑画布上的节点毫无变化
-  // （自制节点的面板由电脑端自己画，开关不送回去就永远没反应）。所以这里把改动写成一条指令
-  // 发给服务端排队，由电脑端 web/sync.js 在它自己的画布上照做，再把它那边的新状态同步回来。
-  const DESKTOP_COMMAND_THROTTLE_MS = 1000;
-  const desktopCommands = new Map();   // "节点::输入名" → 最后一次改动（同一格的中间值直接覆盖）
-  let desktopCommandTimer = 0;
-
-  // 只有服务端认得下的输入才值得发。graph 是服务端按当前 prompt 建的，和服务端
-  // _desktop_command_from_payload 的校验同源：前端专有控件（种子模式那种）不在 prompt 里，
-  // 发了也会被拒。拿不到 graph 就不拦，交给服务端判断。
-  function desktopInputExists(nodeId, input) {
-    const nodes = state.workflow?.graph?.nodes;
-    if (!Array.isArray(nodes)) return true;
-    const node = nodes.find((item) => String(item?.id) === String(nodeId));
-    if (!node) return false;
-    const inputs = Array.isArray(node.inputs) ? node.inputs : [];
-    // 被连线接管的输入是插槽不是控件，送过去也会被服务端拒。
-    return inputs.some((entry) => String(entry?.name) === String(input) && !entry.frontend && !entry.link);
-  }
-
-  function flushDesktopCommands() {
-    desktopCommandTimer = 0;
-    if (!desktopCommands.size) return;
-    const queued = [...desktopCommands.values()];
-    desktopCommands.clear();
-    for (const command of queued) {
-      requestJson("/mobile/api/desktop/commands", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(command),
-      }).then((body) => {
-        // 电脑端会自己领取并应用，然后把它那边的新状态同步回来。
-        console.debug("[Mobile Remote] desktop command queued", command.node_id, command.input, body?.pending ?? 0);
-      }).catch((error) => {
-        // 电脑端没开着、工作流没同步过、或走公网隧道被挡：静默处理，绝不打扰用户。
-        console.debug("[Mobile Remote] desktop command skipped", command.node_id, command.input, error?.message || error);
-      });
-    }
-  }
-
-  // 高级页改一个值就调这里：同一 (节点, 输入) 1 秒内只发最后一次。
-  function pushDesktopCommand(nodeId, input, value) {
-    const workflowId = state.workflow?.id;
-    const id = String(nodeId ?? "");
-    const name = String(input ?? "");
-    if (!workflowId || !id || !name) return;
-    if (!desktopInputExists(id, name)) {
-      console.debug("[Mobile Remote] desktop command skipped: 工作流里没有这个输入", id, name);
-      return;
-    }
-    desktopCommands.set(id + "::" + name, { workflow_id: workflowId, node_id: id, input: name, value });
-    if (desktopCommandTimer) return;
-    desktopCommandTimer = window.setTimeout(flushDesktopCommands, DESKTOP_COMMAND_THROTTLE_MS);
-  }
-
-  // 参考项目节点菜单动作：与控件修改共用同一条可靠指令队列。
-  function pushDesktopAction(nodeId, action, value = true) {
-    const workflowId = state.workflow?.id;
-    const id = String(nodeId ?? "");
-    const name = "action";
-    if (!workflowId || !id || !action) return;
-    desktopCommands.set(id + "::" + action, { workflow_id: workflowId, node_id: id, input: name, action: String(action), value });
-    if (desktopCommandTimer) return;
-    desktopCommandTimer = window.setTimeout(flushDesktopCommands, DESKTOP_COMMAND_THROTTLE_MS);
   }
 
   function autoGrow(area) {
@@ -791,7 +772,7 @@
 
     let randomButton = null;
     const paint = () => {
-      const random = state.values[field.id] === "__random__";
+      const random = state.mobileDraft.seed_modes[field.id] === "randomize" || state.values[field.id] === "__random__";
       input.disabled = random;
       input.value = random ? "" : state.values[field.id] ?? field.value;
       if (randomButton) {
@@ -824,7 +805,7 @@
       randomButton.type = "button";
       randomButton.className = "random-button";
       randomButton.addEventListener("click", () => {
-        const random = state.values[field.id] === "__random__";
+        const random = state.mobileDraft.seed_modes[field.id] === "randomize" || state.values[field.id] === "__random__";
         updateFieldValue(field, random ? field.value : "__random__");
         paint();
       });
@@ -862,7 +843,7 @@
 
     let randomButton = null;
     const paint = () => {
-      const random = state.values[field.id] === "__random__";
+      const random = state.mobileDraft.seed_modes[field.id] === "randomize" || state.values[field.id] === "__random__";
       input.disabled = random;
       input.value = random ? "" : state.values[field.id] ?? field.value;
       if (randomButton) {
@@ -876,7 +857,7 @@
     randomButton.className = "random-button";
     randomButton.setAttribute("aria-label", t("{label}随机开关", { label: field.label }));
     randomButton.addEventListener("click", () => {
-      const random = state.values[field.id] === "__random__";
+      const random = state.mobileDraft.seed_modes[field.id] === "randomize" || state.values[field.id] === "__random__";
       updateFieldValue(field, random ? field.value : "__random__");
       paint();
     });
@@ -1208,7 +1189,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610128", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610130", { cache: "no-store" });
       if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];
@@ -1375,6 +1356,7 @@
       }
     }
     state.presetEnabled = enabled;
+    state.mobileDraft.manual_prompt = !enabled;
     applyPresetMode();
     savePresetState();
   }
@@ -1705,7 +1687,7 @@
     return ["ckpt_name", "model_name", "unet_name"].includes(field.input);
   }
 
-  function renderWorkflow(workflow) {
+  function renderWorkflow(workflow, {resetPhoneOptions = false} = {}) {
     state.workflow = workflow;
     const fields = workflow.fields || [];
     state.values = loadDraft(workflow, fields);
@@ -1721,7 +1703,7 @@
     if (state.modelField && state.workflow?.id) {
       let saved = {};
       try { saved = JSON.parse(phoneSettings.getItem("comfy-mobile-remote.multiModels") || "{}"); } catch { saved = {}; }
-      const listed = Array.isArray(saved[state.workflow.id]) ? saved[state.workflow.id].map(String) : [];
+      const listed = !resetPhoneOptions && Array.isArray(saved[state.workflow.id]) ? saved[state.workflow.id].map(String) : [];
       const allowed = new Set(modelOptionList(state.modelField));
       state.multiModelList = listed.filter((name) => allowed.has(name));
       const current = String(state.values[state.modelField.id] ?? "");
@@ -1818,15 +1800,26 @@
   }
 
   async function loadWorkflow(workflowId, remember = false) {
+    if (resettingWorkflow) return;
     if (!workflowId) {
+      panelEpoch += 1;
+      state.workflowLoadToken += 1;
+      panelWorkflowId = "";
+      sendToPanel("clear", null);
       state.workflow = null;
       $("generationForm").classList.add("hidden");
       return;
     }
     const token = ++state.workflowLoadToken;
+    workflowLoading = true;
+    panelEpoch += 1;
+    panelWorkflowId = "";
+    sendToPanel("clear", null);
     setText("workflowMeta", t("正在读取参数"));
     try {
-      const body = await requestJson(`/mobile/api/workflows/${encodeURIComponent(workflowId)}?_=${Date.now()}`);
+      let snapshot = "";
+      try { snapshot = JSON.parse(phoneSettings.getItem(draftKey(workflowId)) || "{}").__mobile?.snapshot || ""; } catch {}
+      const body = await requestJson(`/mobile/api/workflows/${encodeURIComponent(workflowId)}?snapshot=${encodeURIComponent(snapshot)}&_=${Date.now()}`);
       if (token !== state.workflowLoadToken) return;
       hydratingSettings += 1;
       try {
@@ -1834,14 +1827,17 @@
         state.presetTextarea = null;
         state.presetPanel = null;
         renderWorkflow(body.workflow);
-        syncPanelWorkflow();
+        workflowLoading = false;
+        syncPanelWorkflow(true);
       } finally {
         hydratingSettings -= 1;
       }
+      saveDraft();
       if (remember) phoneSettings.setItem("comfy-mobile-remote.workflow", workflowId);
     } catch (error) {
       if (token !== state.workflowLoadToken) return;
       state.workflow = null;
+      workflowLoading = false;
       $("generationForm").classList.add("hidden");
       setText("workflowMeta", t(error.message));
       toast(error.message, "error");
@@ -1886,7 +1882,7 @@
       ? previous
       : state.workflows[0].id;
     select.value = selected;
-    await loadWorkflow(selected);
+    if (force || state.workflow?.id !== selected) await loadWorkflow(selected);
   }
 
   function mediaUrl(item, compact = false) {
@@ -3466,7 +3462,9 @@
 
   async function submitGeneration(event) {
     event.preventDefault();
-    if (!state.workflow?.id || submittingBatch || applyingRemoteSettings) return;
+    if (!state.workflow?.id || submittingBatch || applyingRemoteSettings || workflowLoading || resettingWorkflow) return;
+    try { await flushPanel(); } catch (error) { toast(error.message, "error"); return; }
+    if (submittingBatch || workflowLoading || resettingWorkflow) return;
     if (!state.randomGenerate && presetSubmissionHasConflicts()) {
       toast(t("存在互斥标签，请先修改冲突项"), "error");
       renderPresetPanel();
@@ -3514,9 +3512,19 @@
           const values = { ...state.values };
           if (state.multiModel && state.modelField) values[state.modelField.id] = models[index];
           Object.assign(values, sharedSeeds);
+          const seedModes = { ...state.mobileDraft.seed_modes };
+          for (const [key, mode] of Object.entries(seedModes)) {
+            if (Object.hasOwn(sharedSeeds, key)) { seedModes[key] = "fixed"; continue; }
+            if (mode === "randomize") values[key] = "__random__";
+            // Increment/decrement values are advanced from the previous accepted response below.
+          }
           payloads.push({
             workflow_id: workflowId,
             client_id: clientId,
+            snapshot: state.mobileDraft.snapshot,
+            node_modes: { ...state.mobileDraft.node_modes },
+            widget_values: clonePresetData(state.mobileDraft.widget_values, {}),
+            seed_modes: seedModes,
             values,
             preset: snapshotPreset(),
           });
@@ -3526,7 +3534,9 @@
       }
       saveDraft();
       savePresetState();
+      let nextBatchSeeds = {};
       for (const payload of payloads) {
+        Object.assign(payload.values, nextBatchSeeds);
         if (state.randomGenerate) {
           paintPresetFromSnapshot(payload.preset);
           await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -3537,6 +3547,10 @@
           body: JSON.stringify(payload),
         });
         submitted += 1;
+        nextBatchSeeds = body.next_seed_values || {};
+        Object.assign(state.values, nextBatchSeeds);
+        saveDraft();
+        pushAllValuesToPanel();
         const promptId = String(body.prompt_id);
         state.currentJobId = promptId;
         const optimistic = {
@@ -4326,6 +4340,10 @@
       }
       bindEvents();
       bindPanelLocale();
+      $("workflowHelpButton").addEventListener("click", () => openWorkflowHelp(false));
+      $("resetWorkflowButton").addEventListener("click", () => openWorkflowHelp(true));
+      $("closeWorkflowHelpButton").addEventListener("click", () => $("workflowHelpDialog").close());
+      $("confirmWorkflowResetButton").addEventListener("click", resetPhoneWorkflow);
       window.addEventListener("message", onPanelMessage);
       applyPhonePreferences();
       connectWebSocket();

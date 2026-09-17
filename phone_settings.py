@@ -113,12 +113,65 @@ def _encode(value):
         raise SettingsError("Invalid JSON values") from exc
 
 
+def _validate_phone_draft_meta(value):
+    if not isinstance(value, dict) or set(value) - {"snapshot", "node_modes", "widget_values", "seed_modes", "view", "manual_prompt"}:
+        raise SettingsError("Invalid phone workflow draft")
+    if value.get("snapshot") and re.fullmatch(r"[a-f0-9]{64}", str(value["snapshot"])) is None:
+        raise SettingsError("Invalid phone workflow snapshot")
+    for name in ("node_modes", "widget_values", "seed_modes", "view"):
+        if name in value and not isinstance(value[name], dict):
+            raise SettingsError("Invalid phone draft map")
+    for key, mode in value.get("node_modes", {}).items():
+        _name(key)
+        if type(mode) is not int or mode not in (0, 4):
+            raise SettingsError("Invalid phone node mode")
+    for key, mode in value.get("seed_modes", {}).items():
+        _name(key)
+        if mode not in ("fixed", "randomize", "increment", "decrement"):
+            raise SettingsError("Invalid phone seed mode")
+    if "manual_prompt" in value and type(value["manual_prompt"]) is not bool:
+        raise SettingsError("Invalid phone prompt mode")
+    def bounded(item, depth=0):
+        if depth > 12:
+            raise SettingsError("Phone draft is too deeply nested")
+        if isinstance(item, dict):
+            if len(item) > MAX_DRAFT_FIELDS:
+                raise SettingsError("Too many phone draft entries")
+            for key, child in item.items():
+                _name(key)
+                if key.lower() in SENSITIVE_FIELDS:
+                    raise SettingsError("Phone draft contains sensitive fields")
+                bounded(child, depth + 1)
+        elif isinstance(item, list):
+            if len(item) > MAX_DRAFT_FIELDS:
+                raise SettingsError("Too many phone widget values")
+            for child in item:
+                bounded(child, depth + 1)
+        elif isinstance(item, str):
+            _text(item)
+        elif item is None or type(item) is bool:
+            return
+        elif type(item) in (int, float):
+            try:
+                finite = math.isfinite(item)
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise SettingsError("Phone draft numbers must be finite")
+        else:
+            raise SettingsError("Invalid phone draft value")
+    bounded(value)
+
+
 def _validate_draft(value):
     if not isinstance(value, dict):
         raise SettingsError("Draft must be an object of scalar input values")
     if len(value) > MAX_DRAFT_FIELDS:
         raise SettingsError("Too many draft fields", 413)
     for key, item in value.items():
+        if key == "__mobile":
+            _validate_phone_draft_meta(item)
+            continue
         _name(key)
         input_name = key.rsplit("::", 1)[-1].lower().replace("-", "_")
         if input_name in SENSITIVE_FIELDS or input_name.startswith("_"):

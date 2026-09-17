@@ -58,16 +58,15 @@ GET_PATHS = (
     r"/mobile/assets/(?:app\.js|advanced\.js|advanced\.css|panel\.html|panel\.js|panel\.css|i18n\.js|settings-sync\.js|preset-catalog\.js|preset-engine\.js|progress-sync\.js|styles\.css|icon\.svg|prompt-presets\.json)",
     r"/mobile/api/(?:status|settings|progress|workflows|jobs|favorites/file|preview|i18n/[a-z]{2})",
     r"/mobile/api/workflows/[a-f0-9]{20}",
+    r"/api/object_info",  # Read-only widget definitions for the embedded panel.
     # 面板要电脑端同步下来的原始工作流（原生格式），隧道用户也要能取到。
     r"/mobile/api/panel/workflow/[a-f0-9]{20}",
     r"/mobile/api/jobs/[A-Za-z0-9_-]{1,128}", r"/view", r"/ws",
 )
 POST_PATHS = (
     r"/mobile/api/(?:settings|jobs|favorites/toggle|outputs/delete)",
-    # 手机把节点设置改动送回电脑端（自制节点的开关要靠它才能真正生效）。
-    # 末尾的 (?!/) 是关键：ack 只能由电脑端本地调用，绝不能被公网隧道放行。
-    r"/mobile/api/desktop/commands(?!/)",
     r"/mobile/api/jobs/[A-Za-z0-9_-]{1,128}/(?:cancel|retry)", r"/upload/image",
+    r"/mobile/api/workflows/[a-f0-9]{20}/refresh",
 )
 VIEW_TYPES = {"input", "output", "temp"}
 STATUS_PUBLIC_DROP = ("gpu", "tailscale_ips", "mobile_urls")

@@ -512,7 +512,7 @@ export const ConnectionButton = memo(function ConnectionButton({
       // Wireless relays have no link to create/modify from this button.
       if (isSetOutputRelay || isBroadcastOutput) return;
       // Empty input/output: open the connection editor.
-      setConnectionModalOpen(true);
+      return;
       return;
     }
     if (connectionCount === 1 && connectedNodeId !== null) {
@@ -536,11 +536,8 @@ export const ConnectionButton = memo(function ConnectionButton({
   // the modal reads and writes boundary wiring itself now, and the long-press
   // is a request to edit THIS node's connection, not the slot it crosses.
   const { handlers: longPressHandlers, consumeLongPress } = useLongPress({
-    onLongPress: () => setConnectionModalOpen(true),
-    enabled:
-      !isSetOutputRelay &&
-      !isBroadcastOutput &&
-      (direction === 'input' ? hasConnection : true),
+    onLongPress: () => {},
+    enabled: false,
   });
 
   const handleMenuNodeClick = (targetId: number) => (event: React.MouseEvent<HTMLButtonElement>) => {

@@ -1,10 +1,6 @@
-/* 「高级」页 = 参考项目真实 React 面板：真浏览器加载真实手机页 + 真实 panel.js，
- * 校验三件事：
- *   1. 切到高级页后，参考项目的面板真的渲染出来（组头、节点卡、连线区）；
- *   2. 面板改一个控件值，会经本插件的指令通道回写电脑端（POST /mobile/api/desktop/commands）；
- *   3. 全程没有未捕获异常。
- * 面板数据来自 /mobile/api/panel/workflow/<id>（原生工作流）与 /api/object_info（节点定义）。
- */
+/* Real reference React panel inside the phone host. Isolated HTTP fixtures verify
+ * shared phone drafts, immutable source identity, retained presentation controls,
+ * original job submission, transactional reset, and zero desktop commands. */
 "use strict";
 
 const test = require("node:test");
@@ -94,7 +90,7 @@ const OBJECT_INFO = {
   },
 };
 
-function startFixture() {
+function startFixture({ originallyBypassed = false, sourceSeedMode = "fixed", repeatCount = 1 } = {}) {
   const files = new Map();
   for (const name of SCRIPT_ASSETS) {
     files.set(`/mobile/assets/${name}`, ["text/javascript; charset=utf-8", fs.readFileSync(path.join(ROOT, "mobile", name))]);
@@ -119,15 +115,22 @@ function startFixture() {
     ] },
     // 生成页需要有和面板同一格参数的字段，才能验证"高级改完回生成页看得见"。
     [`/mobile/api/workflows/${WORKFLOW_ID}`]: { ok: true, workflow: {
-      id: WORKFLOW_ID, name: "夹具工作流",
-      fields: [{ id: "2::seed", node_id: "2", input: "seed", label: "种子", kind: "number", value: 12345 }],
+      id: WORKFLOW_ID, name: "夹具工作流", snapshot: "a".repeat(64), native_workflow: NATIVE_WORKFLOW,
+      fields: [{ id: "2::seed", node_id: "2", input: "seed", label: "种子", kind: "number", value: 12345 }, {id:"1::ckpt_name",node_id:"1",input:"ckpt_name",label:"模型",kind:"select",value:"sd_xl_base_1.0.safetensors",options:["sd_xl_base_1.0.safetensors"]}],
       node_titles: { "1": "Checkpoint 加载器", "2": "K 采样器" },
       graph: { nodes: [], groups: [] },
     } },
     [`/mobile/api/panel/workflow/${WORKFLOW_ID}`]: { ok: true, id: WORKFLOW_ID, name: "夹具工作流", workflow: NATIVE_WORKFLOW },
     "/api/object_info": OBJECT_INFO,
   };
-  const posted = [];
+  api['/mobile/api/workflows/' + WORKFLOW_ID].workflow.native_workflow = structuredClone(NATIVE_WORKFLOW);
+  if (originallyBypassed) api['/mobile/api/workflows/' + WORKFLOW_ID].workflow.native_workflow.nodes[0].mode = 4;
+  const detail = api['/mobile/api/workflows/' + WORKFLOW_ID].workflow;
+  detail.native_workflow.nodes[1].widgets_values[1] = sourceSeedMode;
+  detail.graph.nodes = [{id:'2',inputs:[{name:'seed',value:12345,type:'INT'},{name:'control_after_generate',value:sourceSeedMode,type:'COMBO',frontend:true}]}];
+  api['/mobile/api/settings'].values['comfy-mobile-remote.repeatCount'] = String(repeatCount);
+  const posted = [], submissions = [];
+  const controls = { failRefresh: false, refreshes: 0, missingSnapshot: false };
   const server = http.createServer((request, response) => {
     const pathname = new URL(request.url, "http://127.0.0.1").pathname;
     if (request.method === "POST" && pathname === "/mobile/api/desktop/commands") {
@@ -139,6 +142,51 @@ function startFixture() {
         response.end(JSON.stringify({ ok: true, pending: posted.length }));
       });
       return;
+    }
+    if (request.method === 'POST' && pathname === '/mobile/api/settings') {
+      let raw = '';
+      request.on('data', chunk => { raw += chunk; });
+      request.on('end', () => {
+        const data = JSON.parse(raw), settings = api[pathname];
+        for (const [key,value] of Object.entries(data.changes || {})) {
+          if (value === null) delete settings.values[key]; else settings.values[key] = value;
+        }
+        settings.revision++;
+        response.writeHead(200, {'Content-Type':'application/json'});
+        response.end(JSON.stringify(settings));
+      });
+      return;
+    }
+    if (request.method === 'POST' && pathname === '/mobile/api/jobs') {
+      let raw = '';
+      request.on('data', chunk => { raw += chunk; });
+      request.on('end', () => {
+        const data = JSON.parse(raw);
+        submissions.push(data);
+        const nextSeeds = {};
+        for (const [key,mode] of Object.entries(data.seed_modes || {})) {
+          if (mode === 'increment' || mode === 'decrement') nextSeeds[key] = Math.max(0,Number(data.values[key]) + (mode === 'increment' ? 1 : -1));
+        }
+        response.writeHead(200, {'Content-Type':'application/json'});
+        response.end(JSON.stringify({ok:true,prompt_id:'fixture-job-'+submissions.length,next_seed_values:nextSeeds}));
+      });
+      return;
+    }
+    if (request.method === 'POST' && pathname.endsWith('/refresh')) {
+      controls.refreshes++;
+      response.writeHead(controls.failRefresh ? 409 : 200, {'Content-Type':'application/json'});
+      if (controls.failRefresh) return response.end(JSON.stringify({ok:false,error:'同步失败，手机副本未改变。'}));
+      const detail = api['/mobile/api/workflows/' + WORKFLOW_ID].workflow;
+      detail.snapshot = 'b'.repeat(64);
+      detail.native_workflow = structuredClone(NATIVE_WORKFLOW);
+      detail.native_workflow.nodes[1].widgets_values[0] = 999;
+      detail.fields[0].value = 999;
+      response.end(JSON.stringify({ok:true,snapshot:detail.snapshot}));
+      return;
+    }
+    if (controls.missingSnapshot && pathname === '/mobile/api/workflows/' + WORKFLOW_ID && new URL(request.url,'http://fixture').searchParams.get('snapshot') === 'a'.repeat(64)) {
+      response.writeHead(404, {'Content-Type':'application/json'});
+      return response.end(JSON.stringify({ok:false,error:'手机工作流副本已丢失，请在设置中重新同步。'}));
     }
     const file = files.get(pathname);
     if (file) { response.writeHead(200, { "Content-Type": file[0], "Cache-Control": "no-store" }); return response.end(file[1]); }
@@ -153,7 +201,7 @@ function startFixture() {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
       server.removeListener("error", reject);
-      resolve({ server, url: `http://127.0.0.1:${server.address().port}/mobile`, posted });
+      resolve({ server, url: `http://127.0.0.1:${server.address().port}/mobile`, posted, submissions, controls });
     });
   });
 }
@@ -163,7 +211,7 @@ async function stopFixture(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-test("高级页跑参考项目的真实面板：渲染、连线、改值回写电脑端", { timeout: 120000 }, async () => {
+test("高级页手机独立草稿：参数互通、禁用结构编辑、不会回写电脑", { timeout: 120000 }, async () => {
   const { chromium } = resolvePlaywright();
   const browser = await chromium.launch({ executablePath: chromePath(), headless: true });
   const { server, url, posted } = await startFixture();
@@ -227,23 +275,13 @@ test("高级页跑参考项目的真实面板：渲染、连线、改值回写�
     await fs.promises.mkdir(shotDir, { recursive: true });
     await page.screenshot({ path: path.join(shotDir, "panel-390x844-zh.png") });
 
-    // 2) 改面板里的种子值，应当回写成本插件的桌面指令。
+    // 2) 修改面板种子只更新手机副本，不发送电脑指令。
     const seedRow = frame.locator("#widget-row-2-0");
     const field = seedRow.locator("input").first();
     await field.click();
     await field.fill("777");
     await field.press("Tab");
-    // 面板改值 → 入口的差分桥 → POST 桌面指令（等它发出来）。
-    for (let attempt = 0; attempt < 60 && posted.length === 0; attempt += 1) {
-      await page.waitForTimeout(100);
-    }
-    assert.equal(posted.length > 0, true, "面板改值要发出桌面指令");
-    const seedCommand = posted.find((item) => item && String(item.node_id) === "2");
-    assert.ok(seedCommand, "指令里要带节点号：" + JSON.stringify(posted));
-    assert.equal(seedCommand.workflow_id, WORKFLOW_ID);
-    assert.equal(String(seedCommand.input), "seed");
-    assert.equal(Number(seedCommand.value), 777);
-
+    assert.equal(posted.length, 0, "修改手机草稿不得发送桌面指令");
     // 3) 两边参数互通（出图仍走手机原来的路径）：
     //    面板改的值要写进手机草稿，回生成页点「生成」用的就是它。
     await page.click(".nav-button[data-target=generate]");
@@ -256,24 +294,26 @@ test("高级页跑参考项目的真实面板：渲染、连线、改值回写�
     await frame.locator("#node-list-shell").waitFor({ timeout: 30000 });
     await page.waitForTimeout(600);
 
-    //    反过来：手机（宿主）推值给面板，面板里的控件要跟着变。
-    const beforePush = posted.length;
-    await page.evaluate(() => {
-      const frame = document.querySelector("#view-advanced .panel-frame");
-      frame.contentWindow.postMessage({ type: "mtr-panel", action: "values", value: { "2::seed": 4242 } }, "*");
-    });
-    await frame.locator("#widget-row-2-0 input").first().waitFor({ timeout: 10000 });
-    await page.waitForTimeout(600);
-    assert.equal(
-      await frame.locator("#widget-row-2-0 input").first().inputValue(),
-      "4242",
-      "手机推过来的值要显示在面板控件里",
-    );
-    //    关键保证：手机这边推过去的值**不许**被面板当成"用户改了面板"回写电脑画布，
-    //    否则生成页调个种子就会悄悄改掉电脑上的节点。
-    await page.waitForTimeout(1200);
-    const pushedToDesktop = posted.slice(beforePush).filter((item) => Number(item?.value) === 4242);
-    assert.deepEqual(pushedToDesktop, [], "手机推的值不能回写电脑画布：" + JSON.stringify(posted.slice(beforePush)));
+    // Basic controls share the same phone draft; no forged postMessage needed.
+    await page.click('.nav-button[data-target=generate]');
+    await page.locator('#advancedSection').evaluate(el => { el.open = true; });
+    const basicSeed = page.locator('#view-generate input[type=number]:visible').first();
+    await basicSeed.fill('4242');
+    await basicSeed.press('Tab');
+    await page.click('.nav-button[data-target=advanced]');
+    await field.waitFor();
+    assert.equal(await field.inputValue(), '4242');
+    assert.equal(posted.length, 0);
+    await frame.locator('#node-header-2 button').last().click();
+    const menu = frame.locator('.fixed.z-\\[1000\\]').last();
+    const menuText = await frame.locator('body').innerText();
+    assert.doesNotMatch(menuText, /Duplicate|Delete|复制节点|删除节点|新增节点|Add node|Add group/);
+    await page.click('.nav-button[data-target=settings]');
+    await page.click('#workflowHelpButton');
+    assert.equal(await page.locator('#workflowHelpDialog').evaluate(el=>el.open), true);
+    assert.match(await page.locator('#workflowHelpDialog').innerText(), /不会改变电脑画布/);
+    assert.equal(await page.locator('#confirmWorkflowResetButton').isVisible(), false);
+    await page.click('#closeWorkflowHelpButton');
 
     assert.deepEqual(errors, [], "面板不应抛出未捕获异常");
     assert.deepEqual(failed.filter((item) => item.includes("/mobile/assets/panel.js")), [], "panel.js 必须加载成功");
@@ -282,4 +322,131 @@ test("高级页跑参考项目的真实面板：渲染、连线、改值回写�
     await stopFixture(server);
     await browser.close();
   }
+});
+
+test('phone copy survives reload, submits bypass settings, and resets transactionally', {timeout:120000}, async () => {
+  const {chromium} = resolvePlaywright();
+  const browser = await chromium.launch({executablePath:chromePath(),headless:true});
+  const {server,url,posted,submissions,controls} = await startFixture({originallyBypassed:true});
+  try {
+    const context = await browser.newContext({locale:'en-US',viewport:{width:390,height:844}});
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(url);
+    await page.click('.nav-button[data-target=advanced]');
+    const frame = page.frameLocator('.panel-frame');
+    await frame.locator('#node-header-1').waitFor();
+    const nodeMenu = async () => frame.locator('#node-header-1 button').last().click();
+    await nodeMenu();
+    await frame.getByRole('button',{name:/^(Engage|启用)$/}).click();
+    const field = frame.locator('#widget-row-2-0 input').first();
+    await field.fill('8181');
+    // Generation must flush a still-focused advanced input.
+    await page.click('.nav-button[data-target=generate]');
+    const jobRequest = page.waitForRequest(r=>r.method()==='POST' && r.url().endsWith('/mobile/api/jobs'));
+    await page.click('#generateButton');
+    const payload = (await jobRequest).postDataJSON();
+    await page.waitForFunction(()=>document.querySelector('#generateButton').disabled===false);
+    assert.equal(payload.snapshot,'a'.repeat(64));
+    assert.deepEqual(payload.node_modes,{'1':0});
+    assert.equal(Number(payload.values['2::seed']),8181);
+    assert.deepEqual(payload.widget_values,{},'Named scalar edits do not impose raw custom widget layout validation');
+    await page.reload();
+    await page.click('.nav-button[data-target=advanced]');
+    await field.waitFor();
+    assert.equal(await field.inputValue(),'8181','Draft survives reload');
+    await nodeMenu();
+    await frame.getByRole('button',{name:/^(Bypass|绕过)$/}).click();
+    await nodeMenu();
+    await frame.getByRole('button',{name:/^(Hide|隐藏)$/}).click();
+    await frame.locator('#node-card-1').waitFor({state:'hidden'});
+    await frame.locator('#workflow-menu-container button').click();
+    const options = await frame.locator('#workflow-options-dropdown').innerText();
+    assert.doesNotMatch(options,/Add node|Duplicate|Delete|Subgraph|新增|删除|复制/);
+    await frame.getByRole('button',{name:/^(Hide . Show|隐藏 . 显示)$/}).click();
+    await frame.getByRole('button',{name:/Show all hidden nodes|显示所有隐藏节点/}).click();
+    await frame.getByRole('button',{name:/^(Cancel|取消)$/}).click();
+    await frame.locator('#node-header-1').waitFor();
+    await page.click('.nav-button[data-target=settings]');
+    controls.failRefresh = true;
+    await page.click('#resetWorkflowButton');
+    await page.click('#confirmWorkflowResetButton');
+    await page.waitForFunction(()=>document.querySelector('#confirmWorkflowResetButton')?.disabled === false);
+    assert.equal(controls.refreshes,1);
+    assert.equal(await page.locator('#workflowHelpDialog').evaluate(el=>el.open),true);
+    await page.click('#closeWorkflowHelpButton');
+    await page.click('.nav-button[data-target=advanced]');
+    assert.equal(await field.inputValue(),'8181','Failed refresh preserves the copy');
+    await nodeMenu();
+    await frame.getByRole('button',{name:/^(Engage|启用)$/}).waitFor();
+    await page.click('.nav-button[data-target=settings]');
+    controls.failRefresh = false;
+    controls.missingSnapshot = true;
+    const missingResponse = page.waitForResponse(r=>r.status()===404 && r.url().includes('/mobile/api/workflows/'));
+    await page.reload();
+    await missingResponse;
+    await page.click('.nav-button[data-target=settings]');
+    await page.click('#resetWorkflowButton');
+    await page.click('#confirmWorkflowResetButton');
+    await page.waitForFunction(()=>!document.querySelector('#workflowHelpDialog')?.open);
+    await page.click('.nav-button[data-target=advanced]');
+    await field.waitFor();
+    assert.equal(await field.inputValue(),'999');
+    await nodeMenu();
+    await frame.getByRole('button',{name:/^(Bypass|绕过)$/}).waitFor();
+    await page.click('.nav-button[data-target=generate]');
+    const resetJob = page.waitForRequest(r=>r.method()==='POST' && r.url().endsWith('/mobile/api/jobs'));
+    await page.click('#generateButton');
+    const resetPayload = (await resetJob).postDataJSON();
+    await page.waitForFunction(()=>document.querySelector('#generateButton').disabled===false);
+    assert.equal(resetPayload.snapshot,'b'.repeat(64));
+    assert.deepEqual(resetPayload.node_modes,{});
+    assert.equal(Number(resetPayload.values['2::seed']),999);
+    assert.deepEqual(posted,[],'No desktop commands in any action');
+    assert.deepEqual(errors,[]);
+    assert.equal(submissions.length,2);
+    await context.close();
+  } finally { await stopFixture(server); await browser.close(); }
+});
+
+test('source seed mode agrees across pages and decrement batches stay at zero', {timeout:60000}, async () => {
+  const {chromium} = resolvePlaywright();
+  const browser = await chromium.launch({executablePath:chromePath(),headless:true});
+  const {server,url,submissions} = await startFixture({sourceSeedMode:'randomize',repeatCount:2});
+  try {
+    const page = await browser.newPage({locale:'en-US',viewport:{width:390,height:844}});
+    await page.goto(url);
+    await page.locator('#advancedSection').evaluate(el=>{el.open=true;});
+    const base = page.locator('#view-generate input[type=number]').first();
+    assert.equal(await base.isDisabled(),true,'Source random mode is reflected in basic controls');
+    await page.locator('#advancedSection .random-button').click();
+    await base.fill('0');
+    await page.click('.nav-button[data-target=advanced]');
+    const frame = page.frameLocator('.panel-frame');
+    const seedRow = frame.locator('#widget-row-2-0');
+    await seedRow.waitFor();
+    assert.match(await seedRow.innerText(),/fixed/);
+    await seedRow.getByRole('combobox').click();
+    await frame.getByRole('option',{name:'decrement',exact:true}).click();
+    await page.click('.nav-button[data-target=generate]');
+    const accepted = page.waitForResponse(r=>r.request().method()==='POST' && r.url().endsWith('/mobile/api/jobs'));
+    await page.click('#generateButton');
+    await accepted;
+    await page.waitForFunction(()=>document.querySelector('#generateButton').disabled===false);
+    assert.equal(submissions.length,2);
+    for(const payload of submissions) {
+      assert.equal(payload.seed_modes['2::seed'],'decrement');
+      assert.equal(Number(payload.values['2::seed']),0);
+    }
+    for (const viewport of [{width:320,height:640},{width:1440,height:900}]) {
+      await page.setViewportSize(viewport);
+      await page.click('.nav-button[data-target=settings]');
+      await page.click('#workflowHelpButton');
+      const dialog = page.locator('#workflowHelpDialog');
+      assert.equal(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth+1),true);
+      await page.screenshot({path:path.join(ROOT,'tests','screenshots','panel','help-'+viewport.width+'.png')});
+      await page.click('#closeWorkflowHelpButton');
+    }
+  } finally {await stopFixture(server);await browser.close();}
 });

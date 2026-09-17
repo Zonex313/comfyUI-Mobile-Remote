@@ -1,5 +1,5 @@
 import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react';
-import { PlusIcon, PromotedWidgetIcon } from '@/components/icons';
+import { PromotedWidgetIcon } from '@/components/icons';
 
 interface ConnectionRowProps {
   direction: 'input' | 'output';
@@ -90,7 +90,7 @@ export function ConnectionRow({
   // yet" treatments describe an empty slot, and this is not one.
   const isVisuallyDisabled = !isAddSlot && isInput && !hasConnection && !isEmptyRequiredInput;
   const isInactiveOutput = !isAddSlot && !isInput && !hasConnection;
-  const plusIconClass = sizeClass.includes('w-7') ? 'w-3 h-3' : 'w-3.5 h-3.5';
+  if (isAddSlot) return null;
 
   return (
     <>
@@ -122,13 +122,14 @@ export function ConnectionRow({
 
       <button
         id={buttonId}
-        aria-label={ariaLabel}
+        aria-label={hasConnection ? ariaLabel : resolvedLabel}
         onClick={onClick}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerCancel ?? onPointerUp}
-        disabled={false}
+        disabled={!hasConnection}
+        style={!hasConnection ? { cursor: "default" } : undefined}
         ref={buttonRef}
         className={`
           flex items-center justify-center rounded-full font-medium box-border
@@ -151,8 +152,8 @@ export function ConnectionRow({
           ${!isVisuallyDisabled && !isInactiveOutput ? 'opacity-100 cursor-pointer active:scale-95' : ''}
         `}
       >
-        {isAddSlot || !hasConnection ? (
-          <PlusIcon className={plusIconClass} />
+        {!hasConnection ? (
+          <span aria-hidden="true">·</span>
         ) : (
           <span className={arrowClass}>{isInput ? '←' : '→'}</span>
         )}

@@ -1,5 +1,6 @@
-import { t } from "./i18n.js?v=202610128";
+import { t } from "./i18n.js?v=202610130";
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 const LOG_PREFIX = "[Mobile Remote]";
 const syncRuntime = globalThis.__MTR_SYNC_RUNTIME || (globalThis.__MTR_SYNC_RUNTIME = { started: false });
@@ -7,13 +8,8 @@ let lastFingerprint = "";
 let lastWorkflowSource = "";
 let lastWorkflowSaved = null;
 let syncing = false;
+const pendingRefreshes = new Map();
 let timer = 0;
-// 手机端指令只对「它自己那个工作流」有效。记下上次成功同步的工作流编号，以及当时电脑端
-// 开着哪一个"身份"：身份对不上就说明用户换了工作流/另存了，节点编号会被另一个图复用，
-// 这时候照旧应用等于去改别人的节点。
-let lastWorkflowId = "";
-let lastWorkflowKey = "";
-let pollingCommands = false;
 
 function fastHash(text) {
   let hash = 2166136261;
@@ -88,8 +84,13 @@ async function markOpen(sources = null) {
   } catch { /* 心跳失败不影响本地使用 */ }
 }
 
-async function syncCurrentWorkflow(force = false) {
-  if (syncing || !app?.graph || typeof app.graphToPrompt !== "function") return;
+async function syncCurrentWorkflow(force = false, refreshRequestId = "", expectedSource = "") {
+  if (expectedSource && expectedSource !== activeWorkflowInfo().source) return;
+  if (syncing) {
+    if (refreshRequestId && pendingRefreshes.size < 8) pendingRefreshes.set(refreshRequestId, expectedSource);
+    return;
+  }
+  if (!app?.graph || typeof app.graphToPrompt !== "function") return;
 
   let graphFingerprint = "";
   let serializedWorkflow = null;
@@ -116,12 +117,14 @@ async function syncCurrentWorkflow(force = false) {
 
   syncing = true;
   try {
+    const sourceGraph = app.graph;
     const converted = await app.graphToPrompt();
     const prompt = converted?.output;
     const workflow = converted?.workflow || app.graph.serialize();
     if (!prompt || typeof prompt !== "object" || Object.keys(prompt).length === 0) return;
 
     const info = activeWorkflowInfo(workflow);
+    if (app.graph !== sourceGraph || info.source !== quickInfo.source) return;
     if (!isSavedWorkflow(info)) {
       await markOpen(); // 未保存的不进列表，但其它打开的标签页要照常上报
       return;
@@ -135,6 +138,7 @@ async function syncCurrentWorkflow(force = false) {
         source: info.source,
         prompt,
         workflow,
+        ...(refreshRequestId ? { refresh_request_id: refreshRequestId } : {}),
       }),
     });
     const body = await response.json().catch(() => ({}));
@@ -144,197 +148,18 @@ async function syncCurrentWorkflow(force = false) {
     lastFingerprint = graphFingerprint;
     lastWorkflowSource = info.source;
     lastWorkflowSaved = info.saved;
-    lastWorkflowId = String(body.workflow?.id || "");
-    lastWorkflowKey = activeWorkflowKey();
     await markOpen();
     console.info(`${LOG_PREFIX} synced “${body.workflow.name}” for /mobile`);
   } catch (error) {
     console.warn(`${LOG_PREFIX} workflow sync skipped`, error);
   } finally {
     syncing = false;
-  }
-}
-
-// ---- 手机 → 电脑端：把手机上的改动落到本地画布上 ------------------------
-// 手机端拿到的是**快照**（API prompt + 原生 workflow），在「高级」页改值只改得动它自己那份
-// 数据，电脑画布上的节点毫无变化——自制节点的面板是电脑端自己画的，例如「标签模式」开关得靠
-// 它自己的 widget.callback 去 setVisible(true) 才会展开随机标签区。所以手机端把改动写成指令
-// 排进服务端待办，这里在本地画布上照做，做完立刻把新状态同步回手机。
-
-// 电脑端“当前是哪个工作流”的身份。刻意不带 workflow 参数：同步成功时记下的就是这一份，
-// 两边用同一套算法才比得准。
-function activeWorkflowKey() {
-  const info = activeWorkflowInfo(null);
-  return info.source + "|" + String(info.saved);
-}
-
-function markCanvasDirty(node) {
-  try { node.setDirtyCanvas?.(true, true); } catch { /* 忽略 */ }
-  try { app.graph?.setDirtyCanvas?.(true, true); } catch { /* 忽略 */ }
-  // 新版前端靠 graph 的版本号驱动重绘：不碰它，画布会停在旧画面上。
-  try { node.graph?.incrementVersion?.(); } catch { /* 老版前端没有这个方法 */ }
-}
-
-// 在画布上照做一条指令。返回值说明处理结果：
-// applied（真改了）/ unchanged（本来就是这个值）/ missing-node / missing-widget（找不到，作废）。
-function applyDesktopCommand(command) {
-  const graph = app?.graph;
-  const nodeId = String(command?.node_id ?? "");
-  const inputName = String(command?.input ?? "");
-  const action = String(command?.action ?? "");
-  if (!graph || !nodeId || (!inputName && !action)) return "skip";
-
-  let node = null;
-  try { node = graph.getNodeById?.(Number(nodeId)) || null; } catch { node = null; }
-  if (!node) {
-    // 节点编号不一定是纯数字（UUID 之类），再按字符串逐个体比对一遍。
-    const nodes = Array.isArray(graph._nodes) ? graph._nodes : Array.isArray(graph.nodes) ? graph.nodes : [];
-    node = nodes.find((item) => String(item?.id) === nodeId) || null;
-  }
-  if (!node) {
-    console.debug(LOG_PREFIX + " 手机端指令作废：画布上没有节点 #" + nodeId + "（" + inputName + "）");
-    return "missing-node";
-  }
-
-  // 节点控制动作：参考项目菜单中的 bypass / hide / rename / color / delete / duplicate。
-  // 这些动作直接作用于真实 LiteGraph 节点，随后统一标脏并触发同步。
-  if (action) {
-    const value = command?.value;
-    try {
-      if (action === "bypass") node.mode = Boolean(value) ? 4 : 0;
-      else if (action === "hide") node.flags = { ...(node.flags || {}), hidden: Boolean(value) };
-      else if (action === "rename") node.title = String(value ?? "");
-      else if (action === "color") { node.color = String(value ?? ""); node.bgcolor = String(value ?? ""); }
-      else if (action === "delete") { graph.remove?.(node); app.canvas?.setDirty?.(true); app.graph?.setDirtyCanvas?.(true, true); return "applied"; }
-      else if (action === "duplicate") {
-        const copy = node.clone?.();
-        if (copy) { copy.pos = [Number(node.pos?.[0] || 0) + 24, Number(node.pos?.[1] || 0) + 24]; graph.add?.(copy); }
-        else return "missing-node";
-      } else if (action === "copy") {
-        app.canvas?.copyToClipboard?.();
-        return "unchanged";
-      } else if (action === "paste-below") {
-        app.canvas?.pasteFromClipboard?.();
-        return "applied";
-      } else if (action === "collapse") node.flags = { ...(node.flags || {}), collapsed: Boolean(value) };
-      else if (action === "select") { node.selected = Boolean(value); app.canvas?.select?.(node, Boolean(value)); }
-      else if (action === "connect") {
-        const spec = typeof value === "string" ? JSON.parse(value) : value;
-        const source = graph.getNodeById?.(Number(spec?.source)) || graph._nodes?.find((item) => String(item?.id) === String(spec?.source));
-        const inputIndex = Number(spec?.inputSlot);
-        const outputSlot = Number(spec?.outputSlot ?? 0);
-        if (!source || !Number.isFinite(inputIndex) || !Number.isFinite(outputSlot)) return "missing-node";
-        source.connect?.(outputSlot, node, inputIndex);
-      } else if (action === "group-rename" || action === "group-color") {
-        // 组框不是节点：它是 workflow.groups 里的一项，用手机端给的 g<序号> 直接对下标。
-        const match = /^g(\d+)$/.exec(nodeId);
-        const index = match ? Number(match[1]) : -1;
-        const groups = graph._groups || graph.groups || [];
-        const group = index >= 0 && index < groups.length ? groups[index] : null;
-        if (!group) return "missing-node";
-        if (action === "group-rename") group.title = String(value ?? "");
-        else group.color = String(value ?? "");
-        app.canvas?.setDirty?.(true);
-        app.graph?.setDirtyCanvas?.(true, true);
-        return "applied";
-      } else if (action === "disconnect") {
-        const inputIndex = Number(value);
-        if (!Number.isFinite(inputIndex)) return "skip";
-        node.disconnectInput?.(inputIndex);
-      } else return "skip";
-      markCanvasDirty(node);
-      return "applied";
-    } catch (error) {
-      console.warn(LOG_PREFIX + " 节点操作失败：" + action, error);
-      return "missing-node";
+    for (const [requestId, source] of pendingRefreshes) {
+      pendingRefreshes.delete(requestId);
+      if (source !== activeWorkflowInfo().source) continue;
+      void syncCurrentWorkflow(true, requestId, source);
+      break;
     }
-  }
-
-  const widgets = Array.isArray(node.widgets) ? node.widgets : [];
-  const widget = widgets.find((item) => item && String(item.name) === inputName) || null;
-  if (!widget) {
-    console.debug(LOG_PREFIX + " 手机端指令作废：节点 #" + nodeId + " 上没有「" + inputName + "」控件");
-    return "missing-widget";
-  }
-
-  const previous = widget.value;
-  if (previous === command.value) {
-    // 值已经一样：前端自己也短路，不重复触发回调（有些节点的回调带副作用）。
-    markCanvasDirty(node);
-    return "unchanged";
-  }
-
-  // 顺序照抄 ComfyUI 前端 BaseWidget.setValue()：写值 → widget.callback → onWidgetChanged。
-  widget.value = command.value;
-  try {
-    // 有些控件把值镜像到节点属性上（前端也会同步这一份）。
-    if (widget.options?.property && typeof node.setProperty === "function"
-      && node.properties && node.properties[widget.options.property] !== undefined) {
-      node.setProperty(widget.options.property, command.value);
-    }
-  } catch { /* 属性镜像失败不影响控件本身 */ }
-  try {
-    widget.callback?.(widget.value, app.canvas, node, app.canvas?.graph_mouse, null);
-  } catch (error) {
-    console.warn(LOG_PREFIX + " 节点 #" + nodeId + " 的「" + inputName + "」控件回调报错", error);
-  }
-  try {
-    node.onWidgetChanged?.(inputName, widget.value, previous, widget);
-  } catch (error) {
-    console.warn(LOG_PREFIX + " 节点 #" + nodeId + " 的 onWidgetChanged 报错", error);
-  }
-  markCanvasDirty(node);
-  console.info(LOG_PREFIX + " 已应用手机端改动：节点 #" + nodeId + "「" + inputName + "」= " + JSON.stringify(command.value));
-  return "applied";
-}
-
-async function ackDesktopCommands(ids) {
-  if (!ids.length) return;
-  try {
-    await fetch("/mobile/api/desktop/commands/ack", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store",
-      body: JSON.stringify({ ids }),
-    });
-  } catch (error) {
-    // ack 失败不致命：指令会留在待办里，下一次轮询重放（同值重放是幂等的），只是多画一次。
-    console.debug(LOG_PREFIX + " 指令 ack 失败，下次轮询会重放", error);
-  }
-}
-
-// 领取并应用待办。约 1 秒一次，只在页面可见时跑：手机刚点的开关要马上见效，等不了
-// 15 秒的重同步节奏；这里是几十字节的 GET，不影响原有同步的频率控制。
-async function pollDesktopCommands() {
-  if (pollingCommands || !lastWorkflowId) return;
-  if (activeWorkflowKey() !== lastWorkflowKey) return; // 换过工作流：等下一次同步把身份对上再说
-  pollingCommands = true;
-  let changed = false;
-  try {
-    const url = "/mobile/api/desktop/commands?workflow_id=" + encodeURIComponent(lastWorkflowId);
-    const response = await fetch(url, { cache: "no-store" });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok || !body.ok) return;
-    const commands = Array.isArray(body.commands) ? body.commands : [];
-    if (!commands.length) return;
-    const handled = [];
-    for (const command of commands) {
-      const outcome = applyDesktopCommand(command);
-      // 找不到节点/控件的也要 ack：重试一万次也找不到，只会把日志刷爆。
-      if (outcome !== "skip") handled.push(String(command.id));
-      if (outcome === "applied") changed = true;
-    }
-    await ackDesktopCommands(handled);
-    if (changed) {
-      // 立刻强制同步一次（绕过指纹短路）：把电脑端的新状态推回手机，那边才看得到节点真的变了。
-      await syncCurrentWorkflow(true);
-      // 上面那次可能正好撞在别的同步里被挡掉，隔一会儿再兜一次。
-      scheduleSync(1200, true);
-    }
-  } catch (error) {
-    console.debug(LOG_PREFIX + " 领取手机端指令失败", error);
-  } finally {
-    pollingCommands = false;
   }
 }
 
@@ -349,24 +174,20 @@ app.registerExtension({
   async setup() {
     if (syncRuntime.started) return;
     syncRuntime.started = true;
+    api.addEventListener("mtr_refresh_source", event => {
+      const data = event.detail;
+      if (!data?.request_id || data.source !== activeWorkflowInfo().source) return;
+      void syncCurrentWorkflow(true, data.request_id, data.source);
+    });
     scheduleSync(2500, true);
     window.setInterval(() => {
       if (document.visibilityState === "visible") syncCurrentWorkflow(false);
     }, 15000);
-    // 手机端指令是「用户刚点了开关」这种即时操作，单独用 1 秒的小轮询领取；
-    // 原来的重同步节奏（15 秒一次 + 图变了才发）一点不动。
-    window.setInterval(() => {
-      if (document.visibilityState === "visible") pollDesktopCommands();
-    }, 1000);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") {
         scheduleSync(800, false);
-        pollDesktopCommands();
       }
     });
-    // 手工排查用：控制台里能直接 __MTR_SYNC_RUNTIME.pollDesktopCommands()。
-    syncRuntime.pollDesktopCommands = pollDesktopCommands;
-    syncRuntime.applyDesktopCommand = applyDesktopCommand;
     // 关掉页面 = 关掉工作流，立刻从手机列表里撤掉
     window.addEventListener("beforeunload", () => {
       try {

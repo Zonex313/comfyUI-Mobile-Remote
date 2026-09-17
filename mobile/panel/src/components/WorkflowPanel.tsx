@@ -237,7 +237,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
     setSearchOpen,
     inputRef: searchInputRef,
   });
-  useWorkflowUndoShortcuts(visible);
+  // Phone edits are saved through the host draft; graph undo is not exposed.
 
   // Bottom-of-list quick-add: add a node or an empty group at the bottom of the
   // current scope (root or the subgraph we're inside).
@@ -1198,7 +1198,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
                     ])
                   : undefined
               }
-              onEnterSubgraph={enterSubgraphHandlers(placeholderNode.id)}
+              onEnterSubgraph={undefined}
             />
           </div>
         );
@@ -1410,10 +1410,8 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       ref={wrapperRef}
       className="absolute inset-x-0 bottom-0 bg-slate-950/88"
       style={{ display: visible ? "block" : "none", top: workflowViewportTop }}
-      onDragEnter={handleFileDragEnter}
-      onDragOver={handleFileDragOver}
-      onDragLeave={handleFileDragLeave}
-      onDrop={handleFileDrop}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => { event.preventDefault(); event.stopPropagation(); }}
     >
       {isFileDragging && (
         <div
@@ -1426,7 +1424,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
           </div>
         </div>
       )}
-      <WorkflowUndoToast />
+
       {content}
       <AddNodeModal
         isOpen={addNodeModalOpen}

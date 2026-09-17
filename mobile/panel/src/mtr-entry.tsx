@@ -1,318 +1,250 @@
-/* 手机远程插件「高级」页入口。
- *
- * 这里**不重写**节点控制界面：直接挂参考项目（comfyui-mobile-frontend，MIT）
- * 的真实组件 WorkflowPanel，UI 与交互与它完全一致。
- * 我们只做三件接驳的事：
- *   1. 数据：从本插件自己的接口取电脑端同步下来的原生工作流
- *      （GET /mobile/api/panel/workflow/<id>），节点定义走 ComfyUI 原生 /api/object_info。
- *   2. 语言：跟随手机页当前的界面语言（本插件自己那套 locale）。
- *   3. 回写：面板里改过的值/状态做差分，回写成本插件的「手机 → 电脑端」指令
- *      POST /mobile/api/desktop/commands，保证电脑画布真的跟着变。
- */
-import { StrictMode } from 'react'
+/* Reference panel UI; phone draft is authoritative. No desktop commands or queue API. */
 import { createRoot } from 'react-dom/client'
-import type { Root } from 'react-dom/client'
+import { useRef, useState } from 'react'
+import { WorkflowTopBarMenu } from '@/components/WorkflowPanel/WorkflowTopBarControls/WorkflowTopBarMenu'
+import { useDismissOnOutsideClick } from '@/hooks/useDismissOnOutsideClick'
 import './index.css'
 import './mtr-entry.css'
 import { WorkflowPanel } from '@/components/WorkflowPanel'
 import { useWorkflowStore } from '@/hooks/useWorkflow'
-import { useWorkflowErrorsStore } from '@/hooks/useWorkflowErrors'
+import { useSeedStore } from '@/hooks/useSeed'
+import { useBookmarksStore } from '@/hooks/useBookmarks'
+import { useParameterSectionFoldsStore } from '@/hooks/useParameterSectionFolds'
+import { useConnectionSectionFoldsStore } from '@/hooks/useConnectionSectionFolds'
 import { ensureLocaleLoaded, useLocaleStore } from '@/i18n'
 import * as api from '@/api/client'
 import { getInputWidgetDefinitions, getWidgetDefinitions } from '@/utils/widgetDefinitions'
 import type { Workflow, WorkflowNode } from '@/api/types'
 
-const LOG_PREFIX = '[Mobile Remote panel]'
-const COMMAND_URL = '/mobile/api/desktop/commands'
-const LOCALE_ALIASES: Record<string, string> = {
-  zh: 'zh-CN', 'zh-cn': 'zh-CN', 'zh-tw': 'zh-TW', en: 'en', ja: 'ja', ko: 'ko',
-}
-
-type PanelOptions = { workflowId?: string; locale?: string }
-type PanelHandle = {
-  setWorkflow: (workflowId: string) => Promise<void>
-  setLocale: (locale: string) => void
-  /** 宿主（手机页）把参数值推过来：两边共用一份值。 */
-  setValues: (values: Record<string, unknown>) => void
-  destroy: () => void
-}
-
-/* ---------------------------------------------------------------- 回写桥 */
-/* 面板改的是它自己内存里的工作流。我们做的是「快照差分 → 指令」：
- * 不侵入它的组件代码，任何一处改动（控件值、旁路、隐藏、标题、颜色）都能被
- * 统一捕获，再交给本插件既有的指令通道送到电脑端。 */
-type NodeSnapshot = {
-  mode: number
-  title: string
-  color: string
-  hidden: boolean
-  collapsed: boolean
-  widgets: string
-}
-
-function snapshotNodes(workflow: Workflow | null): Map<string, NodeSnapshot> {
-  const map = new Map<string, NodeSnapshot>()
-  const nodes = (workflow?.nodes ?? []) as WorkflowNode[]
-  for (const node of nodes) {
-    if (!node || node.id === undefined || node.id === null) continue
-    const flags = (node.flags ?? {}) as Record<string, unknown>
-    map.set(String(node.id), {
-      mode: Number(node.mode ?? 0),
-      title: String(node.title ?? ''),
-      color: String(node.color ?? ''),
-      hidden: Boolean(flags.hidden),
-      collapsed: Boolean(flags.collapsed),
-      widgets: JSON.stringify(node.widgets_values ?? null),
-    })
-  }
-  return map
-}
-
-function widgetsOf(node: WorkflowNode): unknown[] {
-  return Array.isArray(node.widgets_values) ? node.widgets_values : []
-}
-
-/* 面板的控件清单：普通控件与下拉（COMBO）分成两个列表，这里合成"下标 → 输入名"。 */
-function widgetNameByIndex(node: WorkflowNode, nodeTypes: unknown): Map<number, string> {
-  const map = new Map<number, string>()
-  try {
-    const groups = [
-      getWidgetDefinitions(nodeTypes as never, node),
-      getInputWidgetDefinitions(nodeTypes as never, node),
-    ]
-    for (const list of groups) {
-      for (const def of list) {
-        if (def && typeof def.widgetIndex === 'number') {
-          map.set(def.widgetIndex, String(def.inputName ?? def.name ?? ''))
-        }
-      }
-    }
-  } catch (error) {
-    console.debug(LOG_PREFIX + ' 控件清单解析失败', error)
-  }
-  return map
-}
-
-/* 控件下标 → 提交用的输入名：优先 inputName（动态下拉的子项名），否则 name。 */
-function inputNameForWidget(node: WorkflowNode, index: number, nodeTypes: unknown): string {
-  return widgetNameByIndex(node, nodeTypes).get(index) ?? ''
-}
-
-/* 反向：手机给的输入名 → 面板里这一格的下标（-1 表示面板没有这一格）。 */
-function widgetIndexForInput(node: WorkflowNode, input: string, nodeTypes: unknown): number {
-  for (const [index, name] of widgetNameByIndex(node, nodeTypes)) {
-    if (name === input) return index
-  }
-  return -1
-}
-
-function notifyParent(payload: Record<string, unknown>): void {
-  try {
-    ;(globalThis.parent ?? globalThis).postMessage({ type: 'mtr-panel', ...payload }, '*')
-  } catch (error) {
-    console.debug(LOG_PREFIX + ' 通知宿主失败', error)
-  }
-}
-
-function postCommand(payload: Record<string, unknown>): void {
-  try {
-    void fetch(COMMAND_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }).catch(() => undefined)
-  } catch (error) {
-    console.debug(LOG_PREFIX + ' 指令发送失败', error)
-  }
-}
-
-function diffAndPush(
-  workflowId: string,
-  previous: Map<string, NodeSnapshot>,
-  workflow: Workflow | null,
-): Map<string, NodeSnapshot> {
-  const next = snapshotNodes(workflow)
-  if (!workflowId || previous.size === 0) return next
-  const nodes = (workflow?.nodes ?? []) as WorkflowNode[]
-  const byId = new Map(nodes.map((node) => [String(node.id), node]))
-  for (const [id, after] of next) {
-    const before = previous.get(id)
-    const node = byId.get(id)
-    if (!node) continue
-    if (!before) continue
-    if (before.mode !== after.mode) {
-      postCommand({ workflow_id: workflowId, node_id: id, input: 'action', action: 'bypass', value: after.mode === 4 })
-    }
-    if (before.hidden !== after.hidden) {
-      postCommand({ workflow_id: workflowId, node_id: id, input: 'action', action: 'hide', value: after.hidden })
-    }
-    if (before.collapsed !== after.collapsed) {
-      postCommand({ workflow_id: workflowId, node_id: id, input: 'action', action: 'collapse', value: after.collapsed })
-    }
-    if (before.title !== after.title) {
-      postCommand({ workflow_id: workflowId, node_id: id, input: 'action', action: 'rename', value: after.title })
-    }
-    if (before.color !== after.color) {
-      postCommand({ workflow_id: workflowId, node_id: id, input: 'action', action: 'color', value: after.color })
-    }
-    if (before.widgets !== after.widgets) {
-      const beforeValues = JSON.parse(before.widgets ?? 'null')
-      const afterValues = widgetsOf(node)
-      const list = Array.isArray(beforeValues) ? beforeValues : []
-      const nodeTypes = useWorkflowStore.getState().nodeTypes
-      for (let index = 0; index < afterValues.length; index += 1) {
-        if (JSON.stringify(list[index]) === JSON.stringify(afterValues[index])) continue
-        const input = inputNameForWidget(node, index, nodeTypes)
-        if (!input) continue
-        postCommand({ workflow_id: workflowId, node_id: id, input, value: afterValues[index] })
-        // 同时告诉手机：草稿里也写一份，回生成页点「生成」用的就是它。
-        notifyParent({ action: 'value', nodeId: id, input, value: afterValues[index] })
-      }
+const LOCALES: Record<string, string> = { zh: 'zh-CN', en: 'en', ja: 'ja', ko: 'ko' }
+const clone = <T,>(x: T): T => JSON.parse(JSON.stringify(x))
+const equal = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+type Identity = { workflowId: string; snapshot: string; epoch: number }
+function definitions(node: WorkflowNode) {
+  const types = useWorkflowStore.getState().nodeTypes
+  const defs = [...getWidgetDefinitions(types, node), ...getInputWidgetDefinitions(types, node)]
+  // The reference renderer handles implicit seed mode slots separately from descriptors.
+  // Expose the same unoccupied slot to the host bridge, without guessing over a real input.
+  if (Array.isArray(node.widgets_values) && !defs.some(d => d.name === 'control_after_generate')) {
+    const seed = defs.find(d => d.type === 'INT' && ['seed','noise_seed'].includes(d.inputName || d.name))
+    const index = seed ? seed.widgetIndex + 1 : -1
+    const mode = node.widgets_values[index]
+    if (index >= 0 && !defs.some(d => d.widgetIndex === index) && ['fixed','randomize','increment','decrement'].includes(String(mode))) {
+      defs.push({name:'control_after_generate',inputName:'control_after_generate',type:'COMBO',widgetIndex:index,value:mode,isCombo:true,connected:false,inputIndex:-1})
     }
   }
-  return next
+  return defs
+}
+// Root parameter values and modes are the only graph data the phone may change.
+// Existing subgraphs remain intact; their custom serialization stays desktop-owned.
+function immutableShape(workflow: Workflow | null) {
+  if (!workflow) return ''
+  const {nodes, ...rest} = workflow
+  return JSON.stringify({...rest, nodes:nodes.map(({widgets_values, mode, title, color, bgcolor, flags, ...node}) => node)})
+}
+function controls() {
+  return new Map((useWorkflowStore.getState().workflow?.nodes || []).map(n => [String(n.id), clone(n)]))
 }
 
-/* ------------------------------------------------------------------ 挂载 */
-function mountPanel(container: HTMLElement, options: PanelOptions = {}): PanelHandle {
-  container.classList.add('mtr-panel-host')
-  const host = document.createElement('div')
-  host.className = 'mtr-panel-root'
-  container.replaceChildren(host)
+function PhonePanelControls() {
+  const [open, setOpen] = useState(false)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const close = () => setOpen(false)
+  const noop = () => undefined
+  useDismissOnOutsideClick({open, onDismiss:close, triggerRef:buttonRef, contentRef:menuRef})
+  return <div className="relative z-50 flex justify-end px-2 shrink-0"><WorkflowTopBarMenu open={open} buttonRef={buttonRef} menuRef={menuRef} onToggle={() => setOpen(!open)} onClose={close} onGoToQueue={noop} onGoToOutputs={noop} onAddNode={noop} onAddGroup={noop} onOpenWorkflowActions={noop} onReloadWorkflow={noop} /></div>
+}
 
-  const root: Root = createRoot(host)
-  let workflowId = String(options.workflowId ?? '')
-  let snapshot = new Map<string, NodeSnapshot>()
-  let loading = false
-  let unsubscribed = false
-  // 手机那边推过来的值正在写入面板 store：这期间既不回写桌面指令，也不回声给手机，
-  // 否则会变成自己改自己、并且把"只改手机"的值顺手推到电脑画布上。
-  let applyingParent = false
+function mountPanel(container: HTMLElement, options: {locale?: string} = {}) {
+  const root = createRoot(container)
+  let identity: Identity = { workflowId: '', snapshot: '', epoch: -1 }
+  let request = 0
+  let applying = false
+  let loaded = false
+  let disposed = false
+  let previous = new Map<string, WorkflowNode>()
+  let lastView: unknown = null
+  let lastSeeds: unknown = null
+  let acceptedWorkflow: Workflow | null = null
+  let lockedShape = ''
+  let ready: Promise<void> = Promise.resolve()
+  const notify = (action: string, extra = {}) => parent.postMessage({type: 'mtr-panel', action, ...identity, ...extra}, location.origin)
+  const matches = (data: Identity) => data.workflowId === identity.workflowId && data.snapshot === identity.snapshot && data.epoch === identity.epoch
+  const setLocale = async (locale: string) => {
+    const next = LOCALES[locale] || 'zh-CN'
+    useLocaleStore.getState().setLocale(next as never)
+    await ensureLocaleLoaded(next as never)
+  }
+  void setLocale(options.locale || 'zh')
 
-  // 手机推过来的值写进面板 store：优先走它的 updateNodeWidget（保留它的归一化逻辑），
-  // 拿不到 itemKey 时直接改 widgets_values 再触发一次 store 更新。
-  const applyParentValues = (values: Record<string, unknown>) => {
-    const current = useWorkflowStore.getState()
-    const workflow = current.workflow
-    if (!workflow || !values) return
-    const nodes = (workflow.nodes ?? []) as WorkflowNode[]
-    const nodeTypes = current.nodeTypes
-    let touched = false
-    applyingParent = true
-    try {
-      for (const [key, value] of Object.entries(values)) {
-        const sep = key.indexOf('::')
-        if (sep <= 0) continue
-        const nodeId = key.slice(0, sep)
-        const input = key.slice(sep + 2)
-        const node = nodes.find((item) => String(item.id) === nodeId)
-        if (!node) continue
-        const index = widgetIndexForInput(node, input, nodeTypes)
-        if (index < 0) continue
-        if (JSON.stringify(widgetsOf(node)[index]) === JSON.stringify(value)) continue
-        const itemKey = String((node as unknown as { itemKey?: string }).itemKey ?? '')
-        const update = useWorkflowStore.getState().updateNodeWidget
-        if (itemKey && typeof update === 'function') {
-          update(itemKey as never, index, value, input)
-        } else {
-          const next = [...widgetsOf(node)]
-          next[index] = value
-          node.widgets_values = next
-        }
-        touched = true
-      }
-      if (touched && !useWorkflowStore.getState().workflow?.nodes?.length) {
-        // 兜底分支改的是同一个对象，这里推一次引用让 React 重渲染。
-        useWorkflowStore.setState({ workflow: { ...workflow } as never })
-      }
-    } catch (error) {
-      console.warn(LOG_PREFIX + ' 应用宿主参数失败', error)
-    } finally {
-      // 等这一轮渲染落定再放开，并刷新快照：这些是"手机推来的"，不该再回写桌面。
-      setTimeout(() => {
-        applyingParent = false
-        snapshot = snapshotNodes(useWorkflowStore.getState().workflow)
-      }, 0)
+  const view = () => {
+    const s = useWorkflowStore.getState()
+    const stable = (key: string) => s.pointerByHierarchicalKey[key] || key
+    const map = (v: Record<string, unknown>) => Object.fromEntries(Object.entries(v).map(([k,x]) => [stable(k),x]))
+    return {
+      hidden: map(s.hiddenItems), collapsed: map(s.collapsedItems), connectionButtonsVisible: s.connectionButtonsVisible,
+      bookmarks: useBookmarksStore.getState().bookmarkedItems.map(stable),
+      parameters: useParameterSectionFoldsStore.getState().collapsedItemKeys.map(stable),
+      connections: useConnectionSectionFoldsStore.getState().collapsedItemKeys.map(stable),
+      labels: Object.fromEntries((s.workflow?.nodes || []).map(n => [String(n.id), {title:n.title, color:n.color, bgcolor:n.bgcolor}])),
     }
   }
-
-  const applyLocale = (locale?: string) => {
-    const id = LOCALE_ALIASES[String(locale ?? '').toLowerCase()]
-    if (!id) return
-    if (useLocaleStore.getState().locale === id) return
-    useLocaleStore.getState().setLocale(id as never)
-  }
-  applyLocale(options.locale)
-
-  const loadWorkflow = async (id: string) => {
-    if (!id) return
-    loading = true
-    try {
-      const [response, nodeTypes] = await Promise.all([
-        fetch('/mobile/api/panel/workflow/' + encodeURIComponent(id), { cache: 'no-store' }),
-        useWorkflowStore.getState().nodeTypes ? Promise.resolve(null) : api.getNodeTypes().catch(() => null),
-      ])
-      if (nodeTypes) useWorkflowStore.getState().setNodeTypes(nodeTypes)
-      const body = await response.json().catch(() => null)
-      if (!response.ok || !body || !body.workflow) {
-        const message = (body && body.error) || '无法读取这个工作流的原始数据'
-        useWorkflowErrorsStore.getState().setError(message)
-        console.warn(LOG_PREFIX + ' ' + message)
+  const collect = () => {
+    if (!loaded || applying || disposed) return
+    const currentWorkflow = useWorkflowStore.getState().workflow
+    if (currentWorkflow !== acceptedWorkflow) {
+      if (immutableShape(currentWorkflow) !== lockedShape) {
+        applying = true
+        acceptedWorkflow = acceptedWorkflow ? clone(acceptedWorkflow) : null
+        useWorkflowStore.setState({workflow:acceptedWorkflow})
+        applying = false
+        notify('error', {reason:'unsupported-edit'})
         return
       }
+      acceptedWorkflow = currentWorkflow
+    }
+    const after = controls()
+    const changes: any = { values: {}, node_modes: {}, widget_values: {}, seed_modes: {} }
+    for (const [id, node] of after) {
+      const before = previous.get(id)
+      if (!before) continue
+      if (node.mode !== before.mode) changes.node_modes[id] = Number(node.mode || 0)
+      if (!equal(node.widgets_values, before.widgets_values)) {
+        const defs = definitions(node)
+        const current: any = node.widgets_values || []
+        const oldValues: any = before.widgets_values || []
+        const scalar = (v: unknown) => v === null || ['string','number','boolean'].includes(typeof v)
+        const unmatched = Object.keys(current).some(k => !equal(current[k], oldValues[k]) && (!scalar(current[k]) || !defs.some(d => (Array.isArray(current) ? String(d.widgetIndex) : (d.inputName || d.name)) === k)))
+        if (unmatched) changes.widget_values[id] = node.widgets_values
+        for (const def of defs) {
+          const name = def.inputName || def.name
+          const index = def.widgetIndex
+          const values: any = node.widgets_values || []
+          const old: any = before.widgets_values || []
+          const value = Array.isArray(values) ? values[index] : values[name]
+          if (equal(value, Array.isArray(old) ? old[index] : old[name])) continue
+          if (name === 'control_after_generate') {
+            const seed = definitions(node).find(d => /(?:^|_)seed$/.test(d.inputName || d.name))
+            if (seed) changes.seed_modes[id + '::' + (seed.inputName || seed.name)] = value
+          } else if (value === null || ['string','number','boolean'].includes(typeof value)) {
+            changes.values[id + '::' + name] = value
+          }
+        }
+      }
+    }
+    const seedModes = useSeedStore.getState().seedModes
+    if (!equal(lastSeeds, seedModes)) {
+      for (const [id, mode] of Object.entries(seedModes)) {
+        const node = after.get(id)
+        const seed = node && definitions(node).find(d => /(?:^|_)seed$/.test(d.inputName || d.name))
+        if (seed) changes.seed_modes[id + '::' + (seed.inputName || seed.name)] = mode
+      }
+      lastSeeds = clone(seedModes)
+    }
+    const nextView = view()
+    if (!equal(nextView, lastView)) { changes.view = nextView; lastView = nextView }
+    previous = after
+    if (Object.values(changes).some(x => x && Object.keys(x).length)) notify('edit', { value: changes })
+  }
+  const applyValues = (data: any) => {
+    if (!loaded) return
+    applying = true
+    try {
+      for (const [key, raw] of Object.entries(data.values || {})) {
+        const sep = key.lastIndexOf('::')
+        if (sep < 1) continue
+        const id = key.slice(0,sep), name = key.slice(sep+2)
+        const s = useWorkflowStore.getState()
+        const node = s.workflow?.nodes.find(n => String(n.id) === id)
+        if (!node) continue
+        const def = definitions(node).find(d => (d.inputName || d.name) === name)
+        if (!def || raw === '__random__') continue
+        const value = ['INT','FLOAT'].includes(def.type) && typeof raw === 'string' && raw.trim() && Number.isFinite(Number(raw)) ? Number(raw) : raw
+        const current: any = node.widgets_values || []
+        if (!equal(Array.isArray(current) ? current[def.widgetIndex] : current[name], value)) {
+          s.updateNodeWidget(node.itemKey as never, def.widgetIndex, value, name)
+        }
+      }
+      for (const [key, mode] of Object.entries(data.seed_modes || {})) {
+        const id = key.slice(0,key.lastIndexOf('::'))
+        const s = useWorkflowStore.getState(), node = s.workflow?.nodes.find(n => String(n.id) === id)
+        if (!node || !['fixed','randomize','increment','decrement'].includes(String(mode))) continue
+        const def = definitions(node).find(d => (d.inputName || d.name) === 'control_after_generate')
+        if (def) s.updateNodeWidget(node.itemKey as never, def.widgetIndex, mode, 'control_after_generate')
+        useSeedStore.setState({ seedModes: {...useSeedStore.getState().seedModes, [id]: mode as never} })
+      }
+      previous = controls(); lastSeeds = clone(useSeedStore.getState().seedModes)
+    } finally { applying = false }
+  }
+  const setWorkflow = async (data: any) => {
+    const generation = ++request
+    identity = { workflowId: data.workflowId, snapshot: data.snapshot, epoch: data.epoch }
+    loaded = false
+    container.style.visibility = 'hidden'
+    try {
+      const body = data.value || {}
+      if (!body.workflow?.nodes) { useWorkflowStore.setState({workflow:null}); container.style.visibility='visible'; return }
+      const types = useWorkflowStore.getState().nodeTypes || await api.getNodeTypes()
       await ensureLocaleLoaded(useLocaleStore.getState().locale)
-      useWorkflowStore.getState().loadWorkflow(body.workflow as Workflow, body.name || '', { replaceActive: true })
-      snapshot = snapshotNodes(useWorkflowStore.getState().workflow)
-      useWorkflowErrorsStore.getState().clearError?.()
-      // 工作流就位了：再报一次 ready，宿主收到后会把这边的值整批推过来。
-      notifyParent({ action: 'ready' })
+      if (disposed || generation !== request) return
+      applying = true
+      useWorkflowStore.getState().setNodeTypes(types)
+      const wf = clone(body.workflow) as Workflow
+      for (const node of wf.nodes) {
+        const id = String(node.id)
+        if ([0,4].includes(body.node_modes?.[id])) node.mode = body.node_modes[id]
+        if (body.widget_values?.[id] !== undefined) node.widgets_values = clone(body.widget_values[id])
+        const label = body.view?.labels?.[id]
+        if (label) Object.assign(node, label)
+      }
+      useWorkflowStore.getState().loadWorkflow(wf, body.name || '', {replaceActive:true})
+      const s = useWorkflowStore.getState(), v = body.view || {}
+      const local = (key: string) => s.itemKeyByPointer[key] || key
+      const map = (value: any) => Object.fromEntries(Object.entries(value || {}).map(([k,x]) => [local(k),x]))
+      useWorkflowStore.setState({hiddenItems:map(v.hidden), collapsedItems:map(v.collapsed), connectionButtonsVisible:v.connectionButtonsVisible !== false})
+      useBookmarksStore.setState({bookmarkedItems:(v.bookmarks || []).map(local)})
+      useParameterSectionFoldsStore.setState({collapsedItemKeys:(v.parameters || []).map(local)})
+      useConnectionSectionFoldsStore.setState({collapsedItemKeys:(v.connections || []).map(local)})
+      useSeedStore.setState({seedModes:{},seedLastValues:{}})
+      loaded = true
+      applyValues(body)
+      acceptedWorkflow = useWorkflowStore.getState().workflow
+      lockedShape = immutableShape(acceptedWorkflow)
+      previous = controls(); lastView = view(); lastSeeds = clone(useSeedStore.getState().seedModes)
+      applying = false
+      container.style.visibility = 'visible'
+      renderPanel()
+      notify('loaded')
     } catch (error) {
-      console.error(LOG_PREFIX + ' 加载工作流失败', error)
-    } finally {
-      loading = false
+      if (generation !== request || disposed) return
+      loaded = false; applying = false; container.style.visibility = 'visible'
+      container.style.visibility = 'hidden'
+      notify('error', {message: String(error instanceof Error ? error.message : error)})
     }
   }
-
-  // 差分只在面板空闲（没在加载）时跑，避免把我们自己灌进去的数据当成用户改动。
-  useWorkflowStore.subscribe((state) => {
-    if (unsubscribed || loading || applyingParent || !workflowId) return
-    snapshot = diffAndPush(workflowId, snapshot, state.workflow)
-  })
-
-  root.render(
-    <StrictMode>
-      <div className="mtr-panel-shell">
-        <WorkflowPanel visible onImageClick={() => undefined} />
-      </div>
-    </StrictMode>,
-  )
-
-  if (workflowId) void loadWorkflow(workflowId)
-
+  const unsubscribes = [useWorkflowStore, useSeedStore, useBookmarksStore, useParameterSectionFoldsStore, useConnectionSectionFoldsStore].map(store => store.subscribe(collect))
+  const renderPanel = () => root.render(<div key={`${identity.workflowId}/${identity.snapshot}/${identity.epoch}`} className="mtr-panel-shell flex flex-col h-full min-h-0"><PhonePanelControls /><div className="relative flex-1 min-h-0"><WorkflowPanel visible onImageClick={() => undefined} /></div></div>)
+  renderPanel()
   return {
-    setWorkflow: (id: string) => {
-      workflowId = String(id ?? '')
-      return loadWorkflow(workflowId)
+    receive(data: any) {
+      if (data.action === 'clear') { request++; loaded=false; identity={...identity,epoch:data.epoch}; container.style.visibility='hidden'; return }
+      if (data.action === 'workflow') { ready = setWorkflow(data); return }
+      if (data.action === 'locale') { void setLocale(String(data.value)); return }
+      if (!matches(data)) return
+      if (data.action === 'values') { void ready.then(() => {if(matches(data)) applyValues(data.value || {})}); return }
+      if (data.action === 'flush') {
+        const active = document.activeElement
+        if (active instanceof HTMLElement) active.blur()
+        void ready.then(() => {
+          if (!matches(data)) return
+          if (!loaded) { notify('error',{message:'Panel is not ready'}); return }
+          collect(); notify('flushed',{requestId:data.requestId})
+        })
+      }
     },
-    setLocale: (locale: string) => {
-      applyLocale(locale)
-      void ensureLocaleLoaded(useLocaleStore.getState().locale)
-    },
-    setValues: (values: Record<string, unknown>) => {
-      applyParentValues(values)
-    },
-    destroy: () => {
-      unsubscribed = true
-      try { root.unmount() } catch (error) { console.debug(LOG_PREFIX + ' 卸载异常', error) }
-      container.replaceChildren()
-    },
+    destroy() {disposed=true;request++;unsubscribes.forEach(fn=>fn());root.unmount()},
   }
 }
-
-declare global {
-  // eslint-disable-next-line no-var
-  var MobileRemotePanel: { mount: typeof mountPanel } | undefined
-}
-
-globalThis.MobileRemotePanel = { mount: mountPanel }
-console.info(LOG_PREFIX + ' ready')
+declare global { var MobileRemotePanel: {mount: typeof mountPanel} | undefined }
+globalThis.MobileRemotePanel = {mount: mountPanel}

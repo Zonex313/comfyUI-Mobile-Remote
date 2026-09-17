@@ -1,3 +1,4 @@
+import { phoneObjectActions } from '@/hooks/phonePanelPolicy';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import type { ReactNode, RefObject } from 'react';
 import { createPortal } from 'react-dom';
@@ -98,6 +99,7 @@ export function WorkflowObjectContextMenu({
         });
       }
       for (const item of sections[sectionName]) {
+        if (!phoneObjectActions.has(String(item.key))) continue;
         if (item.type === 'custom') {
           result.push(item);
           continue;
