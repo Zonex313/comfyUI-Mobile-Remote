@@ -107,12 +107,10 @@ export function PhoneConnectionPreview({
   useEffect(() => {
     const previous = shownRelations.current;
     shownRelations.current = relations;
-    // A travel hands the rail over on its own beat, so the swap it triggers is
-    // not a fresh change for this effect to animate.
-    if (travelPending.current) {
-      travelPending.current = false;
-      return;
-    }
+    // A travel owns the handover for its whole duration. Its own swap is not a
+    // fresh change to animate, and replaying it here is what made an emptied
+    // side slide its tabs away a second time.
+    if (travelActive.current) return;
     const unchanged = (a: PhoneRelation[], b: PhoneRelation[]) =>
       a.length === b.length &&
       a.every((entry, index) => entry.node.itemKey === b[index]?.node.itemKey);
@@ -129,9 +127,9 @@ export function PhoneConnectionPreview({
   // the same beat the list does, and the incoming set starts sliding in with the
   // list's own incoming slide, so both land together.
   const [departing, setDeparting] = useState(false);
-  const travelPending = useRef(false);
+  const travelActive = useRef(false);
   const onDepart = useCallback(() => {
-    travelPending.current = true;
+    travelActive.current = true;
     setDeparting(true);
   }, []);
   const onSwap = useCallback((key: string) => {
@@ -142,6 +140,7 @@ export function PhoneConnectionPreview({
     scheduleRef.current();
   }, []);
   const onArrive = useCallback((key: string) => {
+    travelActive.current = false;
     setDeparting(false);
     focusRef.current = key;
     forcedUntil.current = Date.now() + 500;
@@ -149,7 +148,7 @@ export function PhoneConnectionPreview({
     scheduleRef.current();
   }, []);
   const onCancel = useCallback(() => {
-    travelPending.current = false;
+    travelActive.current = false;
     setDeparting(false);
   }, []);
   const travelling = usePhoneConnectionTravel(scrollerRef, workflow, enabled, {

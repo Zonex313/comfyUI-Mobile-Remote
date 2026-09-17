@@ -737,3 +737,38 @@ for (const count of [14, 120]) {
     } finally {await browser.close();await stopFixture(fixture.server);}
   });
 }
+
+test('a side that empties out slides its tabs away exactly once', {timeout:120000}, async()=>{
+  const {chromium}=resolvePlaywright();
+  const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+  const fixture=await startFixture(relationFixture());
+  try {
+    const context=await browser.newContext({locale:'zh-CN',viewport:{width:390,height:844}});
+    const page=await context.newPage();const errors=[];
+    page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(fixture.url);await page.click('.nav-button[data-target=advanced]');
+    const frame=page.frameLocator('#view-advanced .panel-frame');
+    await frame.locator('#node-card-10').waitFor();
+    await focusPanelNode(frame,2);
+    await frame.locator('[data-phone-side=input][data-phone-relation="1"]').waitFor();
+    await frame.locator('body').evaluate(()=>{
+      window.__railAnimations=[];
+      document.addEventListener('animationstart',event=>{
+        const el=event.target;
+        if(typeof el.className!=='string'||!el.className.includes('phone-relation-preview'))return;
+        window.__railAnimations.push({name:event.animationName,rel:el.dataset.phoneRelation||'ghost',side:el.dataset.phoneSide||'ghost'});
+      },true);
+    });
+    // Node 1 has no inputs, so the entire left rail empties on this hop.
+    await frame.locator('[data-phone-side=input][data-phone-relation="1"]').click();
+    await frame.locator('[data-phone-focus-id="1"]').waitFor({state:'attached'});
+    await page.waitForTimeout(700);
+    const animations=await frame.locator('body').evaluate(()=>window.__railAnimations);
+    const leftLeaves=animations.filter(entry=>entry.name==='phone-relation-leave-left');
+    assert.equal(leftLeaves.length,3,'each outgoing left tab slides out exactly once: '+JSON.stringify(animations));
+    assert.ok(leftLeaves.every(entry=>entry.rel!=='ghost'),'the outgoing tabs are not replayed as ghosts: '+JSON.stringify(animations));
+    assert.equal(fixture.posted.length,0);
+    assert.deepEqual(errors,[]);
+    await context.close();
+  } finally {await browser.close();await stopFixture(fixture.server);}
+});
