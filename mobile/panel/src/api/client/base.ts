@@ -21,10 +21,54 @@ function getOrCreateClientId(): string {
 
 export const clientId = getOrCreateClientId();
 
+/**
+ * 把下载进度报给手机宿主页 —— 面板跑在它的 iframe 里，由它画进度条。
+ * 独立运行（参考项目自己的整页）时 parent 就是自己，直接跳过。
+ */
+function reportDownload(phase: string, loaded: number, total: number) {
+  try {
+    if (window.parent === window) return;
+    window.parent.postMessage(
+      { type: 'mtr-panel', action: 'progress', progress: { phase, loaded, total } },
+      window.location.origin,
+    );
+  } catch {
+    // 报进度失败不该影响下载本身。
+  }
+}
+
+/**
+ * 流式读一个 JSON 响应，边收边报字节数。
+ *
+ * /api/object_info 装了自定义节点后能到 5MB 以上 —— 比面板脚本本身还大，而且是首屏
+ * 必须的。不报进度的话，宿主页的进度条早就走完了，用户对着白屏干等。
+ */
+async function readJsonWithProgress<T>(response: Response, phase: string): Promise<T> {
+  const total = Number(response.headers.get('Content-Length')) || 0;
+  if (!response.body || !total) return response.json() as Promise<T>;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.length;
+    reportDownload(phase, loaded, total);
+  }
+  const merged = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return JSON.parse(new TextDecoder().decode(merged)) as T;
+}
+
 export async function getNodeTypes(): Promise<NodeTypes> {
   const response = await fetch(`/api/object_info`);
   if (!response.ok) throw new Error('Failed to fetch node types');
-  return response.json();
+  return readJsonWithProgress<NodeTypes>(response, 'nodes');
 }
 
 export function getImageUrl(

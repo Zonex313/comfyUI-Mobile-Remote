@@ -58,16 +58,58 @@
   }
 
   let mounted = false;
+  let workflowSeen = false;
+  let painted = false;
+
+  /**
+   * 挂载是异步的：React 先把外壳排上队列，工作流到了之后才排节点卡。
+   * 「ready」只能说明组件挂上了，这时候 iframe 里还是白的 —— 手机页的加载条要等到
+   * 真正画出内容才让位，否则下载完到首屏之间又是一段白屏，看着像进度条在骗人。
+   */
+  function reportPainted() {
+    if (painted) return;
+    painted = true;
+    parent.postMessage({ type: "mtr-panel", action: "painted" }, location.origin);
+  }
+
+  function whenPainted(startedAt) {
+    let frames = 0;
+    const tick = () => {
+      frames += 1;
+      const root = document.getElementById("panel-root");
+      // 面板在等节点类型定义（/api/object_info，装了自定义节点能到 5MB）时会把根节点设成
+      // hidden：这时候 DOM 里已经有壳子了，但屏幕上是白的 —— 必须按「可见」判断。
+      const visible = Boolean(root) && root.style.visibility !== "hidden";
+      const settled =
+        visible &&
+        Boolean(
+          root.querySelector("#node-list-shell") ||
+            root.querySelector("#node-list-empty") ||
+            // 占位卡只在确实没有工作流时才算数：工作流可能还在路上（大工作流比面板还慢）。
+            (!workflowSeen &&
+              root.querySelector("#node-list-no-workflow") &&
+              Date.now() - startedAt > 1200),
+        );
+      // 留两帧：一帧给 React 提交，一帧给浏览器把首次绘制交出去。
+      if ((settled && frames >= 2) || frames > 3600) return reportPainted();
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
   function finish() {
     if (mounted) return;
     mounted = true;
+    const startedAt = Date.now();
     const handle = globalThis.MobileRemotePanel.mount(document.getElementById("panel-root"), { locale });
     addEventListener("message", event => {
       if (event.source !== parent || event.origin !== location.origin || event.data?.type !== "mtr-panel") return;
+      if (event.data.action === "workflow") workflowSeen = true;
       handle.receive(event.data);
     });
     addEventListener("pagehide", () => handle.destroy(), {once:true});
     parent.postMessage({type:"mtr-panel",action:"ready"}, location.origin);
+    whenPainted(startedAt);
   }
 
   // 兜底：万一流式取或 blob 导入出问题，就退回原来的普通标签加载 —— 慢一点，但不白屏。

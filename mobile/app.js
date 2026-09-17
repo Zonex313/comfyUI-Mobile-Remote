@@ -276,7 +276,10 @@
     const data = event.data;
     if (!data || data.type !== "mtr-panel") return;
     if (data.action === "progress") { updatePanelProgress(data.progress); return; }
-    if (data.action === "ready") { finishPanelLoading(); syncPanelWorkflow(true); return; }
+    // 「ready」只说明面板组件挂上了：React 的渲染还是异步的，这时候 iframe 里还是白的。
+    // 加载条要等到面板报「painted」（真画出内容）才让位，否则下载完到首屏之间又是白屏。
+    if (data.action === "ready") { syncPanelWorkflow(true); return; }
+    if (data.action === "painted") { panelPainted = true; finishPanelLoadingWhenReady(); return; }
     const identity = panelIdentity();
     if (workflowLoading || resettingWorkflow || data.workflowId !== identity.workflowId || data.snapshot !== identity.snapshot || data.epoch !== identity.epoch) return;
     if (data.action === "error") { finishPanelLoading(); toast(data.reason === "unsupported-edit" ? t("此修改涉及子图内部或连接结构，已撤销。请在电脑端修改后重新同步。") : String(data.message || t("高级面板加载失败，请刷新重试。")), "error"); return; }
@@ -311,7 +314,21 @@
 
   // 面板资源 1.4MB，首次进入要下好几秒。面板页自己流式取 CSS/JS 并把字节数报过来，
   // 这里只负责画：拿不到字节数之前走不确定的滑动条，拿到之后是真实百分比。
-  const panelLoadingState = { element: null, fill: null, percent: null, shown: false, hideTimer: 0 };
+  const panelLoadingState = { element: null, fill: null, percent: null, shown: false, hideTimer: 0, renderTimer: 0, phase: "" };
+
+  // 面板分两段下载：先是面板自己的脚本与样式，再是节点类型定义（装了自定义节点能到 5MB，
+  // 比面板本身还大）。两段各有各的字节数，所以进度按当前这一段算，标题说清在做什么。
+  function panelProgressLabel(phase) {
+    return phase === "nodes" ? t("正在读取节点定义…") : t("正在加载高级面板…");
+  }
+  // 面板画出来了、手机这边的工作流也读完了，加载条才该让位：只满足一个都会露出
+  // 「未加载工作流」的占位卡。
+  let panelPainted = false;
+
+  function finishPanelLoadingWhenReady() {
+    if (!panelPainted || workflowLoading) return;
+    finishPanelLoading();
+  }
 
   function showPanelLoading() {
     const overlay = $("panelLoading");
@@ -320,7 +337,10 @@
     panelLoadingState.fill = $("panelLoadingFill");
     panelLoadingState.percent = $("panelLoadingPercent");
     panelLoadingState.shown = true;
+    panelLoadingState.phase = "";
+    panelPainted = false;
     window.clearTimeout(panelLoadingState.hideTimer);
+    window.clearTimeout(panelLoadingState.renderTimer);
     overlay.hidden = false;
     overlay.classList.remove("is-done", "is-measured");
     if (panelLoadingState.fill) panelLoadingState.fill.style.width = "0%";
@@ -333,16 +353,31 @@
     if (!state.shown || !state.element) return;
     const total = Number(progress?.total) || 0;
     if (!total) return;
+    const phase = String(progress?.phase || "");
+    if (phase !== state.phase) {
+      state.phase = phase;
+      setText("panelLoadingLabel", panelProgressLabel(phase));
+    }
     const percent = Math.max(0, Math.min(100, Math.round(((Number(progress?.loaded) || 0) / total) * 100)));
     state.element.classList.add("is-measured");
     if (state.fill) state.fill.style.width = percent + "%";
     if (state.percent) state.percent.textContent = percent + "%";
     // 下完了还要解析、挂载，这一段没有字节数可报，换个说法免得看起来卡在 100%。
-    if (percent >= 100) setText("panelLoadingLabel", t("正在初始化面板…"));
+    if (percent >= 100) {
+      setText("panelLoadingLabel", t("正在初始化面板…"));
+      // 下载完就没有字节数可报了，回到不确定的滑动条，免得看着像卡在 100% 不动。
+      state.element.classList.remove("is-measured");
+      // 渲染再慢也不能把人永远挡在加载条后面。
+      window.clearTimeout(state.renderTimer);
+      // 节点类型定义下完之后还要解析、建图、渲染，给足时间；这里只是兜底。
+      state.renderTimer = window.setTimeout(() => finishPanelLoading(), 60000);
+    }
   }
 
   function finishPanelLoading() {
     const state = panelLoadingState;
+    window.clearTimeout(state.renderTimer);
+    state.renderTimer = 0;
     if (!state.shown || !state.element) return;
     state.shown = false;
     state.element.classList.add("is-done");
@@ -1874,6 +1909,8 @@
         renderWorkflow(body.workflow);
         workflowLoading = false;
         syncPanelWorkflow(true);
+        // 刚推过去，给面板两帧把节点排出来再收加载条，中间不留占位卡。
+        requestAnimationFrame(() => requestAnimationFrame(() => finishPanelLoadingWhenReady()));
       } finally {
         hydratingSettings -= 1;
       }
@@ -1883,6 +1920,7 @@
       if (token !== state.workflowLoadToken) return;
       state.workflow = null;
       workflowLoading = false;
+      finishPanelLoadingWhenReady();
       $("generationForm").classList.add("hidden");
       setText("workflowMeta", t(error.message));
       toast(error.message, "error");

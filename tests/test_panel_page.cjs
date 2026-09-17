@@ -205,10 +205,15 @@ function startFixture({ originallyBypassed = false, sourceSeedMode = "fixed", re
       return pump();
     }
     const file = files.get(pathname);
-    if (file) { response.writeHead(200, { "Content-Type": file[0], "Cache-Control": "no-store" }); return response.end(file[1]); }
+    if (file) {
+      response.writeHead(200, { "Content-Type": file[0], "Cache-Control": "no-store", "Content-Length": String(file[1].length) });
+      return response.end(file[1]);
+    }
     if (Object.prototype.hasOwnProperty.call(api, pathname)) {
-      response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-      return response.end(JSON.stringify(api[pathname]));
+      // 真实服务器会带 Content-Length（/api/object_info 有 5MB），进度条靠它算百分比。
+      const body = JSON.stringify(api[pathname]);
+      response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store", "Content-Length": String(Buffer.byteLength(body)) });
+      return response.end(body);
     }
     response.writeHead(404, { "Content-Type": "text/plain" });
     response.end("not found");
@@ -807,25 +812,45 @@ test('the first visit to the advanced page shows real download progress', {timeo
     const page=await context.newPage();const errors=[];
     page.on('pageerror',error=>errors.push(error.message));
     await page.goto(fixture.url);
+    // 面板报上来的每条消息，以及到达时加载条还在不在（用来钉住让位时机）。
+    await page.evaluate(()=>{
+      window.__mtrEvents=[];
+      addEventListener('message',event=>{
+        if(event.data?.type!=='mtr-panel')return;
+        window.__mtrEvents.push({action:event.data.action,phase:event.data.progress?.phase,hidden:!!document.getElementById('panelLoading')?.hidden});
+      });
+    });
     await page.click('.nav-button[data-target=advanced]');
     const overlay=page.locator('#panelLoading');
     await overlay.waitFor({state:'visible'});
     // 真实字节数：进度要出现中间值，而不是 0 直接跳 100。
-    let partial=0;
+    let partial=0,labelAtPartial='';
     for(let attempt=0;attempt<160&&!partial;attempt++){
       const state=await overlay.evaluate(el=>({
         measured:el.classList.contains('is-measured'),
         percent:document.getElementById('panelLoadingPercent').textContent,
+        label:document.getElementById('panelLoadingLabel').textContent,
       }));
       const value=Number(String(state.percent).replace('%',''));
-      if(state.measured&&value>0&&value<100)partial=value;
+      if(state.measured&&value>0&&value<100){partial=value;labelAtPartial=state.label;}
       else await page.waitForTimeout(20);
     }
     assert.ok(partial>0,'the bar reports intermediate progress: '+partial);
-    assert.equal(await page.locator('#panelLoadingLabel').textContent(),'正在加载高级面板…');
+    assert.equal(labelAtPartial,'正在加载高级面板…');
     const frame=page.frameLocator('#view-advanced .panel-frame');
     await frame.locator('#node-card-2').waitFor({timeout:60000});
-    await overlay.waitFor({state:'hidden',timeout:10000});
+    await overlay.waitFor({state:'hidden',timeout:20000});
+    // 下载完只是第一步：组件挂上（ready）时 iframe 里还是白的，得等面板真画出内容
+    // （painted）才让位，否则中间又是一段白屏。
+    const events=await page.evaluate(()=>window.__mtrEvents);
+    const indexOf=action=>events.findIndex(entry=>entry.action===action);
+    assert.ok(indexOf('ready')>=0&&indexOf('painted')>=0,'面板要报 ready 与 painted 两个信号: '+JSON.stringify(events.map(e=>e.action)));
+    assert.ok(indexOf('painted')>indexOf('ready'),'painted 在 ready 之后');
+    assert.equal(events[indexOf('ready')].hidden,false,'ready 时加载条必须还在（那时 React 还没画出来）');
+    assert.equal(events[indexOf('painted')].hidden,false,'加载条是收到 painted 才让位的');
+    // 节点类型定义（/api/object_info，装了自定义节点能到 5MB）过去完全隐形，是首屏等最久的一段。
+    const phases=[...new Set(events.filter(entry=>entry.action==='progress'&&entry.phase).map(entry=>entry.phase))];
+    assert.ok(phases.includes('nodes'),'节点类型定义的下载也要报进度: '+JSON.stringify(phases));
     assert.equal(fixture.posted.length,0);
     assert.deepEqual(errors,[]);
     await context.close();
