@@ -219,6 +219,7 @@
     if (target === "advanced") {
       // 面板按需加载（1.4MB，不切过去就不下载）。
       setupAdvancedPage();
+      syncPanelViewport();
       syncPanelWorkflow();
       // 手机这边调过的参数同步给面板（面板还没挂好时会先收到 ready 再推一次）。
       pushAllValuesToPanel();
@@ -278,7 +279,7 @@
     if (data.action === "progress") { updatePanelProgress(data.progress); return; }
     // 「ready」只说明面板组件挂上了：React 的渲染还是异步的，这时候 iframe 里还是白的。
     // 加载条要等到面板报「painted」（真画出内容）才让位，否则下载完到首屏之间又是白屏。
-    if (data.action === "ready") { syncPanelWorkflow(true); return; }
+    if (data.action === "ready") { syncPanelViewport(); syncPanelWorkflow(true); return; }
     if (data.action === "painted") { panelPainted = true; finishPanelLoadingWhenReady(); return; }
     const identity = panelIdentity();
     if (workflowLoading || resettingWorkflow || data.workflowId !== identity.workflowId || data.snapshot !== identity.snapshot || data.epoch !== identity.epoch) return;
@@ -386,6 +387,53 @@
     }, 240);
   }
 
+  function syncPanelViewport() {
+    const frame = panelFrame?.getBoundingClientRect();
+    if (!frame?.width || !frame.height) return;
+    const topbar = document.querySelector(".topbar")?.getBoundingClientRect();
+    const nav = document.querySelector(".bottom-nav")?.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const visibleBottom = viewport ? viewport.offsetTop + viewport.height : window.innerHeight;
+    const top = Math.max(frame.top, topbar?.bottom ?? frame.top, viewport?.offsetTop ?? 0);
+    const bottom = Math.min(frame.bottom, nav?.top ?? frame.bottom, visibleBottom);
+    const availableHeight = bottom - top;
+    if (availableHeight > 0) sendToPanel("viewport", { availableHeight, visibleTop: top - frame.top, visibleBottom: bottom - frame.top });
+  }
+
+  function observePanelViewport(frame) {
+    let pending = 0;
+    const schedule = () => {
+      if (!pending) pending = requestAnimationFrame(() => {
+        pending = 0;
+        syncPanelViewport();
+      });
+    };
+    const observer = new ResizeObserver(schedule);
+    const boundaries = [frame, $("view-advanced"), document.querySelector(".topbar"), document.querySelector(".bottom-nav")].filter(Boolean);
+    // ResizeObserver does not report the position at the end of a view transition.
+    for (const element of boundaries) {
+      observer.observe(element);
+      element.addEventListener("animationend", schedule);
+      element.addEventListener("transitionend", schedule);
+    }
+    window.addEventListener("resize", schedule);
+    window.visualViewport?.addEventListener("resize", schedule);
+    window.visualViewport?.addEventListener("scroll", schedule);
+    window.addEventListener("pagehide", (event) => {
+      if (event.persisted) return;
+      observer.disconnect();
+      for (const element of boundaries) {
+        element.removeEventListener("animationend", schedule);
+        element.removeEventListener("transitionend", schedule);
+      }
+      cancelAnimationFrame(pending);
+      window.removeEventListener("resize", schedule);
+      window.visualViewport?.removeEventListener("resize", schedule);
+      window.visualViewport?.removeEventListener("scroll", schedule);
+    });
+    schedule();
+  }
+
   function setupAdvancedPage() {
     const host = $("view-advanced");
     if (!host || panelFrame) return panelFrame;
@@ -398,6 +446,7 @@
     // append 而不是 replaceChildren：进度条也是这一节的子节点，要留着。
     host.append(frame);
     panelFrame = frame;
+    observePanelViewport(frame);
     return frame;
   }
 

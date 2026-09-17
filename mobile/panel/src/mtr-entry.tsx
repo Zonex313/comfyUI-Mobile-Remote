@@ -6,6 +6,8 @@ import { useDismissOnOutsideClick } from '@/hooks/useDismissOnOutsideClick'
 import './index.css'
 import './mtr-entry.css'
 import { WorkflowPanel } from '@/components/WorkflowPanel'
+import { PhoneWorkflowMinimap } from '@/components/WorkflowPanel/PhoneWorkflowMinimap'
+import { usePhoneFocusStore } from '@/hooks/usePhoneFocus'
 import { useWorkflowStore } from '@/hooks/useWorkflow'
 import { useSeedStore } from '@/hooks/useSeed'
 import { useBookmarksStore } from '@/hooks/useBookmarks'
@@ -53,7 +55,7 @@ function PhonePanelControls() {
   const close = () => setOpen(false)
   const noop = () => undefined
   useDismissOnOutsideClick({open, onDismiss:close, triggerRef:buttonRef, contentRef:menuRef})
-  return <div className="relative z-50 flex justify-end px-2 shrink-0"><WorkflowTopBarMenu open={open} buttonRef={buttonRef} menuRef={menuRef} onToggle={() => setOpen(!open)} onClose={close} onGoToQueue={noop} onGoToOutputs={noop} onAddNode={noop} onAddGroup={noop} onOpenWorkflowActions={noop} onReloadWorkflow={noop} /></div>
+  return <div className="phone-panel-floating-controls absolute top-0 right-2 z-50"><WorkflowTopBarMenu open={open} buttonRef={buttonRef} menuRef={menuRef} onToggle={() => setOpen(!open)} onClose={close} onGoToQueue={noop} onGoToOutputs={noop} onAddNode={noop} onAddGroup={noop} onOpenWorkflowActions={noop} onReloadWorkflow={noop} /></div>
 }
 
 function mountPanel(container: HTMLElement, options: {locale?: string} = {}) {
@@ -181,6 +183,7 @@ function mountPanel(container: HTMLElement, options: {locale?: string} = {}) {
     const generation = ++request
     identity = { workflowId: data.workflowId, snapshot: data.snapshot, epoch: data.epoch }
     loaded = false
+    usePhoneFocusStore.getState().setFocusKey(null)
     container.style.visibility = 'hidden'
     try {
       const body = data.value || {}
@@ -224,11 +227,20 @@ function mountPanel(container: HTMLElement, options: {locale?: string} = {}) {
     }
   }
   const unsubscribes = [useWorkflowStore, useSeedStore, useBookmarksStore, useParameterSectionFoldsStore, useConnectionSectionFoldsStore].map(store => store.subscribe(collect))
-  const renderPanel = () => root.render(<div key={`${identity.workflowId}/${identity.snapshot}/${identity.epoch}`} className="mtr-panel-shell flex flex-col h-full min-h-0"><PhonePanelControls /><div className="relative flex-1 min-h-0"><WorkflowPanel visible onImageClick={() => undefined} /></div></div>)
+  const renderPanel = () => root.render(<div key={`${identity.workflowId}/${identity.snapshot}/${identity.epoch}`} className="mtr-panel-shell relative flex flex-col h-full min-h-0"><PhoneWorkflowMinimap /><div className="relative flex-1 min-h-0"><WorkflowPanel visible onImageClick={() => undefined} /></div><PhonePanelControls /></div>)
   renderPanel()
   return {
     receive(data: any) {
-      if (data.action === 'clear') { request++; loaded=false; identity={...identity,epoch:data.epoch}; container.style.visibility='hidden'; return }
+      if (data.action === 'viewport') {
+        const height = Number(data.value?.availableHeight)
+        if (Number.isFinite(height) && height > 0) container.style.setProperty('--phone-minimap-height', `${height / 3}px`)
+        for (const [field, variable] of [['visibleTop', '--phone-panel-visible-top'], ['visibleBottom', '--phone-panel-visible-bottom']]) {
+          const value = Number(data.value?.[field])
+          if (Number.isFinite(value) && value >= 0) container.style.setProperty(variable, `${value}px`)
+        }
+        return
+      }
+      if (data.action === 'clear') { request++; loaded=false; usePhoneFocusStore.getState().setFocusKey(null); identity={...identity,epoch:data.epoch}; container.style.visibility='hidden'; return }
       if (data.action === 'workflow') { ready = setWorkflow(data); return }
       if (data.action === 'locale') { void setLocale(String(data.value)); return }
       if (!matches(data)) return

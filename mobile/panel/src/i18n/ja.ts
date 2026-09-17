@@ -8,6 +8,9 @@
  * been checked by a fluent speaker. See the note in src/i18n/index.ts.
  */
 export const ja: Record<string, string> = {
+  'Workflow minimap': 'ワークフローのミニマップ',
+  'Expand workflow minimap': 'ワークフローのミニマップを展開',
+  'Collapse workflow minimap': 'ワークフローのミニマップを折りたたむ',
   // トップバー
   'Apply to the whole image, not just the tapped area': 'タップした領域だけでなく画像全体に適用',
   'Black': '黒',

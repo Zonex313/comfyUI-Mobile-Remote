@@ -1,4 +1,4 @@
-name: 发布说明
+name: 发布说明 / Release Notes
 
 # 推送版本标签时自动生成 Release；更新日志改动后也会同步已发布版本的说明。
 # 说明内容直接取自 CHANGELOG.md 中对应版本的段落。
@@ -10,6 +10,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-notes
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -30,6 +34,12 @@ jobs:
               if not re.fullmatch(r'v\d+(\.\d+)*', version):
                   continue
               body = '\n'.join(lines[1:]).strip()
+              for language in ('中文', 'English'):
+                  section = re.search(
+                      r'^### ' + re.escape(language) + r'\s*\n(.*?)(?=^### |\Z)',
+                      body, flags=re.M | re.S)
+                  if not section or not section.group(1).strip():
+                      raise SystemExit(f'{version}: missing {language} release notes')
               pathlib.Path('notes-%s.md' % version).write_text(body + '\n', encoding='utf-8')
               print('生成说明:', version)
           PY
@@ -47,9 +57,9 @@ jobs:
             fi
             if gh release view "${tag}" >/dev/null 2>&1; then
               echo "更新 ${tag}"
-              gh release edit "${tag}" --title "${tag}" --notes-file "${file}" || echo "!! 更新 ${tag} 失败"
+              gh release edit "${tag}" --title "${tag}" --notes-file "${file}"
             else
               echo "创建 ${tag}"
-              gh release create "${tag}" --title "${tag}" --notes-file "${file}" --verify-tag || echo "!! 创建 ${tag} 失败"
+              gh release create "${tag}" --title "${tag}" --notes-file "${file}" --verify-tag
             fi
           done

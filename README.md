@@ -1,40 +1,62 @@
 # ComfyUI Mobile Remote
 
-ComfyUI 手机远程控制插件。安装后，可以通过手机浏览器远程使用电脑上的 ComfyUI。
+在手机浏览器里选工作流、改参数、看出图，计算仍在电脑上的 ComfyUI 里完成。
+Use workflows, adjust parameters, and view results from your phone browser. ComfyUI still runs on your computer.
 
-## 主要功能
+[中文](#中文) | [English](#english) | [更新记录 / Changelog](CHANGELOG.md)
 
-- 不注册新节点，不修改原有工作流和节点连线。
-- 支持 Tailscale 和 Cloudflare 临时公网两种访问方式。
-- 手机端支持选择工作流、修改提示词和参数、提交生成任务。
-- 支持文生图、图生图和手机上传图片。
-- 查看任务进度、运行队列和生成历史。
-- 支持收藏、重新生成、删除图片和全屏查看大图。
-- 手机端设置与电脑端同步。
-- 工作流参数根据电脑端工作流自动生成，未连接的输入可以在手机端调整。
-- 可以把电脑端已保存的工作流「导入」到手机端常驻：电脑端不开，手机端也能选到它。
-- 界面支持中文、英文、日文、韩文：默认跟随系统语言，手机端「设置」右上角和电脑端「标签管理」左侧的图标按钮可以随时手动切换。
+## 中文
 
-## 安装
+### 能做什么
 
-1. 将 `ComfyUI-Mobile-Remote` 文件夹放入 `ComfyUI/custom_nodes/`。
-2. 重启 ComfyUI。
+- 选工作流、改提示词与参数，支持文生图、图生图和手机上传图片。
+- 在「高级」页调节点参数、沿连线跳转，用可折叠小地图查看工作流。
+- 生成页与高级页共用独立的手机副本，刷新后保留调整，不会改动电脑上的原工作流。
+- 查看进度、历史和收藏，重新生成或全屏看图；也提供可选的随机标签 CLIP 编码节点。
+- 通过 Tailscale 或 Cloudflare 临时公网链接访问，界面支持中、英、日、韩四种语言。
 
-插件不需要额外安装节点。Cloudflare 组件首次使用时会自动下载。
+### 安装与使用
 
-## 使用方法
+1. 将插件文件夹命名为 `ComfyUI-Mobile-Remote`，放入 `ComfyUI/custom_nodes/`，然后重启 ComfyUI。
+2. 打开电脑左侧快捷栏的「手机远程」面板，选择 Tailscale 或 Cloudflare，按面板提示连接。
+3. 在手机浏览器打开面板提供的链接。Cloudflare 组件首次使用时会自动下载，不需要单独构建前端。
 
-1. 启动 ComfyUI。
-2. 点击电脑端左侧快捷栏的「手机远程」图标。
-3. 复制面板中显示的 Tailscale 或 Cloudflare 链接。
-4. 在手机浏览器打开链接。
+手机会列出电脑上已保存、当前打开的工作流。想让某个工作流常驻，在电脑的「手机远程」面板里点「导入工作流」。常驻后不用一直在电脑前台打开它，但 **ComfyUI 必须保持运行**。
 
-手机端默认只列出电脑端当前打开着的工作流。想让它常驻（电脑端不开也能用），在电脑端「手机远程」面板里点「导入工作流」，挑一个导进去即可。
+没看到工作流时，先在电脑保存并打开它，稍等片刻，再回到手机生成页；也可以直接导入。手机语言在「设置」里切换，电脑语言在面板「标签管理」旁切换，两边各自保存。
 
-如果手机端没有显示工作流，请先在电脑端打开目标工作流，等几秒，再在手机上点右上角的「刷新」；或者直接把它导入。
+需要用电脑当前版本替换手机副本时，先在电脑打开对应工作流，再到手机设置点「重新同步电脑工作流」。**这会覆盖当前手机调整**，不影响历史和收藏。
 
-## 注意事项
+### 连接安全
 
-- 插件没有登录和密码功能。Tailscale 地址由 Tailscale 网络控制，临时公网链接请不要转发给其他人，使用结束后及时关闭。
-- 通过局域网或 Tailscale 访问时，ComfyUI 需要监听外部地址，例如使用 `--listen 0.0.0.0`。
-- 详细更新记录请查看 [CHANGELOG.md](CHANGELOG.md)。
+- 插件没有登录或密码验证。Tailscale 访问由你的私有网络控制；Cloudflare 临时公网链接不要转发给别人，用完及时关闭。
+- 局域网或 Tailscale 访问需要 ComfyUI 监听外部地址，例如启动时加 `--listen 0.0.0.0`。只在你信任的网络中开放访问。
+- 更新后重启 ComfyUI，再刷新手机页面。版本变化见 [更新日志](CHANGELOG.md)。
+
+## English
+
+### What You Can Do
+
+- Choose workflows, edit prompts and parameters, run text-to-image or image-to-image, and upload images from your phone.
+- Edit node parameters in Advanced, follow connections, and check a collapsible workflow minimap.
+- Generate and Advanced share a separate phone copy. Your adjustments survive refreshes without changing the original desktop workflow.
+- Check progress, browse history and favorites, regenerate images, or open them full-screen. An optional random-tag CLIP encoder is also included.
+- Connect through Tailscale or a temporary Cloudflare link. The interface supports Chinese, English, Japanese, and Korean.
+
+### Install and Connect
+
+1. Name the plugin folder `ComfyUI-Mobile-Remote`, place it in `ComfyUI/custom_nodes/`, and restart ComfyUI.
+2. Open **Mobile Remote** from the desktop sidebar, choose Tailscale or Cloudflare, and follow the connection prompts.
+3. Open the link shown in the panel on your phone. Cloudflare downloads its component on first use; no frontend build is needed.
+
+The phone lists saved workflows currently open on the desktop. Use **Import Workflow** in the desktop panel to keep one available without leaving it open in the editor. **ComfyUI itself must still be running.**
+
+If a workflow is missing, save and open it on the desktop, wait briefly, and return to Generate on your phone, or import it directly. Change the phone language in Settings and the desktop language beside Tag Management. Each device remembers its own choice.
+
+To replace the phone copy with the current desktop version, open that workflow on the desktop and use the resync option in the phone Settings. **This replaces your current phone adjustments**, but leaves history and favorites untouched.
+
+### Connection Safety
+
+- The plugin has no login or password protection. Tailscale access is controlled by your private network. Do not share temporary public Cloudflare links, and close the tunnel when finished.
+- LAN and Tailscale access require ComfyUI to listen on an external address, for example with `--listen 0.0.0.0`. Only expose it on networks you trust.
+- After updating, restart ComfyUI and refresh the page on your phone. See the [changelog](CHANGELOG.md) for release notes.

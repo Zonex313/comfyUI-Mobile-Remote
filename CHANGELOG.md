@@ -1,86 +1,106 @@
-# 更新日志
+# 更新日志 / Changelog
 
-## 未发布 · 手机独立工作流副本
+<!-- 每次发布都保留中文和 English 两段，写实际变化，尽量简短。
+     Keep both language sections for every release. Focus on real changes and keep it brief. -->
 
-- 生成页与高级页共用固定的手机副本，仍走原有生成接口；参数、开关、启用/绕过、书签、折叠和隐藏只保存在手机设置中，电脑画布不再接收手机指令。
-- 保留参考面板的控件与显示方式，移除新增、删除、复制、移动、改组、断线、连线、子图编辑及独立入队入口；菜单保留查找、显示隐藏项和全部折叠/展开。
-- 支持在手机启用电脑源中原本绕过的普通 LoRA，并正确恢复 MODEL/CLIP 连接；每次生成都从原始副本重建，切回绕过不会遗留连接。无法可靠恢复的自定义布局会明确报错，涉及子图内部或连接结构的界面修改会撤销。
-- 设置新增「重新同步电脑工作流」及关系说明。对应工作流必须在电脑前台打开；成功收到新源后才覆盖当前手机副本，失败保留原设置。重置同时清除参数覆盖、节点状态、隐藏/折叠/书签和当前工作流的多模型选择，不影响历史、收藏、标签目录。
-- 副本按内容保存快照；电脑自动同步不覆盖手机，刷新页面保留草稿。消息同时校验工作流、快照和加载代次，避免切换时串写。旧版桌面命令接口已停用，旧标签页也不能领取遗留指令。
-- 接通固定、随机、递增、递减种子模式；批量提交使用上一次接受的下一种子值，生成元数据尽可能同步实际参数。新增说明及错误提示支持中、英、日、韩。
+## v0.3.0 · 2026-09-17
 
-## v0.3.0 · 2026-09-16
+### 中文
 
-- 界面新增英文、日文、韩文：手机端页面和电脑端「手机远程」面板都跟随系统语言，系统语言不在四种之内时用英文。
-- 手机端「设置」右上角、电脑端「标签管理」左侧各加了一个不带文字的图标按钮，点开即可切换语言，页面不用刷新。
-- 插件提示语（含参数校验、更新提示）一并跟随语言；中文仍是默认与兜底语言，任何没翻到的地方都原样显示中文，不会出现空白。
-- 电脑端节点「CLIP文本编码丨随机标签」的名称与说明改用 ComfyUI 自带的节点翻译机制，节点内部参数名保持不变，已有工作流不受影响。
-- 语言按设备各自保存：手机选日语不会影响电脑，反之亦然。
-- 译文普遍比中文长，手机端与电脑端的按钮改为按需换行/自适应高度，不再出现文字溢出按钮或被截断。
-- 标签显示不下时统一改为右侧省略号（此前是两端同时被裁掉），标签行高、设置行与历史图片上的文字排版保持原样。
-- 手机端设置页的长地址/长名称不再被压到 62% 宽从中间硬切开：放得下贴右显示，放不下整块换行占满整行，断行只发生在分隔符处。
-- 删除手机端顶栏的「刷新」按钮：状态、队列、进度本来就自动刷新，工作流列表改为回到页面时自动重读，手动刷新已无必要；相关样式与提示文案一并清理。
-- 电脑端语言菜单改为从按钮向右展开，侧栏很窄时也不会被裁到画面外。
-- 顶栏「运行 / 排队」两处计数补上翻译（此前英文界面里仍是中文）。
-- 修复手机端大图连续翻页时先闪出半张没下载完的图：翻页用的相邻图片图层在下载完成前不再显示。
-- 电脑端「手机远程」右上角按钮里的文字/图标做 1px 级视觉补偿：中日韩字形与图标字体的墨迹中心比字体度量中心偏上，光靠 line-height 压不下来。
-- 电脑端「手机远程」右上角三个按钮字号各小两号（标签管理 10px、检查更新 11px），按钮统一缩到 28px 高，图标与文字四方向居中。
-- 手机端队列卡片改成两行：第一行模型名、第二行提示词，都按单行省略号收尾；时间与状态收进右侧，卡片高度约从 90px 降到 58px。排队中/运行中的任务现在也会带上模型名与提示词（此前只有历史任务带）。
-- 手机端「高级」页的节点与组控制照参考项目的做法重做：折叠箭头、标题、数量在左，书签与「…」在右，组头用组色淡淡铺底。
-- 「…」菜单改为挂在页面上的浮层菜单（此前菜单项直接铺在卡片里）：按段分组、段间分隔线，点菜单外任意处、滚动页面或按 Esc 都关闭，位置自动收在屏幕内，下方放不下时翻到按钮上方。
-- 菜单项带图标，删除项单独一段并用危险色；组菜单提供改名、改颜色、全部展开/收起、整组旁路/隐藏/选择，节点菜单提供改名、改颜色、收藏、选择、旁路、隐藏、复制节点、复制、粘贴到下方、删除。
-- 参数行也有了同样的「…」菜单：恢复默认值（被连线接管时是断开连线）、复制参数值、标记参数。
-- 组改名与改颜色会真正写回电脑端画布上的组框（与节点操作走同一条指令通道），不是只改手机显示。
-- 修复「…」菜单里的动作点了没反应的问题：此前按下菜单项时浮层会先被“点外面关闭”拆掉，随后的点击到不了按钮上。
-- 修复「高级」页里隐藏参数、开关类参数和自定义节点参数在切回生成页后丢失的问题：草稿恢复范围从“精选字段”扩到整张工作流的全部可编辑输入。
-- 「高级」页不再是自己仿写的一套界面，改为直接运行参考项目（comfyui-mobile-frontend，MIT）的真实工作流面板组件：组头、节点卡、左右连线箭头与跳转、参数行菜单、书签、撤销重做、批量展开等全部行为与它一致。
-- 面板跑在 iframe（/mobile/assets/panel.html）里：它是「占满整页」的应用，关进自己的文档后，它的整站样式与手机页互不影响，界面的像素表现才和参考项目一致；手机页其余页面保持原样。
-- 面板跟随手机页的语言切换，也跟随工作流切换；面板里改的控件值、旁路/隐藏/改名/改色会经本插件既有的指令通道回写电脑端画布。
-- 「高级」页与生成页的参数现在互通：高级里调好的值会写进手机草稿，回生成页点「生成」用的就是它；生成页调的值也会同步显示在高级面板里（复杂工作流可以先在高级里调试、再照原路径出图）。
-- 手机侧推给面板的值不会反过来改写电脑画布：只有你在高级面板里亲手的改动才会回写电脑端，生成页的调整仍然只影响手机提交。
-- 「高级」页的面板不再自带一层深色底：iframe、面板的 html/body 与它自家那层整页底色都放透明，只保留它自己的组卡与节点卡，直接落在手机页的底色上，不再像贴上去的一块黑。
-- 面板的原始数据来自新增接口 /mobile/api/panel/workflow/<编号>（电脑端同步下来的原生工作流），节点定义沿用 ComfyUI 原生 /api/object_info；该接口已加入公网隧道白名单。
-- 参考项目源码随插件一起提供于 mobile/panel/src，改完在 mobile/panel 里跑 npm install && npm run build 重新生成 panel.js / panel.css（产物入库，安装插件不需要 Node）。
+这次主要把手机上的工作流调起来更顺手了。
+
+- 新版「高级」页可以直接调节点参数、顺着连线找节点，还有一张能收起来的小地图，看复杂工作流方便多了。
+- 生成页和高级页共用手机副本，改完刷新也还在，不会动电脑上的原工作流。想重新取电脑那份，在设置里点「重新同步电脑工作流」即可；这会覆盖当前手机调整。
+- 手机和电脑界面都支持中文、英文、日文、韩文，语言可以各自选。
+- 高级页加载能看到真实进度，也修了导入工作流的失效连线、大图翻页闪图和长文字挤出按钮的问题。
+
+更新后重启 ComfyUI，再刷新手机页面。
+
+### English
+
+This update makes workflows a little easier to work with on your phone.
+
+- The new Advanced tab lets you edit node parameters, follow connections, and check a collapsible minimap without losing your place.
+- Generate and Advanced share a phone-only copy that survives refreshes without changing your desktop workflow. To start again from the desktop version, use the resync option in Settings; it replaces your current phone adjustments.
+- Both interfaces now support Chinese, English, Japanese, and Korean, with separate language choices for each device.
+- Advanced now shows real loading progress. This release also fixes stale links in imported workflows, flashes when browsing full-size images, and text spilling out of buttons.
+
+Restart ComfyUI after updating, then refresh the page on your phone.
 
 ## v0.2.2 · 2026-09-15
 
-- 新增工作流导入与常驻管理，手机端可直接使用已保存的工作流。
-- 优化手机端生成、历史、收藏和分页体验，历史记录到底时会明确提示。
-- 优化桌面端随机标签节点、工作流同步和热更新稳定性。
-- 提升队列/历史接口性能，并修复历史清理、收藏并发和自动更新边界问题。
-- 发布包不包含本机路径、账号凭据、个人设置、收藏或工作流数据。
+### 中文
+
+- 可以导入已保存的工作流，让它常驻手机列表，不用一直在电脑前台打开。
+- 改善生成、历史、收藏和翻页体验，历史到底时也有提示了。
+- 修整随机标签、工作流同步和热更新，队列与历史读取也更快。
+- 修复历史清理、收藏并发和自动更新的一些边界问题；发布包不带个人设置、凭据、收藏或工作流数据。
+
+### English
+
+- Import saved workflows to keep them available on your phone without leaving them open in the desktop editor.
+- Smoother generation, history, favorites, and paging, with a clear end-of-history message.
+- Improved random tags, workflow sync, and hot reload, plus faster queue and history reads.
+- Fixed edge cases in history cleanup, concurrent favorites, and updates. Release packages exclude personal settings, credentials, favorites, and workflow data.
 
 ## v0.2.1 · 2026-09-11
 
-- 自动更新更稳：备份只保留最近 2 份，不再无限占用磁盘。
-- 自动更新会清理新版本里已删除的旧文件（个人数据与运行产物不受影响）。
-- 更新前会核对版本号：若远端在你确认后发生变化，会提示重新检查，不会更新成不是你确认的那个版本。
-- 电脑端「手机远程」标题旁显示当前插件版本号。
+### 中文
+
+- 自动更新只保留最近两份备份，不再越用越占空间；旧版本已删除的文件也会清理，个人数据不动。
+- 确认更新后如果远端版本变了，会提醒重新检查，避免装错版本。
+- 电脑端「手机远程」标题旁可以看到当前版本号了。
+
+### English
+
+- Updates keep only the two latest backups and remove obsolete plugin files, leaving personal data untouched.
+- If the remote version changes after you confirm an update, you will be asked to check again before installing.
+- The desktop Mobile Remote panel now shows the installed version next to its title.
 
 ## v0.2.0 · 2026-09-11
 
-- 电脑端新增节点「CLIP文本编码丨随机标签」：平替 CLIP 文本编码，带标签模式开关。关闭时等同普通文本编码；开启后按手机端同一套词库与互斥规则随机组合标签，节点上可直接锁定、忽略、复制提示词。
-- 手机远程面板新增「加入随机标签节点」按钮，一键把该节点放到画布中央。
-- 手机远程面板新增更新检测：「检查更新」发现新版会变成高亮的「立即更新」，点一下自动下载并覆盖，任何一步出错都会自动回滚。
-- 手机端工作流列表只显示电脑端当前打开着的工作流，关闭即消失；未保存的工作流不再同步。
-- 手机端参数分组收敛：提示词、模型、图像尺寸留在外面，其余全部收进「高级参数」，并固定了前几项顺序。
+### 中文
+
+- 新增可选的随机标签 CLIP 编码节点，可锁定、忽略或复制标签；关闭标签模式时就是普通文本编码。面板里可以一键加入画布。
+- 电脑面板增加「检查更新」，可以直接下载新版，更新失败会回滚。
+- 手机列表只显示电脑端已保存且正在打开的工作流；常用参数留在外面，其余收进「高级参数」。
+
+### English
+
+- Added an optional random-tag CLIP encoder with tag locking, ignoring, and prompt copying. With tag mode off, it behaves like a regular text encoder. Add it to the canvas from the panel.
+- The desktop panel can check for and install updates, with rollback if an update fails.
+- The phone lists saved workflows currently open on the desktop. Common controls stay visible, while the rest move into Advanced Parameters.
 
 ## v0.1.2 · 2026-09-11
 
-- 修复关闭大图后要等一下才生效的问题。
-- 修复关闭按钮偶尔需要点两次才响应的问题。
-- 关闭大图后立刻打开另一张图时，新图不会被误关。
+### 中文
+
+- 大图关闭更及时，不用再等一下或点两次；紧接着打开另一张图，也不会被上一次的关闭操作误关。
+
+### English
+
+- Full-size images close promptly without a second tap. Opening another image immediately afterward no longer lets the previous close action dismiss it.
 
 ## v0.1.1 · 2026-09-11
 
-- 修复历史页关闭大图后误跳到「设置」页的问题。
-- 大图查看器底部按钮增加按下反馈。
+### 中文
 
-## v0.1.0 · 首个公开版本
+- 修复从历史页关闭大图后误跳到设置页的问题，并给查看器底部按钮加上按下反馈。
 
-- 手机浏览器通过 Tailscale 地址或 Cloudflare 临时公网链接远程控制电脑上的 ComfyUI。
-- 不注册任何节点，不改动原有工作流和连线。
-- 电脑端 ComfyUI 左侧快捷栏提供「手机远程」面板，统一管理两种连接方式。
-- 手机端页面：生成、队列、历史（批次浏览、收藏、全屏查看器）、设置。
-- 提示词预设管理器：内置标签词库、互斥与跳过规则、类别锁定与忽略。
-- 历史记录持久化、缩略图加速、图片彻底删除、收藏与工作流备份。
+### English
+
+- Fixed an accidental jump to Settings after closing an image from History, and added pressed feedback to the viewer buttons.
+
+## v0.1.0 · 首个公开版本 / First Public Release
+
+### 中文
+
+- 手机浏览器通过 Tailscale 或 Cloudflare 临时链接使用电脑上的 ComfyUI，不改动已有工作流和连线。此版本尚未提供额外节点。
+- 电脑侧栏统一管理连接；手机可生成、查看队列、历史和收藏，也能全屏看图。
+- 内置提示词标签库、互斥与跳过规则、锁定与忽略，以及历史保存、缩略图、图片删除和工作流备份。
+
+### English
+
+- Use desktop ComfyUI from a phone browser through Tailscale or a temporary Cloudflare link without changing existing workflows or connections. This version did not add any nodes.
+- Manage connections from the desktop sidebar. Generate images and browse the queue, history, favorites, and full-size images on your phone.
+- Includes prompt tags, exclusion and skip rules, locking and ignoring, saved history, thumbnails, image deletion, and workflow backups.

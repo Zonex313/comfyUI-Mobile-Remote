@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
 import type { Workflow, WorkflowNode } from "@/api/types";
 import { useWorkflowStore } from "@/hooks/useWorkflow";
+import { usePhoneFocusStore } from "@/hooks/usePhoneFocus";
 import { ArrowRightIcon } from "@/components/icons";
 import { connectionButtonDomId } from "@/utils/connectionFlash";
 import {
@@ -81,23 +82,24 @@ export function PhoneConnectionPreview({
   const connectionsVisible = useWorkflowStore(
     (s) => s.connectionButtonsVisible,
   );
-  enabled = enabled && connectionsVisible;
   const nodeTypes = useWorkflowStore((s) => s.nodeTypes);
-  const [focusKey, setFocusKey] = useState<string | null>(null);
+  const focusKey = usePhoneFocusStore((s) => s.focusKey);
+  const setFocusKey = usePhoneFocusStore((s) => s.setFocusKey);
   const [geometry, setGeometry] = useState<Geometry>(emptyGeometry);
   const [highlight, setHighlight] = useState<string | null>(null);
   const layerRef = useRef<HTMLDivElement>(null);
-  const focusRef = useRef<string | null>(null);
+  const focusRef = useRef<string | null>(focusKey);
+  focusRef.current = focusKey;
   const forcedUntil = useRef(0);
   const scheduleRef = useRef<() => void>(() => {});
   const focus =
     workflow?.nodes.find((node) => node.itemKey === focusKey) || null;
   const relations = useMemo(
     () =>
-      workflow && focus
+      workflow && focus && connectionsVisible
         ? collectPhoneRelations(workflow, focus, hidden, order)
         : { input: [], output: [] },
-    [workflow, focus, hidden, order],
+    [workflow, focus, hidden, order, connectionsVisible],
   );
   // A focus change replaces the whole rail at once. Holding the outgoing set for
   // one beat lets the old tabs slide back out of the screen while the new ones
@@ -232,11 +234,21 @@ export function PhoneConnectionPreview({
       frame = 0;
       const layer = layerRef.current;
       if (!layer || live.current.travelling) return;
+      const style = getComputedStyle(scroller!);
+      if (document.hidden || style.visibility === "hidden") {
+        clearFocus();
+        return;
+      }
       const rect = scroller!.getBoundingClientRect();
       const origin = layer.getBoundingClientRect();
-      const height = Math.max(0, rect.bottom - origin.top - 88);
+      const viewportBottom = Number.parseFloat(style.getPropertyValue("--phone-panel-visible-bottom"));
+      const viewportTop = Number.parseFloat(style.getPropertyValue("--phone-panel-visible-top")) || 0;
+      const bottom = Math.min(rect.bottom, Number.isFinite(viewportBottom) ? viewportBottom : rect.bottom - 88);
+      const focusTop = Math.max(origin.top, viewportTop);
+      const focusHeight = Math.max(0, bottom - focusTop);
+      const height = Math.max(0, bottom - origin.top);
       const width = origin.width;
-      if (!width || height < 100) {
+      if (!width || focusHeight < 100) {
         clearFocus();
         return;
       }
@@ -245,11 +257,11 @@ export function PhoneConnectionPreview({
         return {
           key: element.dataset.phoneNodeKey!,
           expanded: element.dataset.phoneExpanded === "true",
-          top: r.top - origin.top,
-          bottom: r.bottom - origin.top,
+          top: r.top - focusTop,
+          bottom: r.bottom - focusTop,
         };
       });
-      let next = choosePhoneFocus(candidates, height, focusRef.current);
+      let next = choosePhoneFocus(candidates, focusHeight, focusRef.current);
       const active = document.activeElement;
       const editing =
         active instanceof HTMLElement &&
@@ -261,7 +273,7 @@ export function PhoneConnectionPreview({
           node.key === focusRef.current &&
           node.expanded &&
           node.bottom > 0 &&
-          node.top < height,
+          node.top < focusHeight,
       );
       if (current && (editing || Date.now() < forcedUntil.current))
         next = current.key;
@@ -288,9 +300,20 @@ export function PhoneConnectionPreview({
           ),
         ) || DEFAULT_STRIP;
       const lanes: Record<Side, Lane> = {
-        input: { top: 0, height },
-        output: { top: 0, height },
+        input: { top: focusTop - origin.top, height: focusHeight },
+        output: { top: focusTop - origin.top, height: focusHeight },
       };
+      const floatingControls = document.querySelectorAll<HTMLElement>(
+        ".phone-panel-floating-controls #workflow-menu-container > button, #phone-minimap-toggle",
+      );
+      for (const control of floatingControls) {
+        const box = control.getBoundingClientRect();
+        if (!box.width || !box.height || box.top >= bottom || box.bottom <= focusTop) continue;
+        const lane = lanes[box.left < origin.left + width / 2 ? "input" : "output"];
+        const end = lane.top + lane.height;
+        lane.top = Math.min(end, Math.max(lane.top, box.bottom - origin.top + 6));
+        lane.height = Math.max(0, end - lane.top);
+      }
       const bookmark = scroller!
         .closest("#node-list-wrapper")
         ?.querySelector<HTMLElement>("[data-phone-bookmark-bar]");
@@ -304,12 +327,13 @@ export function PhoneConnectionPreview({
           bookmarkRect.left < left + strip &&
           bookmarkRect.right > left
         ) {
+          const laneEnd = lane.top + lane.height;
           const above = Math.max(
             0,
-            Math.min(height, bookmarkRect.top - origin.top - 8),
+            Math.min(laneEnd, bookmarkRect.top - origin.top - 8) - lane.top,
           );
-          const belowStart = Math.max(0, bookmarkRect.bottom - origin.top + 8);
-          const below = Math.max(0, height - belowStart);
+          const belowStart = Math.min(laneEnd, Math.max(lane.top, bookmarkRect.bottom - origin.top + 8));
+          const below = Math.max(0, laneEnd - belowStart);
           if (above >= below) lane.height = above;
           else {
             lane.top = belowStart;
@@ -445,8 +469,12 @@ export function PhoneConnectionPreview({
         attributes: true,
         attributeFilter: ["style", "class"],
       });
+    const panelRoot = scroller.closest("#panel-root");
+    const visibility = new MutationObserver(schedule);
+    if (panelRoot) visibility.observe(panelRoot, { attributes: true, attributeFilter: ["style"] });
     discover();
     scroller.addEventListener("scroll", schedule, { passive: true });
+    document.addEventListener("visibilitychange", schedule);
     window.addEventListener("resize", schedule);
     return () => {
       disposed = true;
@@ -456,11 +484,15 @@ export function PhoneConnectionPreview({
       resize.disconnect();
       mutation.disconnect();
       bookmarkChanges.disconnect();
+      visibility.disconnect();
+      document.removeEventListener("visibilitychange", schedule);
       scroller.removeEventListener("scroll", schedule);
       window.removeEventListener("resize", schedule);
       scheduleRef.current = () => {};
     };
   }, [scrollerRef, enabled, workflow?.id]);
+
+  useEffect(() => () => setFocusKey(null), [setFocusKey]);
 
   useEffect(() => {
     scheduleRef.current();
@@ -672,8 +704,8 @@ export function PhoneConnectionPreview({
     );
   };
   const hasRelations = Boolean(
-    (enabled && focus && (relations.input.length || relations.output.length)) ||
-      leaving,
+    enabled && connectionsVisible &&
+      ((focus && (relations.input.length || relations.output.length)) || leaving),
   );
   return (
     <div className="phone-relations-sticky">

@@ -8,6 +8,9 @@
  * been checked by a fluent speaker. See the note in src/i18n/index.ts.
  */
 export const ko: Record<string, string> = {
+  'Workflow minimap': '워크플로 미니맵',
+  'Expand workflow minimap': '워크플로 미니맵 펼치기',
+  'Collapse workflow minimap': '워크플로 미니맵 접기',
   // 상단 바
   'Apply to the whole image, not just the tapped area': '탭한 영역뿐 아니라 이미지 전체에 적용',
   'Black': '검정',

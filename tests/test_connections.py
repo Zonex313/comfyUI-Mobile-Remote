@@ -127,8 +127,11 @@ class MobileGatewayTests(unittest.IsolatedAsyncioTestCase):
         # 「高级」页换成参考项目那套面板后，入口是 iframe 宿主页 panel.html，
         # 它自己带 panel.css / panel.js（不再由 index.html 直接引脚本）。
         panel = (PLUGIN_ROOT / "mobile" / "panel.html").read_text(encoding="utf-8")
-        self.assertIn("/mobile/assets/panel.js", panel)
-        self.assertIn("/mobile/assets/panel.css", panel)
+        self.assertIn('const asset = name => "/mobile/assets/" + name + suffix;', panel)
+        for name in ("panel.js", "panel.css"):
+            self.assertIn(f'fetchStreamed(asset("{name}")', panel)
+        self.assertIn('script.src = asset("panel.js")', panel)
+        self.assertIn('link.href = asset("panel.css")', panel)
         # 面板要能在公网隧道下工作：宿主页、产物、以及它取数据用的原始工作流接口。
         self.assertTrue(
             connections.public_path_allowed("GET", "/mobile/api/panel/workflow/" + WORKFLOW_ID),

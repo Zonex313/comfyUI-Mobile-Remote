@@ -1,0 +1,153 @@
+.phone-workflow-minimap {
+  --phone-minimap-duration: 320ms;
+  --phone-minimap-easing: cubic-bezier(0.22, 1, 0.36, 1);
+  box-sizing: border-box;
+  position: relative;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  flex: 0 0 auto;
+  width: 100%;
+  height: var(--phone-minimap-height, 180px);
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+  transition: height var(--phone-minimap-duration) var(--phone-minimap-easing);
+  color: #d1d5db;
+  letter-spacing: 0;
+  pointer-events: none;
+}
+
+.phone-workflow-minimap[data-collapsed="true"] {
+  --phone-minimap-duration: 240ms;
+  --phone-minimap-easing: cubic-bezier(0.4, 0, 0.2, 1);
+  height: 0;
+}
+
+/* Clip the map, not its stationary toggle, while the list follows the height. */
+.phone-workflow-minimap__viewport {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  visibility: visible;
+  background: #141619;
+  box-shadow: inset 0 -1px rgba(156, 163, 175, 0.2);
+  transition: visibility 0s;
+}
+
+.phone-workflow-minimap[data-collapsed="true"] .phone-workflow-minimap__viewport {
+  visibility: hidden;
+  transition-delay: var(--phone-minimap-duration);
+}
+
+.phone-workflow-minimap__drawing {
+  box-sizing: border-box;
+  height: var(--phone-minimap-height, 180px);
+  transform-origin: center top;
+  opacity: 1;
+  transform: none;
+  transition: transform var(--phone-minimap-duration) var(--phone-minimap-easing),
+    opacity var(--phone-minimap-duration) var(--phone-minimap-easing);
+  min-width: 0;
+  min-height: 0;
+  padding: 12px;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+.phone-workflow-minimap[data-collapsed="true"] .phone-workflow-minimap__drawing {
+  opacity: 0;
+  transform: translateY(-10px) scale(0.97);
+}
+
+.phone-workflow-minimap__drawing > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .phone-workflow-minimap,
+  .phone-workflow-minimap__viewport,
+  .phone-workflow-minimap__drawing {
+    transition: none;
+  }
+}
+
+.phone-workflow-minimap__toggle {
+  box-sizing: border-box;
+  position: absolute;
+  z-index: 50;
+  top: 0;
+  left: 8px;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #d1d5db;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.phone-panel-floating-controls {
+  width: 44px;
+  height: 44px;
+  pointer-events: auto;
+}
+
+.phone-panel-floating-controls #workflow-menu-container > button {
+  box-sizing: border-box;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #d1d5db;
+  pointer-events: auto;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.phone-panel-floating-controls #workflow-options-dropdown {
+  pointer-events: auto;
+}
+
+.phone-workflow-minimap__toggle:focus-visible,
+.phone-panel-floating-controls #workflow-menu-container > button:focus-visible {
+  outline: 2px solid #22d3ee;
+  outline-offset: -4px;
+}
+
+.phone-workflow-minimap__toggle:active,
+.phone-panel-floating-controls #workflow-menu-container > button:active {
+  background: transparent;
+  color: #ffffff;
+}
+
+.phone-workflow-minimap__zoom {
+  width: 22px;
+  height: 22px;
+}
+
+@media (hover: hover) {
+  .phone-workflow-minimap__toggle:hover,
+  .phone-panel-floating-controls #workflow-menu-container > button:hover {
+    background: transparent;
+    color: #ffffff;
+  }
+}

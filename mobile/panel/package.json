@@ -8,9 +8,11 @@
     "dev": "vite"
   },
   "dependencies": {
+    "lucide-react": "1.47.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-select": "^5.10.2",
+    "strongly-connected-components": "1.0.1",
     "zustand": "^5.0.9"
   },
   "devDependencies": {

@@ -498,6 +498,85 @@ function relationFixture(resultCount = 6) {
   return {nativeWorkflow,objectInfo};
 }
 
+function minimapFixture(isolatedCount = 2) {
+  const nativeWorkflow = structuredClone(NATIVE_WORKFLOW);
+  const objectInfo = structuredClone(OBJECT_INFO);
+  objectInfo.KSampler.input.required.notes = ['STRING', {multiline:true}];
+  const notes = Array.from({length:14}, (_, index) => 'Minimap parameter line '+index).join('\n');
+  nativeWorkflow.nodes[0].title = 'A';
+  nativeWorkflow.nodes[0].outputs[0].links = [1,5];
+  nativeWorkflow.nodes[1].title = 'B';
+  nativeWorkflow.nodes[1].outputs[0].links = [2];
+  nativeWorkflow.nodes[1].widgets_values.push(notes);
+  objectInfo.MinimapPass = {name:'MinimapPass',display_name:'MinimapPass',category:'fixture',input:{required:{samples:['LATENT'],strength:['FLOAT',{default:1}]}},output:['LATENT'],output_name:['LATENT']};
+  objectInfo.MinimapMerge = {name:'MinimapMerge',display_name:'MinimapMerge',category:'fixture',input:{required:{main:['LATENT'],branch:['LATENT'],strength:['FLOAT',{default:1}]}},output:['LATENT'],output_name:['LATENT']};
+  const pass = (id, title, input, output) => ({id,type:'MinimapPass',title,pos:[id*400,500],size:[240,160],flags:{},order:id-1,mode:0,properties:{},inputs:[{name:'samples',type:'LATENT',link:input}],outputs:[{name:'LATENT',type:'LATENT',links:[output],slot_index:0}],widgets_values:[1]});
+  const branch = structuredClone(nativeWorkflow.nodes[1]);
+  Object.assign(branch, {id:4,title:'D',pos:[4000,700],order:3,mode:4});
+  branch.inputs[0].link = 5;
+  branch.outputs[0].links = [6];
+  nativeWorkflow.nodes.push(pass(3,'C',2,3), branch, pass(5,'E',3,4), {
+    id:6,type:'MinimapMerge',title:'F',pos:[2400,500],size:[260,160],flags:{},order:5,mode:0,properties:{},
+    inputs:[{name:'main',type:'LATENT',link:4},{name:'branch',type:'LATENT',link:6}],
+    outputs:[{name:'LATENT',type:'LATENT',links:[],slot_index:0}],widgets_values:[1],
+  });
+  for (let id=7;id<7+isolatedCount;id++) {
+    const source = structuredClone(nativeWorkflow.nodes[0]);
+    Object.assign(source, {id,title:'Independent root '+id,pos:[(id-7)*600,1600],order:id-1});
+    source.outputs[0].links = [];
+    nativeWorkflow.nodes.push(source);
+  }
+  // The short A-D-F branch must not pull D towards F's fifth column.
+  nativeWorkflow.links = [[1,1,0,2,0,'MODEL'],[2,2,0,3,0,'LATENT'],[3,3,0,5,0,'LATENT'],[4,5,0,6,0,'LATENT'],[5,1,0,4,0,'MODEL'],[6,4,0,6,1,'LATENT']];
+  nativeWorkflow.groups.push({id:2,title:'Folded independent root',bounding:[580,1580,360,200],color:'#366454'});
+  nativeWorkflow.last_node_id = 6+isolatedCount;
+  nativeWorkflow.last_link_id = 6;
+  return {nativeWorkflow,objectInfo};
+}
+
+async function waitForMinimapSettled(frame) {
+  await frame.locator('#phone-workflow-minimap').evaluate(async map => {
+    const host=window.frameElement?.closest('#view-advanced');
+    await Promise.all((host?.getAnimations()||[]).map(animation=>animation.finished.catch(()=>{})));
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    // Flush pending CSS transitions before collecting their native promises.
+    const active = () => {
+      map.getBoundingClientRect();
+      return map.getAnimations({subtree:true}).filter(animation => animation.playState !== 'finished');
+    };
+    do {
+      await Promise.all(active().map(animation => animation.finished.catch(() => {})));
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    } while (active().length);
+  });
+}
+
+async function minimapLayout(frame) {
+  await waitForMinimapSettled(frame);
+  return frame.locator('#phone-workflow-minimap').evaluate(map => {
+    const rect = element => {
+      const {x,y,width,height} = element.getBoundingClientRect();
+      return {x,y,width,height};
+    };
+    return {
+      box:rect(map), graph:rect(map.querySelector('#phone-minimap-graph')),
+      nodes:[...map.querySelectorAll('[data-minimap-node-key]')].map(node => ({id:node.dataset.nodeId,column:node.dataset.column,box:rect(node)})),
+      edges:[...map.querySelectorAll('[data-minimap-edge]')].map(edge => ({source:edge.dataset.source,target:edge.dataset.target,d:edge.getAttribute('d')})).sort((a,b)=>(a.source+'>'+a.target).localeCompare(b.source+'>'+b.target)),
+    };
+  });
+}
+
+function assertMinimapLayout(actual, expected, message) {
+  const close = (box, other) => {
+    for (const key of ['x','y','width','height']) assert.ok(Math.abs(box[key]-other[key])<=1, message+' '+key+': '+JSON.stringify({box,other}));
+  };
+  close(actual.box, expected.box);
+  close(actual.graph, expected.graph);
+  assert.deepEqual(actual.edges, expected.edges, message+' edge routing');
+  assert.deepEqual(actual.nodes.map(({id,column}) => ({id,column})), expected.nodes.map(({id,column}) => ({id,column})), message+' topology');
+  actual.nodes.forEach((node,index) => close(node.box,expected.nodes[index].box));
+}
+
 async function focusPanelNode(frame,id,offset=0) {
   await frame.locator('#node-card-'+id).evaluate((card,offset)=>{
     const scroll=card.closest('[data-node-list]');
@@ -505,6 +584,691 @@ async function focusPanelNode(frame,id,offset=0) {
   },offset);
   await frame.locator('[data-phone-focus-id="'+id+'"]').waitFor({state:'attached',timeout:10000});
 }
+
+async function assertFloatingPanelControls(page,frame,collapsed) {
+  await waitForMinimapSettled(frame);
+  const toggle=frame.locator('#phone-minimap-toggle');
+  const menu=frame.locator('#workflow-menu-container button').first();
+  const frameBox=await page.locator('#view-advanced .panel-frame').boundingBox();
+  const scrollBox=await frame.locator('#node-list-container').boundingBox();
+  const mapHeight=await frame.locator('#phone-workflow-minimap').evaluate(map=>map.getBoundingClientRect().height);
+  const toggleBox=await toggle.boundingBox();
+  const menuBox=await menu.boundingBox();
+  assert.ok(toggleBox&&menuBox,'both floating controls remain visible');
+  assert.ok(Math.abs(scrollBox.y-frameBox.y-mapHeight)<=1,'the map is the only vertical space above the unfiltered node list');
+  assert.ok(Math.abs(menuBox.y-frameBox.y)<=1,'the menu stays at the panel top independently of map height');
+  assert.ok(Math.abs(toggleBox.y-menuBox.y)<=1&&Math.abs(toggleBox.y-frameBox.y)<=1,'both floating controls stay below the host status bar');
+  assert.ok(Math.abs(toggleBox.x-frameBox.x-8)<=1,'the minimap toggle mirrors the menu at the left edge');
+  if(collapsed) {
+    assert.equal(mapHeight,0,'collapsed minimap reserves no vertical space');
+  }
+  assert.ok(Math.abs(frameBox.x+frameBox.width-menuBox.x-menuBox.width-8)<=1,'menu stays 8px from the right edge');
+  assert.ok(toggleBox.x+toggleBox.width<=menuBox.x+0.5||menuBox.x+menuBox.width<=toggleBox.x+0.5||toggleBox.y+toggleBox.height<=menuBox.y+0.5||menuBox.y+menuBox.height<=toggleBox.y+0.5,'floating controls do not overlap');
+  const colors=[];
+  for(const [button,box] of [[toggle,toggleBox],[menu,menuBox]]) {
+    const buttonColors={};
+    assert.ok(box.width>=44&&box.height>=44,'floating controls retain 44px touch targets');
+    assert.ok(box.x>=frameBox.x-1&&box.x+box.width<=frameBox.x+frameBox.width+1,'floating control stays inside iframe width');
+    const transparent=async state=>{
+      const style=await button.evaluate(async button=>{
+        getComputedStyle(button).color;
+        await Promise.all(button.getAnimations().map(animation=>animation.finished.catch(()=>{})));
+        const style=getComputedStyle(button);
+        return {background:style.backgroundColor,image:style.backgroundImage,color:style.color,active:button.matches(':active')};
+      });
+      assert.equal(style.background,'rgba(0, 0, 0, 0)',state+' floating control has no background');
+      assert.equal(style.image,'none',state+' floating control has no background image');
+      buttonColors[state]=style.color;
+      if(state==='active')assert.equal(style.active,true,'pressed state is actually exercised');
+    };
+    await page.mouse.move(0,0);await transparent('default');
+    await button.hover();await transparent('hover');
+    await page.mouse.down();
+    try {await transparent('active');}
+    finally {await page.mouse.move(0,0);await page.mouse.up();}
+    colors.push(buttonColors);
+  }
+  assert.deepEqual(colors[0],colors[1],'minimap and menu icons share default, hover and pressed colors');
+  assert.equal(await frame.locator('body').evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth+1),true,'floating controls do not create horizontal document overflow');
+  return {toggle:toggleBox,menu:menuBox};
+}
+
+async function installMinimapMotionProbe(frame) {
+  await frame.locator('#phone-workflow-minimap').evaluate(map => {
+    const viewport=map.querySelector('.phone-workflow-minimap__viewport');
+    const drawing=map.querySelector('.phone-workflow-minimap__drawing');
+    const toggle=document.getElementById('phone-minimap-toggle');
+    const menu=document.querySelector('#workflow-menu-container button');
+    const rect=element=>{
+      const {x,y,width,height,bottom}=element.getBoundingClientRect();
+      return {x,y,width,height,bottom};
+    };
+    const sample=()=>{
+      const style=getComputedStyle(drawing);
+      const matrix=new DOMMatrixReadOnly(style.transform==='none'?undefined:style.transform);
+      return {
+        map:rect(map),viewport:rect(viewport),drawing:rect(drawing),
+        scroll:rect(document.getElementById('node-list-container')),
+        toggle:rect(toggle),menu:rect(menu),
+        layoutHeight:parseFloat(style.height),offsetHeight:drawing.offsetHeight,
+        opacity:Number(style.opacity),scaleX:matrix.a,scaleY:matrix.d,translateY:matrix.f,
+        transform:style.transform,hidden:drawing.hasAttribute('hidden'),
+        visibility:getComputedStyle(viewport).visibility,overflow:getComputedStyle(viewport).overflow,
+        minHeight:getComputedStyle(map).minHeight,ariaHidden:viewport.getAttribute('aria-hidden'),
+        collapsed:map.dataset.collapsed,expanded:toggle.getAttribute('aria-expanded'),
+        stored:localStorage.getItem('mtr-phone-workflow-minimap-collapsed'),
+      };
+    };
+    const transitions=()=>{
+      sample();
+      return map.getAnimations({subtree:true}).filter(animation=>
+        animation instanceof CSSTransition&&[map,viewport,drawing].includes(animation.effect.target));
+    };
+    window.__minimapMotion={sample,transitions,toggle,paused:[]};
+  });
+}
+
+async function readMinimapMotion(frame) {
+  return frame.locator('#phone-workflow-minimap').evaluate(()=>window.__minimapMotion.sample());
+}
+
+async function pauseMinimapToggle(frame) {
+  return frame.locator('#phone-workflow-minimap').evaluate(async()=>{
+    const probe=window.__minimapMotion;
+    const before=probe.sample();
+    probe.toggle.click();
+    await Promise.resolve();
+    const immediate=probe.sample();
+    const animations=probe.transitions();
+    const height=animations.find(animation=>animation.transitionProperty==='height');
+    if(!height)throw new Error('Expected an actual native height transition after toggle');
+    for(const animation of animations)animation.pause();
+    await Promise.all(animations.map(animation=>animation.ready));
+    for(const animation of animations)animation.currentTime=0;
+    probe.paused=animations;
+    return {before,immediate,start:probe.sample(),duration:Number(height.effect.getComputedTiming().duration)};
+  });
+}
+
+async function seekMinimapTransition(frame,fraction) {
+  return frame.locator('#phone-workflow-minimap').evaluate((map,fraction)=>{
+    const probe=window.__minimapMotion;
+    const height=probe.paused.find(animation=>animation.transitionProperty==='height');
+    const duration=Number(height.effect.getComputedTiming().duration);
+    for(const animation of probe.paused) {
+      // visibility has zero duration plus a delay; include its full endTime.
+      animation.currentTime=Math.min(duration*fraction,animation.effect.getComputedTiming().endTime);
+    }
+    return {sample:probe.sample(),currentTime:Number(height.currentTime),duration};
+  },fraction);
+}
+
+async function finishMinimapTransition(frame) {
+  await frame.locator('#phone-workflow-minimap').evaluate(()=>{
+    for(const animation of window.__minimapMotion.paused)animation.finish();
+    window.__minimapMotion.paused=[];
+  });
+  await waitForMinimapSettled(frame);
+  return readMinimapMotion(frame);
+}
+
+function assertMinimapMotionFrame(sample,baseline,label) {
+  const close=(actual,expected,description,tolerance=1)=>assert.ok(Math.abs(actual-expected)<=tolerance,
+    label+' '+description+': '+JSON.stringify({actual,expected}));
+  close(sample.map.x,baseline.map.x,'map x');
+  close(sample.map.y,baseline.map.y,'map top');
+  close(sample.scroll.y,sample.map.bottom,'scrollport follows the map bottom without a gap');
+  close(sample.scroll.bottom,baseline.scroll.bottom,'scrollport retains its bottom edge');
+  close(sample.viewport.height,sample.map.height,'viewport clips to the animated height');
+  close(sample.layoutHeight,baseline.layoutHeight,'drawing retains full CSS layout height');
+  assert.equal(sample.offsetHeight,baseline.offsetHeight,label+' drawing offsetHeight never compresses');
+  close(sample.drawing.height,sample.layoutHeight*sample.scaleY,'only transform changes painted height');
+  close(sample.scaleX,sample.scaleY,'scale remains uniform',0.0001);
+  assert.ok(sample.scaleY>=.9699&&sample.scaleY<=1.0001,label+' drawing only scales slightly');
+  for(const control of ['toggle','menu'])for(const key of ['x','y','width','height'])
+    close(sample[control][key],baseline[control][key],control+' remains fixed '+key,0.1);
+  assert.equal(sample.minHeight,'0px',label+' map has no minimum-height remainder');
+  assert.equal(sample.overflow,'hidden',label+' viewport clips the fixed-size drawing');
+  assert.equal(sample.hidden,false,label+' drawing is never removed with hidden');
+}
+
+function assertMinimapMotionEndpoint(sample,baseline,collapsed,label) {
+  assertMinimapMotionFrame(sample,baseline,label);
+  assert.ok(Math.abs(sample.map.height-(collapsed?0:baseline.layoutHeight))<=1,label+' reaches exact target height: '+JSON.stringify(sample));
+  assert.equal(sample.visibility,collapsed?'hidden':'visible',label+' reaches target visibility');
+  assert.equal(sample.ariaHidden,String(collapsed),label+' viewport accessibility follows state');
+  assert.equal(sample.collapsed,String(collapsed));
+  assert.equal(sample.expanded,String(!collapsed));
+  assert.equal(sample.opacity,collapsed?0:1);
+  assert.ok(Math.abs(sample.scaleY-(collapsed?.97:1))<.0001);
+  assert.ok(Math.abs(sample.translateY-(collapsed?-10:0))<.0001);
+  if(collapsed)assert.ok(Math.abs(sample.scroll.y-baseline.map.y)<=.1,label+' leaves zero blank space');
+  else assert.equal(sample.transform,'none',label+' removes the drawing transform');
+}
+
+test('minimap animation is nonlinear, keeps fixed controls, and reverses continuously', {timeout:120000}, async t=>{
+  const {chromium}=resolvePlaywright();
+  const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+  const fixture=await startFixture(minimapFixture());
+  const shotDir=await fs.promises.mkdtemp(path.join(os.tmpdir(),'mtr-minimap-animation-'));
+  t.diagnostic('Animation screenshots: '+shotDir);
+  try {
+    for(const viewport of [{width:390,height:844},{width:1280,height:900}]) {
+      const context=await browser.newContext({locale:'zh-CN',viewport,reducedMotion:'no-preference'});
+      try {
+        const page=await context.newPage();const errors=[];
+        page.on('pageerror',error=>errors.push(error.message));
+        await page.goto(fixture.url);await page.click('.nav-button[data-target=advanced]');
+        const frame=page.frameLocator('#view-advanced .panel-frame');
+        await frame.locator('[data-minimap-node-key]').nth(7).waitFor();
+        await waitForMinimapSettled(frame);await installMinimapMotionProbe(frame);
+        const baseline=await readMinimapMotion(frame);
+        assert.ok(baseline.map.height>100,'expanded fixture has measurable height');
+        assertMinimapMotionEndpoint(baseline,baseline,false,'initial '+viewport.width);
+        await page.screenshot({path:path.join(shotDir,viewport.width+'-expanded.png')});
+        for(const collapsed of [true,false]) {
+          const label=viewport.width+' '+(collapsed?'collapse':'expand');
+          const start=await pauseMinimapToggle(frame);
+          assert.ok(Math.abs(start.duration-(collapsed?240:320))<.01,label+' native transition duration');
+          assert.equal(start.immediate.stored,String(collapsed),label+' saves the preference before any frame');
+          assert.equal(start.immediate.ariaHidden,String(collapsed),label+' updates accessibility immediately');
+          assert.equal(start.immediate.visibility,'visible',label+' drawing is visible at the start');
+          const progress=[];
+          for(const fraction of [.25,.5,.75]) {
+            const measured=await seekMinimapTransition(frame,fraction);
+            const sample=measured.sample;
+            // Native animation clocks use floating-point milliseconds, not exact integers.
+            assert.ok(Math.abs(measured.currentTime-measured.duration*fraction)<.01,label+' seeks the native clock');
+            assertMinimapMotionFrame(sample,baseline,label+' '+fraction);
+            assert.ok(sample.map.height>0&&sample.map.height<baseline.map.height,label+' has an intermediate layout height');
+            assert.equal(sample.visibility,'visible',label+' does not hide the drawing before height finishes');
+            assert.ok(sample.opacity>0&&sample.opacity<1,label+' opacity interpolates');
+            progress.push(collapsed?1-sample.map.height/baseline.map.height:sample.map.height/baseline.map.height);
+            if(fraction===.5)await page.screenshot({path:path.join(shotDir,viewport.width+'-'+(collapsed?'closing':'opening')+'-midpoint.png')});
+          }
+          assert.ok(progress[0]<progress[1]&&progress[1]<progress[2],label+' progresses monotonically');
+          // Measured displacement, not a CSS string: these envelopes reject linear interpolation.
+          const expected=collapsed?[.237,.776,.959]:[.765,.961,.997];
+          progress.forEach((value,index)=>assert.ok(Math.abs(value-expected[index])<.025,label+' eased quarter '+index+': '+JSON.stringify(progress)));
+          assert.ok(Math.abs(progress[1]-.5)>.2,label+' halfway in time is not halfway in distance');
+          const endpoint=await finishMinimapTransition(frame);
+          assertMinimapMotionEndpoint(endpoint,baseline,collapsed,label+' finished');
+          assert.equal(endpoint.stored,String(collapsed));
+          assert.equal(await frame.locator('#phone-minimap-graph').isVisible(),!collapsed);
+          await page.screenshot({path:path.join(shotDir,viewport.width+'-'+(collapsed?'collapsed':'reopened')+'.png')});
+        }
+        // Also sample ordinary playback at every browser frame without seeking or pausing.
+        for(const collapsed of [true,false]) {
+          const samples=await frame.locator('#phone-workflow-minimap').evaluate(async()=>{
+            const probe=window.__minimapMotion;
+            probe.sample();probe.toggle.click();await Promise.resolve();
+            const samples=[probe.sample()];
+            for(let index=0;index<120;index++) {
+              await new Promise(requestAnimationFrame);
+              samples.push(probe.sample());
+              if(probe.transitions().every(animation=>animation.playState==='finished'))return samples;
+            }
+            throw new Error('Native minimap transition failed to finish in 120 frames');
+          });
+          const middle=samples.filter(sample=>sample.map.height>1&&sample.map.height<baseline.map.height-1);
+          assert.ok(middle.length>=2,'ordinary playback contains multiple intermediate heights');
+          for(const sample of samples)assertMinimapMotionFrame(sample,baseline,'natural frame '+viewport.width);
+          assertMinimapMotionEndpoint(samples.at(-1),baseline,collapsed,'natural endpoint '+viewport.width);
+        }
+        await pauseMinimapToggle(frame);
+        await seekMinimapTransition(frame,.45);
+        for(const collapsed of [false,true,false,true,false,true]) {
+          const reversal=await pauseMinimapToggle(frame);
+          assert.ok(reversal.before.map.height>1&&reversal.before.map.height<baseline.map.height-1,'reverse an in-flight height');
+          for(const sample of [reversal.immediate,reversal.start]) {
+            assert.ok(Math.abs(sample.map.height-reversal.before.map.height)<=.1,'reversal starts at current height without an endpoint jump');
+            assertMinimapMotionFrame(sample,baseline,'reversal '+viewport.width);
+            assert.equal(sample.stored,String(collapsed),'each rapid toggle persists its latest state immediately');
+            assert.equal(sample.ariaHidden,String(collapsed));
+            assert.equal(sample.visibility,'visible','reversals never prematurely hide the viewport');
+          }
+          const next=(await seekMinimapTransition(frame,.35)).sample;
+          assert.ok(collapsed?next.map.height<reversal.start.map.height:next.map.height>reversal.start.map.height,'new transition moves in the requested direction');
+          assertMinimapMotionFrame(next,baseline,'reversed progress '+viewport.width);
+        }
+        const final=await finishMinimapTransition(frame);
+        assertMinimapMotionEndpoint(final,baseline,true,'rapid-toggle final state');
+        assert.equal(final.stored,'true');
+        assert.equal(await frame.locator('#phone-workflow-minimap').evaluate(map=>map.getAnimations({subtree:true}).filter(animation=>animation.playState!=='finished').length),0,'no paused or delayed animation survives completion');
+        assert.deepEqual(errors,[]);
+      } finally {await context.close();}
+    }
+    assert.deepEqual(fixture.posted,[],'animation never sends desktop commands');
+    assert.deepEqual(fixture.submissions,[],'animation never submits a live job');
+  } finally {await browser.close();await stopFixture(fixture.server);}
+});
+
+test('minimap animation honors reduced motion and remembered collapsed first paint', {timeout:120000}, async()=>{
+  const {chromium}=resolvePlaywright();
+  const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+  const fixture=await startFixture(minimapFixture());
+  try {
+    for(const reducedMotion of ['no-preference','reduce']) {
+      const context=await browser.newContext({locale:'zh-CN',viewport:{width:390,height:844},reducedMotion});
+      try {
+        await context.addInitScript(()=>localStorage.setItem('mtr-phone-workflow-minimap-collapsed','true'));
+        // Inject only into fixture HTML, before React, not the iframe's temporary about:blank document.
+        const observeFirstPaint=()=>{
+          window.__minimapFirstPaint=[];
+          const sample=()=>{
+            const map=document.getElementById('phone-workflow-minimap');
+            if(!map)return;
+            const viewport=map.querySelector('.phone-workflow-minimap__viewport');
+            window.__minimapFirstPaint.push({
+              collapsed:map.dataset.collapsed,height:map.getBoundingClientRect().height,
+              visibility:viewport&&getComputedStyle(viewport).visibility,
+              expanded:document.getElementById('phone-minimap-toggle')?.getAttribute('aria-expanded'),
+              animations:map.getAnimations({subtree:true}).length,
+            });
+          };
+          const observer=new MutationObserver(sample);
+          const tick=()=>{sample();window.__minimapFirstPaintFrame=requestAnimationFrame(tick);};
+          const start=()=>{
+            observer.observe(document.documentElement,{subtree:true,childList:true,attributes:true,attributeFilter:['data-collapsed','style','class']});
+            sample();window.__minimapFirstPaintFrame=requestAnimationFrame(tick);
+          };
+          window.__stopMinimapFirstPaint=()=>{observer.disconnect();cancelAnimationFrame(window.__minimapFirstPaintFrame);return window.__minimapFirstPaint;};
+          if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',start,{once:true});
+          else start();
+        };
+        await context.route('**/mobile/assets/panel.html?*',async route=>{
+          const response=await route.fetch();
+          const html=await response.text();
+          await route.fulfill({response,body:html.replace('<head>','<head><script>('+observeFirstPaint.toString()+')();</script>')});
+        });
+        const page=await context.newPage();const errors=[];
+        page.on('pageerror',error=>errors.push(error.message));
+        await page.goto(fixture.url);await page.click('.nav-button[data-target=advanced]');
+        const frame=page.frameLocator('#view-advanced .panel-frame');
+        await frame.locator('#phone-workflow-minimap').waitFor({state:'attached'});
+        await frame.locator('#node-card-2').waitFor();
+        await waitForMinimapSettled(frame);
+        const firstPaint=await frame.locator('body').evaluate(()=>window.__stopMinimapFirstPaint());
+        assert.deepEqual(errors,[],'first-paint observer must run without errors');
+        assert.ok(firstPaint.length>=2,'observe mount mutations and actual frames');
+        for(const sample of firstPaint) {
+          assert.equal(sample.collapsed,'true','remembered collapse is applied at mount');
+          assert.equal(sample.height,0,'first paint never flashes the expanded height');
+          assert.equal(sample.visibility,'hidden','remembered drawing never flashes visible');
+          assert.equal(sample.expanded,'false');
+          assert.equal(sample.animations,0,'remembered collapse does not play an initial closing transition');
+        }
+        await installMinimapMotionProbe(frame);
+        if(reducedMotion==='reduce') {
+          const initial=await readMinimapMotion(frame);
+          const baseline={...initial,map:{...initial.map,height:initial.layoutHeight}};
+          assertMinimapMotionEndpoint(initial,baseline,true,'reduced initial state');
+          for(const collapsed of [false,true,false,true]) {
+            const immediate=await frame.locator('#phone-workflow-minimap').evaluate(async()=>{
+              const probe=window.__minimapMotion;
+              probe.toggle.click();await Promise.resolve();
+              return {sample:probe.sample(),animations:probe.transitions().length};
+            });
+            assert.equal(immediate.animations,0,'reduced motion creates no map CSS transitions');
+            assertMinimapMotionEndpoint(immediate.sample,baseline,collapsed,'reduced immediate endpoint');
+            assert.equal(immediate.sample.stored,String(collapsed));
+            assert.equal(await frame.locator('#phone-minimap-graph').isVisible(),!collapsed);
+          }
+        }
+        assert.deepEqual(errors,[]);
+      } finally {await context.close();}
+    }
+    assert.deepEqual(fixture.posted,[]);
+    assert.deepEqual(fixture.submissions,[]);
+  } finally {await browser.close();await stopFixture(fixture.server);}
+});
+
+test('minimap uses one third of the host gap and remembers zero-space floating controls', {timeout:120000}, async()=>{
+  const {chromium}=resolvePlaywright();
+  const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+  const fixture=await startFixture(minimapFixture());
+  const shotDir=process.env.PANEL_SHOT_DIR||path.join(os.tmpdir(),'mtr-panel-minimap');
+  try {
+    const context=await browser.newContext({locale:'zh-CN',viewport:{width:390,height:844}});
+    const page=await context.newPage();const errors=[];
+    page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(fixture.url);await page.click('.nav-button[data-target=advanced]');
+    const frame=page.frameLocator('#view-advanced .panel-frame');
+    const map=frame.locator('#phone-workflow-minimap');
+    const toggle=frame.locator('#phone-minimap-toggle');
+    await frame.locator('[data-minimap-node-key]').nth(7).waitFor();
+    assert.equal(await map.getAttribute('data-collapsed'),'false','the first visit opens the map');
+    assert.equal(await toggle.getAttribute('aria-expanded'),'true');
+    await frame.locator('body').evaluate(()=>{
+      window.__minimapViewportMessages=[];
+      window.addEventListener('message',event=>{
+        if(event.origin===location.origin&&event.data?.action==='viewport')window.__minimapViewportMessages.push(event.data);
+      });
+    });
+    await fs.promises.mkdir(shotDir,{recursive:true});
+    for (const viewport of [{width:320,height:640},{width:390,height:844},{width:430,height:932},{width:844,height:390},{width:1280,height:900}]) {
+      await page.setViewportSize(viewport);
+      await page.waitForFunction(()=>{
+        const iframe=document.querySelector('#view-advanced .panel-frame');
+        const map=iframe?.contentDocument?.getElementById('phone-workflow-minimap');
+        const top=document.querySelector('.topbar')?.getBoundingClientRect().bottom;
+        const bottom=document.querySelector('.bottom-nav')?.getBoundingClientRect().top;
+        return map&&Math.abs(map.getBoundingClientRect().height-(bottom-top)/3)<=1;
+      },null,{timeout:10000}).catch(async error=>{
+        const measured=await page.evaluate(()=>{
+          const frame=document.querySelector('#view-advanced .panel-frame');
+          const map=frame?.contentDocument?.getElementById('phone-workflow-minimap');
+          return {
+            viewport:{width:innerWidth,height:innerHeight},
+            map:map?.getBoundingClientRect().toJSON(),frame:frame?.getBoundingClientRect().toJSON(),
+            topbar:document.querySelector('.topbar')?.getBoundingClientRect().toJSON(),
+            bottomNav:document.querySelector('.bottom-nav')?.getBoundingClientRect().toJSON(),
+            cssHeight:map&&getComputedStyle(map).getPropertyValue('--phone-minimap-height'),
+            rootStyle:frame?.contentDocument?.getElementById('panel-root')?.getAttribute('style'),
+            visualViewport:visualViewport&&{width:visualViewport.width,height:visualViewport.height,offsetTop:visualViewport.offsetTop},
+            viewportMessages:frame?.contentWindow?.__minimapViewportMessages,
+          };
+        });
+        throw new Error('Minimap host geometry does not settle to gap / 3: '+JSON.stringify(measured),{cause:error});
+      });
+      const bounds=await page.evaluate(()=>({top:document.querySelector('.topbar').getBoundingClientRect().bottom,bottom:document.querySelector('.bottom-nav').getBoundingClientRect().top}));
+      const mapBox=await map.boundingBox();
+      const frameBox=await page.locator('#view-advanced .panel-frame').boundingBox();
+      const scroll=await frame.locator('#node-list-container').boundingBox();
+      assert.ok(Math.abs(mapBox.height-(bounds.bottom-bounds.top)/3)<=1,'exact host gap / 3 at '+viewport.width);
+      assert.ok(Math.abs(mapBox.y-bounds.top)<=1&&Math.abs(mapBox.y-frameBox.y)<=1,'map starts immediately below the external topbar');
+      assert.ok(Math.abs(scroll.y-mapBox.y-mapBox.height)<=1,'expanded map meets the node scrollport without a separate toolbar row');
+      const expandedControls=await assertFloatingPanelControls(page,frame,false);
+      assert.equal(await map.evaluate(el=>el.scrollWidth<=el.clientWidth+1),true,'map does not overflow at '+viewport.width);
+      const layout=await minimapLayout(frame);
+      const padding=await frame.locator('#phone-minimap-graph').evaluate(svg=>{const style=getComputedStyle(svg.parentElement);return {left:style.paddingLeft,right:style.paddingRight};});
+      assert.equal(padding.left,padding.right,'drawing reserves equal padding on both sides');
+      assert.ok(Math.abs(layout.graph.x+layout.graph.width/2-layout.box.x-layout.box.width/2)<=1,'SVG drawing stays horizontally centered in the map');
+      assert.equal(layout.nodes.length,8);
+      for(const node of layout.nodes) {
+        assert.ok(node.box.width>0&&node.box.height>0,'node '+node.id+' is painted');
+        assert.ok(node.box.x>=layout.graph.x-1&&node.box.x+node.box.width<=layout.graph.x+layout.graph.width+1,'node fits horizontally');
+        assert.ok(node.box.y>=layout.graph.y-1&&node.box.y+node.box.height<=layout.graph.y+layout.graph.height+1,'node fits vertically');
+      }
+      await focusPanelNode(frame,2);
+      await frame.locator('[data-minimap-node-key][data-node-id="2"][data-focused=true]').waitFor();
+      await frame.locator('[data-phone-side=input][data-phone-relation="1"]').waitFor();
+      await frame.locator('[data-phone-side=output][data-phone-relation="3"]').waitFor();
+      assertMinimapLayout(await minimapLayout(frame),layout,'focus remains shared even in the short landscape viewport');
+      await page.screenshot({path:path.join(shotDir,'minimap-'+viewport.width+'.png')});
+      await toggle.click();
+      await frame.locator('#phone-workflow-minimap[data-collapsed=true]').waitFor({state:'attached'});
+      await frame.locator('#phone-minimap-graph').waitFor({state:'hidden'});
+      const collapsedControls=await assertFloatingPanelControls(page,frame,true);
+      assert.deepEqual(collapsedControls,expandedControls,'collapsing the map does not move either control');
+      await page.screenshot({path:path.join(shotDir,'minimap-collapsed-'+viewport.width+'.png')});
+      await toggle.click();
+      await frame.locator('#phone-minimap-graph').waitFor();
+      assert.deepEqual(await assertFloatingPanelControls(page,frame,false),expandedControls,'reopening the map does not move either control');
+    }
+    await page.setViewportSize({width:390,height:844});
+    await toggle.click();
+    await frame.locator('#phone-workflow-minimap[data-collapsed=true]').waitFor({state:'attached'});
+    assert.equal(await toggle.getAttribute('aria-expanded'),'false');
+    await assertFloatingPanelControls(page,frame,true);
+    assert.equal(await frame.locator('#phone-minimap-graph').isVisible(),false);
+    assert.equal(await page.evaluate(()=>localStorage.getItem('mtr-phone-workflow-minimap-collapsed')),'true');
+    const menu=frame.locator('#workflow-menu-container button').first();
+    await menu.click();await frame.getByRole('button',{name:'隐藏 / 显示',exact:true}).click();
+    await frame.getByRole('button',{name:'隐藏连接按钮',exact:true}).click();
+    await frame.getByRole('button',{name:'显示连接按钮',exact:true}).click();
+    await frame.getByRole('button',{name:'取消',exact:true}).click();
+    await menu.click();await frame.getByRole('button',{name:'全部折叠',exact:true}).click();
+    await frame.locator('#node-card-2').waitFor({state:'detached'});
+    await menu.click();await frame.getByRole('button',{name:'全部展开',exact:true}).click();
+    await frame.locator('#node-card-wrapper-2[data-phone-expanded=true]').waitFor();
+    await menu.click();await frame.getByRole('button',{name:'搜索',exact:true}).click();
+    const search=frame.locator('.node-search-bar input');
+    await search.fill('KSampler');
+    await frame.locator('#node-card-2').waitFor();
+    assert.equal(await toggle.isVisible(),true,'the expand control stays reachable while search is open');
+    await page.screenshot({path:path.join(shotDir,'minimap-collapsed-search-390.png')});
+    await page.reload();await page.click('.nav-button[data-target=advanced]');
+    await frame.locator('#phone-workflow-minimap[data-collapsed=true]').waitFor({state:'attached'});
+    assert.equal(await toggle.getAttribute('aria-expanded'),'false','reload retains the collapsed state');
+    await assertFloatingPanelControls(page,frame,true);
+    await toggle.click();
+    await frame.locator('#phone-workflow-minimap[data-collapsed=false]').waitFor();
+    await frame.locator('#phone-minimap-graph').waitFor();
+    assert.equal(await page.evaluate(()=>localStorage.getItem('mtr-phone-workflow-minimap-collapsed')),'false');
+    await page.reload();await page.click('.nav-button[data-target=advanced]');
+    await frame.locator('#phone-workflow-minimap[data-collapsed=false]').waitFor();
+    assert.equal(await toggle.getAttribute('aria-expanded'),'true','reload also retains the reopened state');
+    assert.deepEqual(fixture.posted,[],'map preferences never issue desktop commands');
+    assert.deepEqual(errors,[]);
+    await context.close();
+  } finally {await browser.close();await stopFixture(fixture.server);}
+});
+
+test('minimap packs isolated nodes below the connected graph and retains their focus', {timeout:120000}, async()=>{
+  const {chromium}=resolvePlaywright();
+  const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+  const fixture=await startFixture(minimapFixture(24));
+  const shotDir=process.env.PANEL_SHOT_DIR||path.join(os.tmpdir(),'mtr-panel-minimap');
+  try {
+    const context=await browser.newContext({locale:'zh-CN',viewport:{width:390,height:844}});
+    const page=await context.newPage();const errors=[];
+    page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(fixture.url);await page.click('.nav-button[data-target=advanced]');
+    const frame=page.frameLocator('#view-advanced .panel-frame');
+    await frame.locator('[data-minimap-node-key]').nth(29).waitFor();
+    await fs.promises.mkdir(shotDir,{recursive:true});
+    for(const width of [320,390,1280]) {
+      await page.setViewportSize({width,height:844});
+      await waitForMinimapSettled(frame);
+      const drawing=await frame.locator('#phone-minimap-graph').evaluate(svg=>({
+        viewBox:{x:svg.viewBox.baseVal.x,y:svg.viewBox.baseVal.y,width:svg.viewBox.baseVal.width,height:svg.viewBox.baseVal.height},
+        nodes:[...svg.querySelectorAll('[data-minimap-node-key]')].map(node=>({id:node.dataset.nodeId,isolated:node.dataset.isolated,column:Number(node.dataset.column),x:node.x.baseVal.value,y:node.y.baseVal.value,width:node.width.baseVal.value,height:node.height.baseVal.value})),
+      }));
+      const isolated=drawing.nodes.filter(node=>node.isolated==='true');
+      const connected=drawing.nodes.filter(node=>node.isolated==='false');
+      assert.equal(isolated.length,24,'every completely unconnected root goes in the compact area');
+      assert.equal(connected.length,6,'main chain and short branch remain connected nodes');
+      assert.ok(new Set(isolated.map(node=>node.x)).size>=2,'isolated nodes use multiple horizontal slots');
+      assert.ok(new Set(isolated.map(node=>node.y)).size<isolated.length,'isolated nodes do not form one long vertical column');
+      assert.ok(isolated.every(node=>node.column===1),'semantic source columns stay one-based even when isolated tiles wrap');
+      const connectedBottom=Math.max(...connected.map(node=>node.y+node.height));
+      assert.ok(isolated.every(node=>node.y>=connectedBottom),'the isolated area is below the main connected graph');
+      for(const node of drawing.nodes) {
+        assert.ok(node.x>=drawing.viewBox.x&&node.x+node.width<=drawing.viewBox.x+drawing.viewBox.width,'node '+node.id+' fits SVG viewBox horizontally');
+        assert.ok(node.y>=drawing.viewBox.y&&node.y+node.height<=drawing.viewBox.y+drawing.viewBox.height,'node '+node.id+' fits SVG viewBox vertically');
+      }
+      for(let index=0;index<isolated.length;index++)for(const other of isolated.slice(index+1)) {
+        const node=isolated[index];
+        assert.ok(node.x+node.width<=other.x||other.x+other.width<=node.x||node.y+node.height<=other.y||other.y+other.height<=node.y,'isolated tiles do not overlap');
+      }
+      assert.deepEqual(Object.fromEntries(connected.map(node=>[node.id,node.column])),{'1':1,'2':2,'3':3,'4':2,'5':4,'6':5});
+      await page.screenshot({path:path.join(shotDir,'minimap-isolated-'+width+'.png')});
+    }
+    await page.setViewportSize({width:390,height:844});
+    await focusPanelNode(frame,7);
+    const focused=frame.locator('[data-minimap-node-key][data-node-id="7"][data-isolated=true][data-focused=true]');
+    await focused.waitFor();
+    assert.equal(await frame.locator('[data-minimap-edge][data-focused=true]').count(),0,'an isolated focus has no highlighted edges');
+    assert.equal(await frame.locator('[data-phone-relation]').count(),0,'an isolated focus has no side neighbours');
+    const baseline=await minimapLayout(frame);
+    await frame.locator('#node-header-7 button').last().click();
+    await frame.getByRole('button',{name:'绕过',exact:true}).click();
+    await frame.locator('[data-minimap-node-key][data-node-id="7"][data-focused=true][data-bypassed=true]').waitFor();
+    const style=await focused.evaluate(node=>{const style=getComputedStyle(node);return {fill:style.fill,opacity:Number(style.fillOpacity)*Number(style.opacity)};});
+    const channels=style.fill.match(/[0-9.]+/g)?.map(Number)||[];
+    assert.ok(channels.length>=3&&channels[0]>channels[1]&&channels[2]>channels[1],'bypassed isolated focus retains a purple tint');
+    assert.ok(style.opacity>0&&style.opacity<1,'bypassed isolated focus remains semitransparent');
+    assertMinimapLayout(await minimapLayout(frame),baseline,'bypassing an isolated node changes its appearance, not placement');
+    assert.deepEqual(fixture.posted,[]);
+    assert.deepEqual(errors,[]);
+    await context.close();
+  } finally {await browser.close();await stopFixture(fixture.server);}
+});
+
+test('minimap packs an entirely isolated workflow into multiple columns', {timeout:60000}, async()=>{
+  const {chromium}=resolvePlaywright();
+  const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+  const data=minimapFixture(24);
+  data.nativeWorkflow.links=[];data.nativeWorkflow.last_link_id=0;
+  for(const node of data.nativeWorkflow.nodes) {
+    for(const input of node.inputs)input.link=null;
+    for(const output of node.outputs)output.links=[];
+  }
+  const fixture=await startFixture(data);
+  try {
+    const page=await browser.newPage({locale:'zh-CN',viewport:{width:320,height:640}});
+    await page.goto(fixture.url);await page.click('.nav-button[data-target=advanced]');
+    const frame=page.frameLocator('#view-advanced .panel-frame');
+    await frame.locator('[data-minimap-node-key][data-isolated=true]').nth(29).waitFor();
+    const nodes=await frame.locator('[data-minimap-node-key]').evaluateAll(nodes=>nodes.map(node=>({column:node.dataset.column,x:node.x.baseVal.value,y:node.y.baseVal.value})));
+    assert.equal(nodes.length,30);
+    assert.ok(nodes.every(node=>node.column==='1'),'all unconnected sources retain semantic column one');
+    assert.ok(new Set(nodes.map(node=>node.x)).size>=2,'an empty main graph does not force isolated nodes into one narrow column');
+    assert.ok(new Set(nodes.map(node=>node.y)).size<nodes.length,'fully isolated workflows remain compact');
+    assert.equal(await frame.locator('[data-minimap-edge]').count(),0);
+    assert.deepEqual(fixture.posted,[]);
+  } finally {await browser.close();await stopFixture(fixture.server);}
+});
+
+test('minimap retains the full topology and shared focus without moving or writing coordinates', {timeout:120000}, async()=>{
+  const {chromium}=resolvePlaywright();
+  const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+  const fixture=await startFixture(minimapFixture());
+  try {
+    const context=await browser.newContext({locale:'zh-CN',viewport:{width:390,height:844},reducedMotion:'no-preference'});
+    const page=await context.newPage();const errors=[];
+    page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(fixture.url);
+    await page.evaluate(()=>{
+      window.__minimapMessages=[];
+      window.addEventListener('message',event=>{
+        if(event.origin===location.origin&&event.data?.type==='mtr-panel'&&['edit','error'].includes(event.data.action))window.__minimapMessages.push(event.data);
+      });
+    });
+    const nativeShape=()=>page.evaluate(async id=>{
+      const response=await fetch('/mobile/api/workflows/'+id);
+      const {native_workflow:workflow}=(await response.json()).workflow;
+      return {nodes:workflow.nodes.map(({id,pos,size})=>({id,pos,size})),links:workflow.links,groups:workflow.groups};
+    },WORKFLOW_ID);
+    const original=await nativeShape();
+    await page.click('.nav-button[data-target=advanced]');
+    const frame=page.frameLocator('#view-advanced .panel-frame');
+    const nodes=frame.locator('[data-minimap-node-key]');
+    await nodes.nth(7).waitFor();
+
+    const columns=await nodes.evaluateAll(nodes=>Object.fromEntries(nodes.map(node=>[node.dataset.nodeId,Number(node.dataset.column)])));
+    assert.deepEqual(columns,{'1':1,'2':2,'3':3,'4':2,'5':4,'6':5,'7':1,'8':1});
+    const edges=await frame.locator('[data-minimap-edge]').evaluateAll(edges=>{
+      const ids=new Map([...document.querySelectorAll('[data-minimap-node-key]')].map(node=>[node.dataset.minimapNodeKey,node.dataset.nodeId]));
+      return edges.map(edge=>[ids.get(edge.dataset.source),ids.get(edge.dataset.target)].join('>')).sort();
+    });
+    assert.deepEqual(edges,['1>2','1>4','2>3','3>5','4>6','5>6']);
+    const bypass=frame.locator('[data-minimap-node-key][data-node-id="4"][data-bypassed=true]');
+    const tint=await bypass.evaluate(node=>{
+      const style=getComputedStyle(node);
+      const channels=style.fill.match(/[0-9.]+/g)?.map(Number)||[];
+      return {channels,alpha:(channels[3]??1)*Number(style.fillOpacity)*Number(style.opacity)};
+    });
+    assert.ok(tint.channels.length>=3&&tint.channels[0]>tint.channels[1]&&tint.channels[2]>tint.channels[1],'mode 4 uses a purple tint: '+JSON.stringify(tint));
+    assert.ok(tint.alpha>0&&tint.alpha<1,'mode 4 remains semitransparent');
+    const baseline=await minimapLayout(frame);
+    assert.ok(Math.abs(baseline.nodes.find(node=>node.id==='2').box.x-baseline.nodes.find(node=>node.id==='4').box.x)<=1,'B and the short branch D share the second column');
+    await frame.locator('#node-header-7 button').last().click();
+    await frame.getByRole('button',{name:'隐藏',exact:true}).click();
+    await frame.locator('#node-card-7').waitFor({state:'hidden'});
+    await frame.locator('#group-header-2 button').first().evaluate(button=>button.click());
+    await frame.locator('#node-card-8').waitFor({state:'detached'});
+    await frame.locator('#node-title-container-3 button').first().evaluate(button=>button.click());
+    await frame.locator('#node-card-wrapper-3[data-phone-expanded=false]').waitFor();
+    assert.equal(await nodes.count(),8,'hidden roots and folded group/card nodes remain on the map');
+    assertMinimapLayout(await minimapLayout(frame),baseline,'presentation filters do not relayout the graph');
+    await focusPanelNode(frame,2);
+    await frame.locator('[data-minimap-node-key][data-node-id="2"][data-focused=true]').waitFor();
+    assert.equal(await frame.locator('[data-minimap-node-key][data-focused=true]').count(),1);
+    assert.equal(await frame.locator('.phone-relations-layer').getAttribute('data-phone-focus-id'),'2');
+    const focusKey=await frame.locator('[data-minimap-node-key][data-node-id="2"]').getAttribute('data-minimap-node-key');
+    const focusedEdges=await frame.locator('[data-minimap-edge][data-focused=true]').evaluateAll(edges=>edges.map(edge=>[edge.dataset.source,edge.dataset.target]));
+    assert.equal(focusedEdges.length,2,'both direct connections of B share its focus highlight');
+    assert.ok(focusedEdges.every(edge=>edge.includes(focusKey)),'only incident map edges receive the focused state');
+    await frame.locator('#node-list-container').evaluate(scroll=>{scroll.scrollTop+=100;});
+    await page.waitForTimeout(100);
+    assertMinimapLayout(await minimapLayout(frame),baseline,'vertical list scrolling leaves graph geometry fixed');
+    await focusPanelNode(frame,2);
+    const seed=frame.locator('#widget-row-2-0 input').first();
+    await seed.fill('2468');await seed.press('Tab');
+    await page.waitForFunction(()=>window.__minimapMessages.some(message=>Number(message.value?.values?.['2::seed'])===2468));
+    assertMinimapLayout(await minimapLayout(frame),baseline,'parameter changes leave layout and routes fixed');
+    // Sample actual animation frames, not just the equal start/end positions.
+    await frame.locator('body').evaluate(()=>{
+      window.__minimapTravel=[];window.__sampleMinimap=true;
+      const sample=()=>{
+        if(!window.__sampleMinimap)return;
+        const map=document.getElementById('phone-workflow-minimap');
+        window.__minimapTravel.push({moving:!!document.getElementById('node-list-container').dataset.phoneTravelling,transform:getComputedStyle(document.getElementById('node-list-inner')).transform,rect:map.getBoundingClientRect().toJSON(),nodes:[...map.querySelectorAll('[data-minimap-node-key]')].map(node=>({id:node.dataset.nodeId,rect:node.getBoundingClientRect().toJSON()}))});
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    await frame.locator('[data-phone-side=input][data-phone-relation="1"]').click();
+    await frame.locator('.phone-relations-layer[data-phone-focus-id="1"]').waitFor();
+    await frame.locator('[data-minimap-node-key][data-node-id="1"][data-focused=true]').waitFor();
+    await frame.locator('#node-list-container:not([data-phone-travelling])').waitFor();
+    const travel=await frame.locator('body').evaluate(()=>{window.__sampleMinimap=false;return window.__minimapTravel;});
+    assert.ok(travel.some(sample=>sample.moving&&sample.transform!=='none'),'the test observes an actual horizontal list transition');
+    for(const sample of travel) {
+      assert.ok(Math.abs(sample.rect.x-baseline.box.x)<=1&&Math.abs(sample.rect.y-baseline.box.y)<=1,'map stays fixed during horizontal travel');
+      for(const node of sample.nodes) {
+        const expected=baseline.nodes.find(item=>item.id===node.id).box;
+        assert.ok(Math.abs(node.rect.x-expected.x)<=1&&Math.abs(node.rect.y-expected.y)<=1,'node '+node.id+' stays fixed during travel');
+      }
+    }
+    assertMinimapLayout(await minimapLayout(frame),baseline,'connection arrival only changes focus');
+    const options=frame.getByRole('button',{name:'工作流选项'});
+    await options.click();await frame.getByRole('button',{name:'隐藏 / 显示',exact:true}).click();
+    await frame.getByRole('button',{name:'隐藏连接按钮',exact:true}).click();
+    await frame.getByRole('button',{name:'取消',exact:true}).click();
+    await frame.locator('[data-phone-relation]').first().waitFor({state:'detached'});
+    await frame.locator('#node-card-2').evaluate(card=>{
+      const scroll=card.closest('[data-node-list]');
+      scroll.scrollTop+=card.getBoundingClientRect().top-scroll.getBoundingClientRect().top;
+    });
+    await frame.locator('[data-minimap-node-key][data-node-id="2"][data-focused=true]').waitFor();
+    assert.equal(await frame.locator('[data-phone-relation]').count(),0,'connection controls stay disabled while minimap focus follows scrolling');
+    assert.equal(await frame.locator('[data-minimap-node-key][data-focused=true]').count(),1);
+    assertMinimapLayout(await minimapLayout(frame),baseline,'disabling connection buttons does not affect layout');
+    // The drawing is read-only: clicking and dragging it cannot navigate or edit.
+    const scrollBefore=await frame.locator('#node-list-container').evaluate(scroll=>scroll.scrollTop);
+    const nodeBox=await frame.locator('[data-minimap-node-key][data-node-id="6"]').boundingBox();
+    await page.mouse.click(nodeBox.x+nodeBox.width/2,nodeBox.y+nodeBox.height/2);
+    await page.mouse.move(nodeBox.x+nodeBox.width/2,nodeBox.y+nodeBox.height/2);
+    await page.mouse.down();await page.mouse.move(nodeBox.x+nodeBox.width/2+30,nodeBox.y+nodeBox.height/2+20,{steps:4});await page.mouse.up();
+    await page.waitForTimeout(100);
+    assert.equal(await frame.locator('#node-list-container').evaluate(scroll=>scroll.scrollTop),scrollBefore,'map pointer gestures never move the list');
+    assert.equal(await frame.locator('[data-minimap-node-key][data-focused=true]').getAttribute('data-node-id'),'2');
+    assertMinimapLayout(await minimapLayout(frame),baseline,'pointer gestures do not move nodes');
+    assert.deepEqual(await nativeShape(),original,'source coordinates, sizes, groups and links stay unchanged');
+    const messages=await page.evaluate(()=>window.__minimapMessages);
+    assert.deepEqual(messages.filter(message=>message.action==='error'),[],'no attempted topology mutation reaches the immutable-shape guard');
+    for(const message of messages.filter(message=>message.action==='edit')) {
+      assert.ok(Object.keys(message.value).every(key=>['values','node_modes','widget_values','seed_modes','view'].includes(key)),'only supported phone draft edits cross the bridge');
+      assert.doesNotMatch(JSON.stringify(message.value),/"(?:pos|size|nodes|links|bounding)":/,'coordinate and topology fields never cross the edit bridge');
+    }
+    await page.evaluate(()=>{
+      const latest=window.__minimapMessages.filter(message=>message.action==='edit').at(-1);
+      document.querySelector('#view-advanced .panel-frame').contentWindow.postMessage({type:'mtr-panel',action:'clear',workflowId:latest.workflowId,snapshot:latest.snapshot,epoch:latest.epoch+1},location.origin);
+    });
+    await page.waitForFunction(()=>{
+      const root=document.querySelector('#view-advanced .panel-frame')?.contentDocument?.getElementById('panel-root');
+      return root&&getComputedStyle(root).visibility==='hidden';
+    });
+    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    assert.equal(await frame.locator('[data-minimap-node-key][data-focused=true]').count(),0,'clearing the workflow cannot refill focus from the hidden old list');
+    assert.deepEqual(fixture.posted,[],'no minimap action writes desktop commands');
+    assert.deepEqual(errors,[]);
+    await context.close();
+  } finally {await browser.close();await stopFixture(fixture.server);}
+});
 
 test('connection previews stay fixed, reveal grouped folded targets and interrupt safely', {timeout:120000}, async()=>{
   const {chromium}=resolvePlaywright();
@@ -555,8 +1319,12 @@ test('connection previews stay fixed, reveal grouped folded targets and interrup
     assert.equal(await frame.locator('.phone-relations-layer').getAttribute('data-phone-focus-id'),'2');
     const wireEnds=await frame.locator('.phone-relation-wires path').evaluateAll(paths=>paths.map(path=>Number(path.getAttribute('d').trim().split(/[ ,]+/).at(-1))));
     assert.ok(wireEnds.length>=5,'the focused card still draws its wires: '+JSON.stringify(wireEnds));
-    assert.ok(wireEnds.some(end=>end<0),'a wire follows its port off screen instead of parking on the edge: '+JSON.stringify(wireEnds));
-    assert.ok(wireEnds.every(end=>end!==14),'no wire is clamped to the viewport edge');
+    const scrollEdge=await frame.locator('.phone-relation-wires').evaluate(svg=>{
+      const point=new DOMPoint(0,0).matrixTransform(svg.getScreenCTM());
+      return document.getElementById('node-list-container').getBoundingClientRect().top-point.y;
+    });
+    assert.ok(wireEnds.some(end=>end<scrollEdge),'a wire follows its port above the scrollport instead of parking on the edge: '+JSON.stringify({wireEnds,scrollEdge}));
+    assert.ok(wireEnds.every(end=>Math.abs(end-(scrollEdge+14))>0.5),'no wire is clamped to the scrollport edge');
     await page.screenshot({path:path.join(shotDir,'panel-relations-offscreen-390.png')});
     for (const width of [320,430,1280]) {
       await page.setViewportSize({width,height:844});
@@ -670,7 +1438,10 @@ test('relation focus recovers after search, honors visibility and avoids bookmar
     await frame.locator('#node-header-2 button').last().click();
     await frame.getByRole('button',{name:'添加书签',exact:true}).click();
     const bar=frame.locator('[data-phone-bookmark-bar]');await bar.waitFor();
-    await bar.evaluate(el=>{el.style.top='180px';el.style.left='0px';el.style.right='auto';});
+    await bar.evaluate(el=>{
+      const scroll=document.getElementById('node-list-container').getBoundingClientRect();
+      el.style.top=(scroll.top+Math.min(100,scroll.height/3))+'px';el.style.left='0px';el.style.right='auto';
+    });
     await page.waitForTimeout(150);
     const collision=await bar.evaluate(bar=>{
       const b=bar.getBoundingClientRect();

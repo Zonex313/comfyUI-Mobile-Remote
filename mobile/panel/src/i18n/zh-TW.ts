@@ -8,6 +8,9 @@
  * been checked by a fluent speaker. See the note in src/i18n/index.ts.
  */
 export const zhTW: Record<string, string> = {
+  'Workflow minimap': '工作流程小地圖',
+  'Expand workflow minimap': '展開工作流程小地圖',
+  'Collapse workflow minimap': '收合工作流程小地圖',
   // 頂部欄
   'Apply to the whole image, not just the tapped area': '套用至整張圖片，而不只是點按的區域',
   'Black': '黑色',
