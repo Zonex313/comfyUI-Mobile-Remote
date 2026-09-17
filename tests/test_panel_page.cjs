@@ -130,7 +130,7 @@ function startFixture({ originallyBypassed = false, sourceSeedMode = "fixed", re
   detail.graph.nodes = [{id:'2',inputs:[{name:'seed',value:12345,type:'INT'},{name:'control_after_generate',value:sourceSeedMode,type:'COMBO',frontend:true}]}];
   api['/mobile/api/settings'].values['comfy-mobile-remote.repeatCount'] = String(repeatCount);
   const posted = [], submissions = [];
-  const controls = { failRefresh: false, refreshes: 0, missingSnapshot: false };
+  const controls = { failRefresh: false, refreshes: 0, missingSnapshot: false, throttlePanel: false };
   const server = http.createServer((request, response) => {
     const pathname = new URL(request.url, "http://127.0.0.1").pathname;
     if (request.method === "POST" && pathname === "/mobile/api/desktop/commands") {
@@ -187,6 +187,22 @@ function startFixture({ originallyBypassed = false, sourceSeedMode = "fixed", re
     if (controls.missingSnapshot && pathname === '/mobile/api/workflows/' + WORKFLOW_ID && new URL(request.url,'http://fixture').searchParams.get('snapshot') === 'a'.repeat(64)) {
       response.writeHead(404, {'Content-Type':'application/json'});
       return response.end(JSON.stringify({ok:false,error:'手机工作流副本已丢失，请在设置中重新同步。'}));
+    }
+    // 面板资源可以按需限速：进度条只在下载还没结束时才观察得到。
+    if (controls.throttlePanel && pathname === '/mobile/assets/panel.js') {
+      const body = files.get(pathname)[1];
+      const step = Math.max(1, Math.ceil(body.length / 8));
+      let sent = 0;
+      response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store", "Content-Length": String(body.length) });
+      const pump = () => {
+        if (response.writableEnded) return;
+        if (sent >= body.length) return response.end();
+        const next = Math.min(body.length, sent + step);
+        response.write(body.subarray(sent, next));
+        sent = next;
+        setTimeout(pump, 60);
+      };
+      return pump();
     }
     const file = files.get(pathname);
     if (file) { response.writeHead(200, { "Content-Type": file[0], "Cache-Control": "no-store" }); return response.end(file[1]); }
@@ -767,6 +783,41 @@ test('a side that empties out slides its tabs away exactly once', {timeout:12000
     const leftLeaves=animations.filter(entry=>entry.name==='phone-relation-leave-left');
     assert.equal(leftLeaves.length,3,'each outgoing left tab slides out exactly once: '+JSON.stringify(animations));
     assert.ok(leftLeaves.every(entry=>entry.rel!=='ghost'),'the outgoing tabs are not replayed as ghosts: '+JSON.stringify(animations));
+    assert.equal(fixture.posted.length,0);
+    assert.deepEqual(errors,[]);
+    await context.close();
+  } finally {await browser.close();await stopFixture(fixture.server);}
+});
+
+test('the first visit to the advanced page shows real download progress', {timeout:120000}, async()=>{
+  const {chromium}=resolvePlaywright();
+  const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+  const fixture=await startFixture();
+  fixture.controls.throttlePanel=true;
+  try {
+    const context=await browser.newContext({locale:'zh-CN',viewport:{width:390,height:844}});
+    const page=await context.newPage();const errors=[];
+    page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(fixture.url);
+    await page.click('.nav-button[data-target=advanced]');
+    const overlay=page.locator('#panelLoading');
+    await overlay.waitFor({state:'visible'});
+    // 真实字节数：进度要出现中间值，而不是 0 直接跳 100。
+    let partial=0;
+    for(let attempt=0;attempt<160&&!partial;attempt++){
+      const state=await overlay.evaluate(el=>({
+        measured:el.classList.contains('is-measured'),
+        percent:document.getElementById('panelLoadingPercent').textContent,
+      }));
+      const value=Number(String(state.percent).replace('%',''));
+      if(state.measured&&value>0&&value<100)partial=value;
+      else await page.waitForTimeout(20);
+    }
+    assert.ok(partial>0,'the bar reports intermediate progress: '+partial);
+    assert.equal(await page.locator('#panelLoadingLabel').textContent(),'正在加载高级面板…');
+    const frame=page.frameLocator('#view-advanced .panel-frame');
+    await frame.locator('#node-card-2').waitFor({timeout:60000});
+    await overlay.waitFor({state:'hidden',timeout:10000});
     assert.equal(fixture.posted.length,0);
     assert.deepEqual(errors,[]);
     await context.close();

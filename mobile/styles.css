@@ -1007,6 +1007,87 @@ body:has(#view-advanced.active) .main-content {
   padding-bottom: 0;
 }
 
+/* 「高级」页首次进入要下 1.4MB 的面板资源，进度条盖在 iframe 上，就绪后淡出。 */
+#view-advanced {
+  position: relative;
+}
+
+.panel-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 20px calc(var(--nav-height, 72px) + 24px);
+  transition: opacity 220ms ease-out;
+}
+
+.panel-loading[hidden] {
+  display: none;
+}
+
+.panel-loading.is-done {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.panel-loading-card {
+  width: min(100%, 320px);
+  padding: 18px 18px 16px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: rgba(10, 13, 24, 0.72);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  text-align: center;
+}
+
+.panel-loading-label {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.panel-loading-track {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.panel-loading-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 160ms ease-out;
+}
+
+/* 面板页本身还没回来时拿不到字节数，先走不确定的滑动条，避免看起来卡死。 */
+.panel-loading:not(.is-measured) .panel-loading-fill {
+  width: 35%;
+  animation: panel-loading-sweep 1.1s ease-in-out infinite;
+}
+
+.panel-loading:not(.is-measured) .panel-loading-percent {
+  visibility: hidden;
+}
+
+@keyframes panel-loading-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(320%); }
+}
+
+.panel-loading-percent {
+  margin: 10px 0 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
 .panel-frame {
   display: block;
   width: 100%;

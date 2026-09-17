@@ -11,13 +11,13 @@
   <title>Comfy Remote</title>
   <link rel="manifest" href="/mobile/manifest.webmanifest">
   <link rel="icon" href="/mobile/assets/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202610132">
+  <link rel="stylesheet" href="/mobile/assets/styles.css?v=202610137">
   <script type="module" src="/mobile/assets/i18n.js?v=202610130"></script>
   <script src="/mobile/assets/preset-catalog.js?v=202610130" defer></script>
   <script src="/mobile/assets/preset-engine.js?v=202610130" defer></script>
   <script src="/mobile/assets/settings-sync.js?v=202610130" defer></script>
   <script src="/mobile/assets/progress-sync.js?v=202610130" defer></script>
-  <script src="/mobile/assets/app.js?v=202610136" defer></script>
+  <script src="/mobile/assets/app.js?v=202610137" defer></script>
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -127,6 +127,14 @@
       <section id="view-advanced" class="view" data-view="advanced">
         <!-- 内容由 mobile/app.js 创建的 iframe 承载：/mobile/assets/panel.html
              （参考项目那套工作流面板的真实组件，构建产物 mobile/panel.js）-->
+        <!-- 面板资源 1.4MB，首次进入要下好几秒：下载期间盖住白屏，显示真实字节进度。 -->
+        <div id="panelLoading" class="panel-loading" hidden>
+          <div class="panel-loading-card">
+            <p class="panel-loading-label" id="panelLoadingLabel">正在加载高级面板…</p>
+            <div class="panel-loading-track"><span class="panel-loading-fill" id="panelLoadingFill"></span></div>
+            <p class="panel-loading-percent" id="panelLoadingPercent">0%</p>
+          </div>
+        </div>
       </section>
 
       <section id="view-history" class="view" data-view="history" aria-label="历史" data-i18n-aria-label="历史">

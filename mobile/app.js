@@ -275,10 +275,11 @@
     if (!panelFrame || event.source !== panelFrame.contentWindow || event.origin !== location.origin) return;
     const data = event.data;
     if (!data || data.type !== "mtr-panel") return;
-    if (data.action === "ready") { syncPanelWorkflow(true); return; }
+    if (data.action === "progress") { updatePanelProgress(data.progress); return; }
+    if (data.action === "ready") { finishPanelLoading(); syncPanelWorkflow(true); return; }
     const identity = panelIdentity();
     if (workflowLoading || resettingWorkflow || data.workflowId !== identity.workflowId || data.snapshot !== identity.snapshot || data.epoch !== identity.epoch) return;
-    if (data.action === "error") { toast(data.reason === "unsupported-edit" ? t("此修改涉及子图内部或连接结构，已撤销。请在电脑端修改后重新同步。") : String(data.message || t("高级面板加载失败，请刷新重试。")), "error"); return; }
+    if (data.action === "error") { finishPanelLoading(); toast(data.reason === "unsupported-edit" ? t("此修改涉及子图内部或连接结构，已撤销。请在电脑端修改后重新同步。") : String(data.message || t("高级面板加载失败，请刷新重试。")), "error"); return; }
     if (data.action === "flushed") {
       const resolve = panelFlushes.get(data.requestId);
       if (resolve) { panelFlushes.delete(data.requestId); resolve(); }
@@ -308,15 +309,59 @@
     });
   }
 
+  // 面板资源 1.4MB，首次进入要下好几秒。面板页自己流式取 CSS/JS 并把字节数报过来，
+  // 这里只负责画：拿不到字节数之前走不确定的滑动条，拿到之后是真实百分比。
+  const panelLoadingState = { element: null, fill: null, percent: null, shown: false, hideTimer: 0 };
+
+  function showPanelLoading() {
+    const overlay = $("panelLoading");
+    if (!overlay) return;
+    panelLoadingState.element = overlay;
+    panelLoadingState.fill = $("panelLoadingFill");
+    panelLoadingState.percent = $("panelLoadingPercent");
+    panelLoadingState.shown = true;
+    window.clearTimeout(panelLoadingState.hideTimer);
+    overlay.hidden = false;
+    overlay.classList.remove("is-done", "is-measured");
+    if (panelLoadingState.fill) panelLoadingState.fill.style.width = "0%";
+    if (panelLoadingState.percent) panelLoadingState.percent.textContent = "0%";
+    setText("panelLoadingLabel", t("正在加载高级面板…"));
+  }
+
+  function updatePanelProgress(progress) {
+    const state = panelLoadingState;
+    if (!state.shown || !state.element) return;
+    const total = Number(progress?.total) || 0;
+    if (!total) return;
+    const percent = Math.max(0, Math.min(100, Math.round(((Number(progress?.loaded) || 0) / total) * 100)));
+    state.element.classList.add("is-measured");
+    if (state.fill) state.fill.style.width = percent + "%";
+    if (state.percent) state.percent.textContent = percent + "%";
+    // 下完了还要解析、挂载，这一段没有字节数可报，换个说法免得看起来卡在 100%。
+    if (percent >= 100) setText("panelLoadingLabel", t("正在初始化面板…"));
+  }
+
+  function finishPanelLoading() {
+    const state = panelLoadingState;
+    if (!state.shown || !state.element) return;
+    state.shown = false;
+    state.element.classList.add("is-done");
+    state.hideTimer = window.setTimeout(() => {
+      if (!state.shown && state.element) state.element.hidden = true;
+    }, 240);
+  }
+
   function setupAdvancedPage() {
     const host = $("view-advanced");
     if (!host || panelFrame) return panelFrame;
+    showPanelLoading();
     const frame = document.createElement("iframe");
     frame.className = "panel-frame";
     frame.title = t("高级");
     frame.setAttribute("allow", "clipboard-write");
     frame.src = "/mobile/assets/panel.html?v=" + encodeURIComponent(uiVersion()) + "&locale=" + encodeURIComponent(currentLocaleId());
-    host.replaceChildren(frame);
+    // append 而不是 replaceChildren：进度条也是这一节的子节点，要留着。
+    host.append(frame);
     panelFrame = frame;
     return frame;
   }
