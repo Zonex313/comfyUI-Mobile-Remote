@@ -6,7 +6,13 @@
 
 /* Base styles */
 :root {
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
   line-height: 1.5;
   font-weight: 400;
   color-scheme: dark;
@@ -30,7 +36,9 @@
     100dvh - var(--top-bar-offset, 69px) - var(--bottom-bar-offset, 80px)
   );
   --queue-card-chrome: 10rem;
-  --queue-media-max-height: calc(var(--queue-item-max-height) - var(--queue-card-chrome));
+  --queue-media-max-height: calc(
+    var(--queue-item-max-height) - var(--queue-card-chrome)
+  );
 }
 
 body {
@@ -44,7 +52,9 @@ body {
   min-height: 100vh;
 }
 
-.bg-white { background-color: #151a23; }
+.bg-white {
+  background-color: #151a23;
+}
 
 input,
 select,
@@ -96,7 +106,9 @@ textarea {
   z-index: 200;
   border-radius: 0.5rem;
   background-color: #0b1320;
-  box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5), 0 4px 6px -4px rgba(0,0,0,0.4);
+  box-shadow:
+    0 10px 15px -3px rgba(0, 0, 0, 0.5),
+    0 4px 6px -4px rgba(0, 0, 0, 0.4);
 }
 
 /* An open combo reads as one panel: the control's bottom edge dissolves into
@@ -269,14 +281,30 @@ option {
   background-color: #0b1320;
   color: #e5e7eb;
 }
-.shadow-lg { box-shadow: 0 10px 15px -3px rgba(0,0,0,0.5), 0 4px 6px -4px rgba(0,0,0,0.4); }
-.shadow-md { box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5), 0 2px 4px -2px rgba(0,0,0,0.4); }
-.shadow-sm { box-shadow: 0 1px 2px 0 rgba(0,0,0,0.4); }
-.border-purple-300 { border-color: rgba(91, 42, 134, 0.6); }
+.shadow-lg {
+  box-shadow:
+    0 10px 15px -3px rgba(0, 0, 0, 0.5),
+    0 4px 6px -4px rgba(0, 0, 0, 0.4);
+}
+.shadow-md {
+  box-shadow:
+    0 4px 6px -1px rgba(0, 0, 0, 0.5),
+    0 2px 4px -2px rgba(0, 0, 0, 0.4);
+}
+.shadow-sm {
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
+}
+.border-purple-300 {
+  border-color: rgba(91, 42, 134, 0.6);
+}
 
 /* Error states */
-.bg-red-500 { background-color: #7f1d1d; }
-.text-red-200 { color: #fecaca; }
+.bg-red-500 {
+  background-color: #7f1d1d;
+}
+.text-red-200 {
+  color: #fecaca;
+}
 
 /* Safe area handling for iOS */
 .safe-area-top {
@@ -294,7 +322,9 @@ button {
 }
 
 /* Suppress the mobile browser's default (often orange) tap-highlight on inputs. */
-input, textarea, select {
+input,
+textarea,
+select {
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -315,7 +345,8 @@ input, textarea, select {
    its top edge entirely and was trimmed at the sides. An inset ring reads the
    same in every context and can't be clipped. */
 @keyframes highlight-pulse {
-  0%, 100% {
+  0%,
+  100% {
     box-shadow:
       inset 0 0 0 0 rgba(59, 130, 246, 0),
       inset 0 0 0 0 rgba(59, 130, 246, 0);
@@ -347,7 +378,8 @@ input, textarea, select {
    ::after scheme as .highlight-pulse, so rounded corners are inherited and
    nothing clips. */
 @keyframes widget-input-highlight-pulse {
-  0%, 100% {
+  0%,
+  100% {
     box-shadow:
       inset 0 0 0 0 rgba(34, 211, 238, 0),
       inset 0 0 0 0 rgba(34, 211, 238, 0);
@@ -413,7 +445,8 @@ input, textarea, select {
    A separate class so `scrollToNode`'s global `.highlight-pulse` reset (which
    fires when the node itself arrives, later) leaves this one alone. */
 @keyframes bookmark-highlight-pulse {
-  0%, 100% {
+  0%,
+  100% {
     box-shadow: inset 0 0 0 0 rgba(59, 130, 246, 0);
   }
   50% {
@@ -442,7 +475,8 @@ input, textarea, select {
    clears the surrounding `overflow-hidden` clip boundary instead of being cut
    on the outer edge (which read as off-center). */
 @keyframes connection-highlight-pulse {
-  0%, 100% {
+  0%,
+  100% {
     box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);
   }
   50% {
@@ -474,18 +508,66 @@ input, textarea, select {
 /* Type colors for connection buttons */
 /* Slot colours are declared through --conn-slot-fill so the Use Everywhere
    modifier below can thin any of them without restating the palette. */
-.type-IMAGE { --conn-slot-fill: #a855f7; background-color: var(--conn-slot-fill); color: white; }
-.type-LATENT { --conn-slot-fill: #ec4899; background-color: var(--conn-slot-fill); color: white; }
-.type-MODEL { --conn-slot-fill: #f97316; background-color: var(--conn-slot-fill); color: white; }
-.type-CLIP { --conn-slot-fill: #eab308; background-color: var(--conn-slot-fill); color: black; }
-.type-VAE { --conn-slot-fill: #ef4444; background-color: var(--conn-slot-fill); color: white; }
-.type-CONDITIONING { --conn-slot-fill: #22c55e; background-color: var(--conn-slot-fill); color: white; }
-.type-INT { --conn-slot-fill: #3b82f6; background-color: var(--conn-slot-fill); color: white; }
-.type-FLOAT { --conn-slot-fill: #06b6d4; background-color: var(--conn-slot-fill); color: white; }
-.type-STRING { --conn-slot-fill: #8b5cf6; background-color: var(--conn-slot-fill); color: white; }
-.type-BOOLEAN { --conn-slot-fill: #6366f1; background-color: var(--conn-slot-fill); color: white; }
-.type-MASK { --conn-slot-fill: #64748b; background-color: var(--conn-slot-fill); color: white; }
-.type-default { --conn-slot-fill: #9ca3af; background-color: var(--conn-slot-fill); color: white; }
+.type-IMAGE {
+  --conn-slot-fill: #a855f7;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
+.type-LATENT {
+  --conn-slot-fill: #ec4899;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
+.type-MODEL {
+  --conn-slot-fill: #f97316;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
+.type-CLIP {
+  --conn-slot-fill: #eab308;
+  background-color: var(--conn-slot-fill);
+  color: black;
+}
+.type-VAE {
+  --conn-slot-fill: #ef4444;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
+.type-CONDITIONING {
+  --conn-slot-fill: #22c55e;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
+.type-INT {
+  --conn-slot-fill: #3b82f6;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
+.type-FLOAT {
+  --conn-slot-fill: #06b6d4;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
+.type-STRING {
+  --conn-slot-fill: #8b5cf6;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
+.type-BOOLEAN {
+  --conn-slot-fill: #6366f1;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
+.type-MASK {
+  --conn-slot-fill: #64748b;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
+.type-default {
+  --conn-slot-fill: #9ca3af;
+  background-color: var(--conn-slot-fill);
+  color: white;
+}
 
 /* A Use Everywhere broadcast is a real connection that was never drawn, so it
    keeps its slot colour but sits at partial fill behind a dashed ring — legible
@@ -494,7 +576,7 @@ input, textarea, select {
 .connection-broadcast {
   background-color: color-mix(in srgb, var(--conn-slot-fill) 40%, transparent);
   /* CLIP and friends set a black glyph for their solid fill; at 40% over the
-     dark card that would be unreadable, so the arrow goes light for every type. */
+     dark card that would be unreadable, so any glyph goes light for every type. */
   color: #e2e8f0;
 }
 
@@ -514,8 +596,7 @@ input, textarea, select {
    placed with `inset` rounds its edges independently at fractional layout
    offsets, which showed up as a wider gap on one side than the other.
 
-   The glyph does not shrink with the fill: its size is set by its own font size
-   and icon width, and it stays centred in the content box. */
+   The mark is the fill itself: the button draws no glyph. */
 .connection-promoted {
   border-width: 3px;
   padding: 3px;
@@ -539,7 +620,8 @@ input, textarea, select {
    second, differently-shaped mark around one button. The two-class selector
    replaces the base animation rather than adding to it. */
 @keyframes connection-promoted-pulse {
-  0%, 100% {
+  0%,
+  100% {
     border-color: transparent #ec4899;
   }
   50% {

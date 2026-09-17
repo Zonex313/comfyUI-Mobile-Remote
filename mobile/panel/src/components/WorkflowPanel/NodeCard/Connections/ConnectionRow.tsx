@@ -1,8 +1,12 @@
-import type { PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react';
-import { PromotedWidgetIcon } from '@/components/icons';
+import type {
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+  RefObject,
+} from "react";
+import { PromotedWidgetIcon } from "@/components/icons";
 
 interface ConnectionRowProps {
-  direction: 'input' | 'output';
+  direction: "input" | "output";
   hasConnection: boolean;
   isEmptyRequiredInput?: boolean;
   /**
@@ -42,7 +46,11 @@ interface ConnectionRowProps {
   labelAdornment?: ReactNode;
   shouldWrapResolvedLabel: boolean;
   sizeClass: string;
-  arrowClass: string;
+  /**
+   * Retained so existing callers keep compiling: the button no longer draws a
+   * direction glyph, only its slot colour.
+   */
+  arrowClass?: string;
   typeClass: string;
   buttonRef: RefObject<HTMLButtonElement | null>;
   /** Stable DOM id so navigation can flash this specific connection button. */
@@ -73,7 +81,6 @@ export function ConnectionRow({
   labelAdornment,
   shouldWrapResolvedLabel,
   sizeClass,
-  arrowClass,
   typeClass,
   buttonRef,
   buttonId,
@@ -83,36 +90,40 @@ export function ConnectionRow({
   onPointerDown,
   onPointerMove,
   onPointerUp,
-  onPointerCancel
+  onPointerCancel,
 }: ConnectionRowProps) {
-  const isInput = direction === 'input';
+  const isInput = direction === "input";
   // An add-slot button is always live: the dimming and the dashed "nothing here
   // yet" treatments describe an empty slot, and this is not one.
-  const isVisuallyDisabled = !isAddSlot && isInput && !hasConnection && !isEmptyRequiredInput;
+  const isVisuallyDisabled =
+    !isAddSlot && isInput && !hasConnection && !isEmptyRequiredInput;
   const isInactiveOutput = !isAddSlot && !isInput && !hasConnection;
   if (isAddSlot) return null;
 
   return (
     <>
-      {isInput ? null : !hideLabel && (
-        labelEditor ? (
-          <span className="flex-1 min-w-0">{labelEditor}</span>
-        ) : (
-          <span className="connection-slot-label flex flex-1 min-w-0 items-center gap-1">
-            {labelAdornment}
-            <span
-              className={`text-sm text-slate-300 min-w-0 ${
-                shouldWrapResolvedLabel ? 'whitespace-pre-line break-words leading-tight text-right' : 'truncate'
-              }`}
-            >
-              {resolvedLabel}
+      {isInput
+        ? null
+        : !hideLabel &&
+          (labelEditor ? (
+            <span className="flex-1 min-w-0">{labelEditor}</span>
+          ) : (
+            <span className="connection-slot-label flex flex-1 min-w-0 items-center gap-1">
+              {labelAdornment}
+              <span
+                className={`text-sm text-slate-300 min-w-0 ${
+                  shouldWrapResolvedLabel
+                    ? "whitespace-pre-line break-words leading-tight text-right"
+                    : "truncate"
+                }`}
+              >
+                {resolvedLabel}
+              </span>
+              {isPromoted && (
+                <PromotedWidgetIcon className="w-3.5 h-3.5 shrink-0 text-pink-500" />
+              )}
             </span>
-            {isPromoted && (
-              <PromotedWidgetIcon className="w-3.5 h-3.5 shrink-0 text-pink-500" />
-            )}
-          </span>
-        )
-      )}
+          ))}
 
       {!isInput && connectionCount > 1 && (
         <span className="bg-white/10 text-slate-300 rounded-full px-2 py-0.5 text-xs font-medium flex-shrink-0">
@@ -137,43 +148,50 @@ export function ConnectionRow({
           ${sizeClass} flex-shrink-0
           transition-opacity
           ${typeClass}
-          ${isBroadcastConnection ? 'connection-broadcast' : ''}
-          ${isAddSlot ? 'connection-add-slot cursor-pointer'
-            : isInput && isEmptyRequiredInput ? 'opacity-100 cursor-pointer border-red-500'
-            // `.connection-promoted` (index.css) keeps the button's footprint
-            // and shrinks its fill inside the outline, which is the only way the
-            // outline shows on a slot whose own colour is already this pink.
-            : isBoundaryConnection ? 'connection-promoted'
-            : isBroadcastConnection ? 'border-dashed border-violet-400/80'
-            : 'border-transparent'}
-          ${!isInput && isInactiveOutput ? 'border-dashed border-slate-500/70' : ''}
-          ${isVisuallyDisabled ? 'opacity-40 cursor-pointer active:scale-95' : ''}
-          ${!isVisuallyDisabled && isInactiveOutput ? 'opacity-50 cursor-pointer active:scale-95' : ''}
-          ${!isVisuallyDisabled && !isInactiveOutput ? 'opacity-100 cursor-pointer active:scale-95' : ''}
+          ${isBroadcastConnection ? "connection-broadcast" : ""}
+          ${
+            isAddSlot
+              ? "connection-add-slot cursor-pointer"
+              : isInput && isEmptyRequiredInput
+                ? "opacity-100 cursor-pointer border-red-500"
+                : // `.connection-promoted` (index.css) keeps the button's footprint
+                  // and shrinks its fill inside the outline, which is the only way the
+                  // outline shows on a slot whose own colour is already this pink.
+                  isBoundaryConnection
+                  ? "connection-promoted"
+                  : isBroadcastConnection
+                    ? "border-dashed border-violet-400/80"
+                    : "border-transparent"
+          }
+          ${!isInput && isInactiveOutput ? "border-dashed border-slate-500/70" : ""}
+          ${isVisuallyDisabled ? "opacity-40 cursor-pointer active:scale-95" : ""}
+          ${!isVisuallyDisabled && isInactiveOutput ? "opacity-50 cursor-pointer active:scale-95" : ""}
+          ${!isVisuallyDisabled && !isInactiveOutput ? "opacity-100 cursor-pointer active:scale-95" : ""}
         `}
       >
-        {!hasConnection ? (
-          <span aria-hidden="true">·</span>
-        ) : (
-          <span className={arrowClass}>{isInput ? '←' : '→'}</span>
-        )}
+        {!hasConnection && <span aria-hidden="true">·</span>}
       </button>
 
-      {!isInput && hideLabel ? null : isInput && !hideLabel && (
-        <span className="connection-slot-label flex flex-1 min-w-0 items-center gap-1">
-          <span
-            className={`text-sm min-w-0 ${
-              shouldWrapResolvedLabel ? 'whitespace-pre-line break-words leading-tight' : 'truncate'
-            } ${isEmptyRequiredInput ? 'text-red-400 font-medium' : 'text-slate-300'}`}
-          >
-            {resolvedLabel}
-          </span>
-          {isPromoted && (
-            <PromotedWidgetIcon className="w-3.5 h-3.5 shrink-0 text-pink-500" />
+      {!isInput && hideLabel
+        ? null
+        : isInput &&
+          !hideLabel && (
+            <span className="connection-slot-label flex flex-1 min-w-0 items-center gap-1">
+              <span
+                className={`text-sm min-w-0 ${
+                  shouldWrapResolvedLabel
+                    ? "whitespace-pre-line break-words leading-tight"
+                    : "truncate"
+                } ${isEmptyRequiredInput ? "text-red-400 font-medium" : "text-slate-300"}`}
+              >
+                {resolvedLabel}
+              </span>
+              {isPromoted && (
+                <PromotedWidgetIcon className="w-3.5 h-3.5 shrink-0 text-pink-500" />
+              )}
+              {labelAdornment}
+            </span>
           )}
-          {labelAdornment}
-        </span>
-      )}
     </>
   );
 }

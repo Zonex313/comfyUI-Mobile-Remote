@@ -1,39 +1,39 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { getWidgetIndexForInput, useWorkflowStore } from '@/hooks/useWorkflow';
-import { useConnectionSectionFoldsStore } from '@/hooks/useConnectionSectionFolds';
-import { useLongPress } from '@/hooks/useLongPress';
-import { useDismissOnOutsideClick } from '@/hooks/useDismissOnOutsideClick';
+import { useCallback, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { getWidgetIndexForInput, useWorkflowStore } from "@/hooks/useWorkflow";
+import { useConnectionSectionFoldsStore } from "@/hooks/useConnectionSectionFolds";
+import { useLongPress } from "@/hooks/useLongPress";
+import { useDismissOnOutsideClick } from "@/hooks/useDismissOnOutsideClick";
 import {
   SUBGRAPH_INPUT_NODE_ID,
   SUBGRAPH_OUTPUT_NODE_ID,
-} from '@/utils/canonicalWorkflowOps';
-import { connectionButtonDomId } from '@/utils/connectionFlash';
-import { subgraphBoundaryFoldKey } from '@/utils/subgraphBoundaryFold';
-import { widgetRowDomId } from '@/utils/workflowJumpTargets';
+} from "@/utils/canonicalWorkflowOps";
+import { connectionButtonDomId } from "@/utils/connectionFlash";
+import { subgraphBoundaryFoldKey } from "@/utils/subgraphBoundaryFold";
+import { widgetRowDomId } from "@/utils/workflowJumpTargets";
 import {
   findWorkflowNodeInScope,
   resolveWorkflowNodeDisplayName,
-} from '@/utils/subgraphPlaceholderLabels';
+} from "@/utils/subgraphPlaceholderLabels";
 import {
   collectDivergentInstanceLabels,
   resolveBoundarySlotLabel,
-} from '@/utils/boundarySlotLabels';
+} from "@/utils/boundarySlotLabels";
 import {
   collectOuterConnections,
   type OuterConnection,
-} from '@/utils/subgraphInstanceNavigation';
-import { BoundaryConnectionModal } from '@/components/modals/BoundaryConnectionModal';
-import { AddBoundarySlotModal } from '@/components/modals/AddBoundarySlotModal';
-import { EditBoundarySlotLabelModal } from '@/components/modals/EditBoundarySlotLabelModal';
-import { ContextMenuBuilder } from '@/components/menus/ContextMenuBuilder';
-import { ArrowDownIcon, EditIcon, NoEntryIcon } from '@/components/icons';
-import { RowActionsMenu } from './NodeCard/RowActionsMenu';
-import { Collapsible } from '@/components/Collapsible';
-import { ConnectionRow } from './NodeCard/Connections/ConnectionRow';
-import { ConnectionsSectionHeader } from './NodeCard/Connections/ConnectionsSectionHeader';
-import { getTypeClass } from './NodeCard/Connections/slotTypeClass';
-import { useI18n } from '@/i18n';
+} from "@/utils/subgraphInstanceNavigation";
+import { BoundaryConnectionModal } from "@/components/modals/BoundaryConnectionModal";
+import { AddBoundarySlotModal } from "@/components/modals/AddBoundarySlotModal";
+import { EditBoundarySlotLabelModal } from "@/components/modals/EditBoundarySlotLabelModal";
+import { ContextMenuBuilder } from "@/components/menus/ContextMenuBuilder";
+import { ArrowDownIcon, EditIcon, NoEntryIcon } from "@/components/icons";
+import { RowActionsMenu } from "./NodeCard/RowActionsMenu";
+import { Collapsible } from "@/components/Collapsible";
+import { ConnectionRow } from "./NodeCard/Connections/ConnectionRow";
+import { ConnectionsSectionHeader } from "./NodeCard/Connections/ConnectionsSectionHeader";
+import { getTypeClass } from "./NodeCard/Connections/slotTypeClass";
+import { useI18n } from "@/i18n";
 
 interface SubgraphConnectionsSectionProps {
   subgraphId: string;
@@ -56,7 +56,7 @@ interface BoundaryEndpoint {
 }
 
 interface BoundarySlotRow {
-  direction: 'input' | 'output';
+  direction: "input" | "output";
   slotIndex: number;
   /** As this instance calls it: instance override, else the type's label. */
   name: string;
@@ -90,13 +90,17 @@ function sectionHeading(label: string) {
  * A subgraph input may feed many inner inputs — `linkIds` is an array in the
  * format, so the fan-out is native and needs no relay node in between.
  */
-export function SubgraphConnectionsSection({ subgraphId }: SubgraphConnectionsSectionProps) {
+export function SubgraphConnectionsSection({
+  subgraphId,
+}: SubgraphConnectionsSectionProps) {
   const workflow = useWorkflowStore((s) => s.workflow);
   const nodeTypes = useWorkflowStore((s) => s.nodeTypes);
   const scopeStack = useWorkflowStore((s) => s.scopeStack);
   const scrollToNode = useWorkflowStore((s) => s.scrollToNode);
   const jumpToWorkflowItem = useWorkflowStore((s) => s.jumpToWorkflowItem);
-  const expandConnectionsSection = useConnectionSectionFoldsStore((s) => s.expand);
+  const expandConnectionsSection = useConnectionSectionFoldsStore(
+    (s) => s.expand,
+  );
   const setScopeTrail = useWorkflowStore((s) => s.setScopeTrail);
   const moveBoundarySlot = useWorkflowStore((s) => s.moveBoundarySlot);
   const removeBoundarySlot = useWorkflowStore((s) => s.removeBoundarySlot);
@@ -104,14 +108,20 @@ export function SubgraphConnectionsSection({ subgraphId }: SubgraphConnectionsSe
   const expanded = useConnectionSectionFoldsStore(
     (s) => !s.collapsedItemKeys.includes(foldKey),
   );
-  const toggleExpanded = useConnectionSectionFoldsStore((s) => s.toggleCollapsed);
+  const toggleExpanded = useConnectionSectionFoldsStore(
+    (s) => s.toggleCollapsed,
+  );
 
   const [editRow, setEditRow] = useState<BoundarySlotRow | null>(null);
-  const [addDirection, setAddDirection] = useState<'input' | 'output' | null>(null);
+  const [addDirection, setAddDirection] = useState<"input" | "output" | null>(
+    null,
+  );
   const [labelRow, setLabelRow] = useState<BoundarySlotRow | null>(null);
 
   const def = useMemo(
-    () => workflow?.definitions?.subgraphs?.find((sg) => sg.id === subgraphId) ?? null,
+    () =>
+      workflow?.definitions?.subgraphs?.find((sg) => sg.id === subgraphId) ??
+      null,
     [workflow, subgraphId],
   );
 
@@ -119,55 +129,86 @@ export function SubgraphConnectionsSection({ subgraphId }: SubgraphConnectionsSe
   // against it, so the section shows what THIS instance calls each slot.
   const currentInstance = useMemo(() => {
     const top = scopeStack[scopeStack.length - 1];
-    if (top?.type !== 'subgraph') return null;
+    if (top?.type !== "subgraph") return null;
     const parentFrame = scopeStack[scopeStack.length - 2];
-    const parentSubgraphId = parentFrame?.type === 'subgraph' ? parentFrame.id : null;
-    return findWorkflowNodeInScope(workflow, top.placeholderNodeId, parentSubgraphId);
+    const parentSubgraphId =
+      parentFrame?.type === "subgraph" ? parentFrame.id : null;
+    return findWorkflowNodeInScope(
+      workflow,
+      top.placeholderNodeId,
+      parentSubgraphId,
+    );
   }, [scopeStack, workflow]);
 
   const rows = useMemo<BoundarySlotRow[]>(() => {
     if (!workflow || !def) return [];
     const innerById = new Map((def.nodes ?? []).map((n) => [n.id, n]));
 
-    const buildRows = (direction: 'input' | 'output'): BoundarySlotRow[] => {
-      const slots = (direction === 'input' ? def.inputs : def.outputs) ?? [];
+    const buildRows = (direction: "input" | "output"): BoundarySlotRow[] => {
+      const slots = (direction === "input" ? def.inputs : def.outputs) ?? [];
       return slots.map((slot, slotIndex) => {
         const endpoints: BoundaryEndpoint[] = [];
         for (const link of def.links ?? []) {
           const matches =
-            direction === 'input'
-              ? link.origin_id === SUBGRAPH_INPUT_NODE_ID && link.origin_slot === slotIndex
-              : link.target_id === SUBGRAPH_OUTPUT_NODE_ID && link.target_slot === slotIndex;
+            direction === "input"
+              ? link.origin_id === SUBGRAPH_INPUT_NODE_ID &&
+                link.origin_slot === slotIndex
+              : link.target_id === SUBGRAPH_OUTPUT_NODE_ID &&
+                link.target_slot === slotIndex;
           if (!matches) continue;
-          const innerId = direction === 'input' ? link.target_id : link.origin_id;
-          const innerSlot = direction === 'input' ? link.target_slot : link.origin_slot;
+          const innerId =
+            direction === "input" ? link.target_id : link.origin_id;
+          const innerSlot =
+            direction === "input" ? link.target_slot : link.origin_slot;
           const inner = innerById.get(innerId);
           if (!inner?.itemKey) continue;
           const slotEntry =
-            direction === 'input' ? inner.inputs?.[innerSlot] : inner.outputs?.[innerSlot];
+            direction === "input"
+              ? inner.inputs?.[innerSlot]
+              : inner.outputs?.[innerSlot];
           const widgetName =
-            direction === 'input' ? (slotEntry as { widget?: { name?: string } })?.widget?.name : undefined;
+            direction === "input"
+              ? (slotEntry as { widget?: { name?: string } })?.widget?.name
+              : undefined;
           endpoints.push({
             nodeId: inner.id,
             nodeKey: inner.itemKey,
             slotIndex: innerSlot,
-            nodeName: resolveWorkflowNodeDisplayName(workflow, inner, nodeTypes),
+            nodeName: resolveWorkflowNodeDisplayName(
+              workflow,
+              inner,
+              nodeTypes,
+            ),
             slotLabel:
-              slotEntry?.label || slotEntry?.localized_name || slotEntry?.name || `#${innerSlot}`,
-            widgetIndex: widgetName && nodeTypes
-              ? getWidgetIndexForInput(workflow, nodeTypes, inner, widgetName)
-              : null,
+              slotEntry?.label ||
+              slotEntry?.localized_name ||
+              slotEntry?.name ||
+              `#${innerSlot}`,
+            widgetIndex:
+              widgetName && nodeTypes
+                ? getWidgetIndexForInput(workflow, nodeTypes, inner, widgetName)
+                : null,
           });
         }
         return {
           direction,
           slotIndex,
-          name: resolveBoundarySlotLabel(def, currentInstance, direction, slotIndex),
-          type: String(slot.type ?? '*'),
+          name: resolveBoundarySlotLabel(
+            def,
+            currentInstance,
+            direction,
+            slotIndex,
+          ),
+          type: String(slot.type ?? "*"),
           endpoints,
           divergesFromOtherInstances:
-            collectDivergentInstanceLabels(workflow, def, currentInstance, direction, slotIndex)
-              .length > 0,
+            collectDivergentInstanceLabels(
+              workflow,
+              def,
+              currentInstance,
+              direction,
+              slotIndex,
+            ).length > 0,
           outer: collectOuterConnections(
             workflow,
             def.id,
@@ -180,7 +221,7 @@ export function SubgraphConnectionsSection({ subgraphId }: SubgraphConnectionsSe
       });
     };
 
-    return [...buildRows('input'), ...buildRows('output')];
+    return [...buildRows("input"), ...buildRows("output")];
   }, [workflow, def, nodeTypes, currentInstance]);
 
   // Jump to the inner node a boundary slot is wired to. A widget-backed slot
@@ -192,7 +233,7 @@ export function SubgraphConnectionsSection({ subgraphId }: SubgraphConnectionsSe
     (row: BoundarySlotRow, endpoint: BoundaryEndpoint) => {
       if (endpoint.widgetIndex !== null) {
         jumpToWorkflowItem({
-          kind: 'widget',
+          kind: "widget",
           itemKey: endpoint.nodeKey,
           nodeId: endpoint.nodeId,
           domId: widgetRowDomId(endpoint.nodeId, endpoint.widgetIndex),
@@ -203,7 +244,11 @@ export function SubgraphConnectionsSection({ subgraphId }: SubgraphConnectionsSe
       scrollToNode(
         endpoint.nodeKey,
         undefined,
-        connectionButtonDomId(endpoint.nodeId, row.direction, endpoint.slotIndex),
+        connectionButtonDomId(
+          endpoint.nodeId,
+          row.direction,
+          endpoint.slotIndex,
+        ),
       );
     },
     [expandConnectionsSection, jumpToWorkflowItem, scrollToNode],
@@ -224,11 +269,14 @@ export function SubgraphConnectionsSection({ subgraphId }: SubgraphConnectionsSe
 
   if (!def) return null;
 
+  const inputRows = rows.filter((row) => row.direction === "input");
+  const outputRows = rows.filter((row) => row.direction === "output");
 
-  const inputRows = rows.filter((row) => row.direction === 'input');
-  const outputRows = rows.filter((row) => row.direction === 'output');
-
-  const renderRow = (row: BoundarySlotRow, index: number, siblings: BoundarySlotRow[]) => (
+  const renderRow = (
+    row: BoundarySlotRow,
+    index: number,
+    siblings: BoundarySlotRow[],
+  ) => (
     <BoundaryConnectionButton
       key={`${row.direction}-${row.slotIndex}`}
       row={row}
@@ -237,10 +285,16 @@ export function SubgraphConnectionsSection({ subgraphId }: SubgraphConnectionsSe
       onEditLabel={() => setLabelRow(row)}
       onGoToOuter={goToOuter}
       moveUpTo={index > 0 ? siblings[index - 1].slotIndex : null}
-      moveDownTo={index < siblings.length - 1 ? siblings[index + 1].slotIndex : null}
+      moveDownTo={
+        index < siblings.length - 1 ? siblings[index + 1].slotIndex : null
+      }
       subgraphId={subgraphId}
-      onMove={(toSlot) => moveBoundarySlot(row.direction, row.slotIndex, toSlot, { subgraphId })}
-      onRemove={() => removeBoundarySlot(row.direction, row.slotIndex, { subgraphId })}
+      onMove={(toSlot) =>
+        moveBoundarySlot(row.direction, row.slotIndex, toSlot, { subgraphId })
+      }
+      onRemove={() =>
+        removeBoundarySlot(row.direction, row.slotIndex, { subgraphId })
+      }
     />
   );
 
@@ -267,13 +321,19 @@ export function SubgraphConnectionsSection({ subgraphId }: SubgraphConnectionsSe
               {inputRows.map(renderRow)}
               {/* Trails the slots in its own column rather than sitting in a
                   row of its own: adding an input belongs with the inputs. */}
-              <AddSlotButton direction="input" onClick={() => setAddDirection('input')} />
+              <AddSlotButton
+                direction="input"
+                onClick={() => setAddDirection("input")}
+              />
             </div>
           </div>
           <div className="flex flex-col items-end">
             <div className="flex flex-col gap-1.5 w-full items-end">
               {outputRows.map(renderRow)}
-              <AddSlotButton direction="output" onClick={() => setAddDirection('output')} />
+              <AddSlotButton
+                direction="output"
+                onClick={() => setAddDirection("output")}
+              />
             </div>
           </div>
         </div>
@@ -320,12 +380,13 @@ function AddSlotButton({
   direction,
   onClick,
 }: {
-  direction: 'input' | 'output';
+  direction: "input" | "output";
   onClick: () => void;
 }) {
   const { t } = useI18n();
   const buttonRef = useRef<HTMLButtonElement>(null);
-  const label = direction === 'input' ? t('Add input slot') : t('Add output slot');
+  const label =
+    direction === "input" ? t("Add input slot") : t("Add output slot");
 
   return (
     <div className="flex items-center gap-2">
@@ -336,7 +397,7 @@ function AddSlotButton({
         hideLabel={false}
         resolvedLabel={label}
         shouldWrapResolvedLabel={false}
-        sizeClass="w-10 h-10"
+        sizeClass="w-5 h-5"
         arrowClass="text-base"
         typeClass=""
         buttonRef={buttonRef}
@@ -383,8 +444,13 @@ function BoundaryConnectionButton({
   const { t } = useI18n();
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
-  const { handlers, consumeLongPress } = useLongPress({ onLongPress: onEditConnections });
+  const [menuPosition, setMenuPosition] = useState<{
+    top: number;
+    left: number;
+  } | null>(null);
+  const { handlers, consumeLongPress } = useLongPress({
+    onLongPress: onEditConnections,
+  });
 
   useDismissOnOutsideClick({
     open: menuPosition !== null,
@@ -416,7 +482,9 @@ function BoundaryConnectionButton({
     }
     const rect = buttonRef.current?.getBoundingClientRect();
     setMenuPosition(
-      menuPosition ? null : { top: (rect?.bottom ?? 0) + 4, left: rect?.left ?? 0 },
+      menuPosition
+        ? null
+        : { top: (rect?.bottom ?? 0) + 4, left: rect?.left ?? 0 },
     );
   };
 
@@ -425,7 +493,13 @@ function BoundaryConnectionButton({
 
   const menuItems = [
     ...(row.endpoints.length > 0
-      ? [{ type: 'custom' as const, key: 'inside-heading', render: sectionHeading(t('In this subgraph')) }]
+      ? [
+          {
+            type: "custom" as const,
+            key: "inside-heading",
+            render: sectionHeading(t("In this subgraph")),
+          },
+        ]
       : []),
     ...row.endpoints.map((endpoint) => ({
       key: `in-${endpoint.nodeId}:${endpoint.slotIndex}`,
@@ -436,7 +510,13 @@ function BoundaryConnectionButton({
       },
     })),
     ...(currentOuter.length > 0
-      ? [{ type: 'custom' as const, key: 'this-heading', render: sectionHeading(t('Connected to this instance')) }]
+      ? [
+          {
+            type: "custom" as const,
+            key: "this-heading",
+            render: sectionHeading(t("Connected to this instance")),
+          },
+        ]
       : []),
     ...currentOuter.map((outer, index) => ({
       key: `this-${outer.outerNodeId}-${index}`,
@@ -447,7 +527,13 @@ function BoundaryConnectionButton({
       },
     })),
     ...(otherOuter.length > 0
-      ? [{ type: 'custom' as const, key: 'other-heading', render: sectionHeading(t('Connected to other instances')) }]
+      ? [
+          {
+            type: "custom" as const,
+            key: "other-heading",
+            render: sectionHeading(t("Connected to other instances")),
+          },
+        ]
       : []),
     ...otherOuter.map((outer, index) => ({
       key: `other-${outer.instanceNodeId}-${outer.outerNodeId}-${index}`,
@@ -465,15 +551,15 @@ function BoundaryConnectionButton({
   // for a tap that opens a menu tells a screen-reader user the wrong thing.
   const ariaLabel =
     row.endpoints.length === 0
-      ? row.direction === 'input'
-        ? t('Connect subgraph input {label}', { label: row.name })
-        : t('Connect subgraph output {label}', { label: row.name })
+      ? row.direction === "input"
+        ? t("Connect subgraph input {label}", { label: row.name })
+        : t("Connect subgraph output {label}", { label: row.name })
       : destinationCount === 1
-        ? t('Go to {target} from {label}', {
+        ? t("Go to {target} from {label}", {
             target: row.endpoints[0].nodeName,
             label: row.name,
           })
-        : t('Show {count} connections from {label}', {
+        : t("Show {count} connections from {label}", {
             count: destinationCount,
             label: row.name,
           });
@@ -488,34 +574,38 @@ function BoundaryConnectionButton({
       // "image".
       menuKey={`slot:${subgraphId}:${row.direction}:${row.name}`}
       rowName={row.name}
-      typeLabel={String(row.type ?? '*').toUpperCase()}
+      typeLabel={String(row.type ?? "*").toUpperCase()}
       // The fuchsia tint used to be explained by the pencil's tooltip. Icons
       // and colour alone say nothing to a screen reader, so the menu says it.
       note={
         row.divergesFromOtherInstances
-          ? t('Other instances call this slot something else')
+          ? t("Other instances call this slot something else")
           : undefined
       }
       compact
-      className={row.divergesFromOtherInstances ? 'text-fuchsia-400 hover:text-fuchsia-300' : ''}
+      className={
+        row.divergesFromOtherInstances
+          ? "text-fuchsia-400 hover:text-fuchsia-300"
+          : ""
+      }
       sections={{
         primary: [
           {
-            key: 'rename',
-            label: t('Rename'),
+            key: "rename",
+            label: t("Rename"),
             icon: <EditIcon className="w-4 h-4" />,
             onSelect: onEditLabel,
           },
           {
-            key: 'move-up',
-            label: t('Move up'),
+            key: "move-up",
+            label: t("Move up"),
             icon: <ArrowDownIcon className="w-4 h-4 rotate-180" />,
             hidden: moveUpTo === null,
             onSelect: () => moveUpTo !== null && onMove(moveUpTo),
           },
           {
-            key: 'move-down',
-            label: t('Move down'),
+            key: "move-down",
+            label: t("Move down"),
             icon: <ArrowDownIcon className="w-4 h-4" />,
             hidden: moveDownTo === null,
             onSelect: () => moveDownTo !== null && onMove(moveDownTo),
@@ -523,10 +613,13 @@ function BoundaryConnectionButton({
         ],
         secondary: [
           {
-            key: 'remove',
-            label: row.direction === 'input' ? t('Remove input') : t('Remove output'),
+            key: "remove",
+            label:
+              row.direction === "input"
+                ? t("Remove input")
+                : t("Remove output"),
             icon: <NoEntryIcon className="w-4 h-4" />,
-            color: 'danger',
+            color: "danger",
             onSelect: onRemove,
           },
         ],
@@ -544,13 +637,17 @@ function BoundaryConnectionButton({
         isBoundaryConnection
         hideLabel={false}
         resolvedLabel={row.name}
-        shouldWrapResolvedLabel={row.name.includes('/') || row.name.includes('\n')}
-        sizeClass="w-10 h-10"
+        shouldWrapResolvedLabel={
+          row.name.includes("/") || row.name.includes("\n")
+        }
+        sizeClass="w-5 h-5"
         arrowClass="text-base"
         typeClass={getTypeClass(row.type)}
         buttonRef={buttonRef}
         buttonId={connectionButtonDomId(
-          row.direction === 'input' ? SUBGRAPH_INPUT_NODE_ID : SUBGRAPH_OUTPUT_NODE_ID,
+          row.direction === "input"
+            ? SUBGRAPH_INPUT_NODE_ID
+            : SUBGRAPH_OUTPUT_NODE_ID,
           row.direction,
           row.slotIndex,
         )}
@@ -569,7 +666,7 @@ function BoundaryConnectionButton({
             style={{
               top: menuPosition.top,
               left: menuPosition.left,
-              maxWidth: 'calc(100vw - 16px)',
+              maxWidth: "calc(100vw - 16px)",
             }}
           >
             <ContextMenuBuilder items={menuItems} />

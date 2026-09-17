@@ -284,7 +284,10 @@ export function PhoneConnectionPreview({
               const rawY = real
                 ? portRect.top + portRect.height / 2 - origin.top
                 : cardRect.top - origin.top + 54 + connection.slotIndex * 20;
-              const y = Math.max(14, Math.min(height - 14, rawY));
+              // Follow the port past the viewport edge. Clamping to the edge left
+              // the line parked on screen after its own connection point had
+              // scrolled away, which reads as a detached wire.
+              const y = rawY;
               const x = real
                 ? portRect.left + portRect.width / 2 - origin.left
                 : (side === "input"
@@ -334,7 +337,7 @@ export function PhoneConnectionPreview({
                 color:
                   color && color !== "rgba(0, 0, 0, 0)" ? color : "#94a3b8",
                 label: connection.label,
-                offscreen: !real || rawY !== y,
+                offscreen: !real,
                 wireless: connection.wireless,
               });
             });

@@ -502,6 +502,10 @@ test('connection previews stay fixed, reveal grouped folded targets and interrup
     const input=frame.locator('[data-phone-side=input]');
     assert.deepEqual(await input.evaluateAll(nodes=>nodes.map(n=>n.dataset.phoneRelation)),['1','3','4']);
     assert.equal(await frame.locator('[data-phone-more]').count(),0,'no neighbour is folded behind a counter');
+    const markers=await frame.locator('#node-card-2 button[id^="connection-button-"]').evaluateAll(nodes=>nodes.map(node=>({size:Math.round(node.getBoundingClientRect().width),text:node.textContent.trim()})));
+    assert.ok(markers.length>=5,'the fixture exposes the connected slots');
+    assert.ok(markers.every(marker=>marker.size<=20),'connection buttons are quartered: '+JSON.stringify(markers));
+    assert.ok(markers.every(marker=>!/[←→]/.test(marker.text)),'connection buttons no longer draw a direction arrow: '+JSON.stringify(markers));
     assert.deepEqual(await frame.locator('[data-phone-side=output]').evaluateAll(nodes=>nodes.map(n=>n.dataset.phoneRelation)),['5','6','7','8','9','10'],'every downstream neighbour is listed on the rail');
     await frame.locator('.phone-relation-wires path').nth(4).waitFor({state:'attached'});
     await page.waitForTimeout(180);
@@ -513,6 +517,21 @@ test('connection previews stay fixed, reveal grouped folded targets and interrup
     assert.equal(await frame.locator('.phone-relations-layer').getAttribute('data-phone-focus-id'),'2');
     await fs.promises.mkdir(shotDir,{recursive:true});
     await page.screenshot({path:path.join(shotDir,'panel-relations-390.png')});
+    // A port that scrolls away takes its wire with it: leaving the screen reads
+    // as a continuing connection, parking against the edge reads as detached.
+    // Push the first input port a known distance above the scrollport so the
+    // focused card still fills the view and the geometry is deterministic.
+    await frame.locator('#node-list-container').evaluate(scroll=>{
+      const port=document.getElementById('connection-button-2-input-0');
+      scroll.scrollTop+=(port.getBoundingClientRect().top-scroll.getBoundingClientRect().top)+120;
+    });
+    await page.waitForTimeout(240);
+    assert.equal(await frame.locator('.phone-relations-layer').getAttribute('data-phone-focus-id'),'2');
+    const wireEnds=await frame.locator('.phone-relation-wires path').evaluateAll(paths=>paths.map(path=>Number(path.getAttribute('d').trim().split(/[ ,]+/).at(-1))));
+    assert.ok(wireEnds.length>=5,'the focused card still draws its wires: '+JSON.stringify(wireEnds));
+    assert.ok(wireEnds.some(end=>end<0),'a wire follows its port off screen instead of parking on the edge: '+JSON.stringify(wireEnds));
+    assert.ok(wireEnds.every(end=>end!==14),'no wire is clamped to the viewport edge');
+    await page.screenshot({path:path.join(shotDir,'panel-relations-offscreen-390.png')});
     for (const width of [320,430,1280]) {
       await page.setViewportSize({width,height:844});
       await focusPanelNode(frame,2,180);
