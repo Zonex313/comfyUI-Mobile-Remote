@@ -180,6 +180,8 @@
   "已完成": "Completed",
   "已导入": "Imported",
   "已导入 {length} 个 · 常驻 {pinnedCount} 个": "{length} imported · {pinnedCount} pinned",
+  "这个工作流的连线记录不完整：节点 {node} 的输入「{input}」指向一条已经不存在的连线。请在电脑端打开它，把那条线重新连一次再保存，然后重新导入。": "This workflow's link records are incomplete: input \"{input}\" on node {node} points at a link that no longer exists. Open it on the desktop, reconnect that one wire, save, and import again.",
+  "已导入「{name}」（{count} 条失效连线已忽略）": "Imported \"{name}\" ({count} dead link records ignored)",
   "已导入「{name}」，手机端电脑不开也能用了": "Imported \"{name}\"; it now works on your phone even with the desktop closed",
   "已导入的工作流": "Imported workflows",
   "已开启": "On",

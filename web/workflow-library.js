@@ -209,9 +209,76 @@
     return summary;
   }
 
+  function findNodeById(nodes, id) {
+    if (!Array.isArray(nodes)) return null;
+    for (var i = 0; i < nodes.length; i += 1) {
+      if (isObject(nodes[i]) && nodes[i].id === id) return nodes[i];
+    }
+    return null;
+  }
+
+  /**
+   * 按连线表修正节点上过期的连线号，返回补不回来（那条线是真的没了）的输入条数。
+   *
+   * 连线表才是权威。有的工作流文件里节点自己记的号已经过期（改图留下的残号）：
+   * 连线表里是 18，节点输入上还写着 14。画布转换提示词时拿节点上的号去查表，
+   * 查不到就抛 “No link found in parent graph …”，一个残号就能让整份工作流导不进来。
+   */
+  function reconcileLinks(graphData) {
+    if (!isObject(graphData)) return 0;
+    var links = Array.isArray(graphData.links) ? graphData.links : [];
+    var nodes = Array.isArray(graphData.nodes) ? graphData.nodes : [];
+    var known = Object.create(null);
+    var i;
+    for (i = 0; i < links.length; i += 1) {
+      if (Array.isArray(links[i]) && typeof links[i][0] === "number") known[links[i][0]] = true;
+    }
+    // 先按连线表把输出侧漏记的补上，再统一清掉残号。
+    for (i = 0; i < links.length; i += 1) {
+      var link = links[i];
+      if (!Array.isArray(link)) continue;
+      var source = findNodeById(nodes, link[1]);
+      var outputs = source && Array.isArray(source.outputs) ? source.outputs : [];
+      var output = outputs[link[2]];
+      if (output && Array.isArray(output.links) && output.links.indexOf(link[0]) === -1) {
+        output.links.push(link[0]);
+      }
+    }
+    var dropped = 0;
+    for (i = 0; i < nodes.length; i += 1) {
+      var node = nodes[i];
+      if (!isObject(node)) continue;
+      var own = Array.isArray(node.outputs) ? node.outputs : [];
+      for (var o = 0; o < own.length; o += 1) {
+        if (own[o] && Array.isArray(own[o].links)) {
+          own[o].links = own[o].links.filter(function (id) {
+            return known[id] === true;
+          });
+        }
+      }
+      var inputs = Array.isArray(node.inputs) ? node.inputs : [];
+      for (var s = 0; s < inputs.length; s += 1) {
+        var input = inputs[s];
+        if (!isObject(input) || input.link == null || typeof input.link === "object") continue;
+        if (known[input.link] === true) continue;
+        var replacement = null;
+        for (var l = 0; l < links.length; l += 1) {
+          if (Array.isArray(links[l]) && links[l][3] === node.id && links[l][4] === s) {
+            replacement = links[l][0];
+            break;
+          }
+        }
+        input.link = replacement;
+        if (replacement == null) dropped += 1;
+      }
+    }
+    return dropped;
+  }
+
   return {
     MAX_ENTRIES: MAX_ENTRIES,
     normalizeEntry: normalizeEntry,
+    reconcileLinks: reconcileLinks,
     normalizeEntries: normalizeEntries,
     sourceOf: sourceOf,
     filterEntries: filterEntries,

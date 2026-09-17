@@ -202,3 +202,49 @@ test('记录匹配：磁盘上的路径变了，还能靠 library_path 认出来
   assert.equal(described[0].pinned, true);
   assert.equal(described[0].recordId, 'rec-1');
 });
+
+/* 真实遇到过的一份工作流：节点 16 的 clip 输入写着连线 14、输出写着 15，
+ * 连线表里却只有 18（7→16 的 clip）和 19（16→9 的条件）。画布转换提示词时
+ * 拿节点上的号去查表，查不到就抛 “No link found in parent graph …”，
+ * 一个残号让整份工作流导不进来。 */
+test('连线修正：节点上的残号按连线表补回，画布转换不再报错', () => {
+  const graph = {
+    nodes: [
+      { id: 7, inputs: [], outputs: [{ name: 'CLIP', links: [18] }] },
+      { id: 16, inputs: [{ name: 'clip', link: 14 }, { name: 'text', link: null }], outputs: [{ name: 'CONDITIONING', links: [15] }] },
+      { id: 9, inputs: [{ name: 'positive', link: 19 }, { name: 'negative', link: null }], outputs: [] },
+    ],
+    links: [[18, 7, 0, 16, 0, 'CLIP'], [19, 16, 0, 9, 1, 'CONDITIONING']],
+  };
+  assert.equal(Library.reconcileLinks(graph), 0, '两条都能从连线表补回来，没有丢连接');
+  assert.equal(graph.nodes[1].inputs[0].link, 18);
+  assert.deepEqual(graph.nodes[1].outputs[0].links, [19]);
+  assert.equal(graph.nodes[2].inputs[0].link, 19);
+});
+
+test('连线修正：连线表里也没有的残号当作没接，并把条数报出来', () => {
+  const graph = { nodes: [{ id: 1, inputs: [{ name: 'model', link: 5 }], outputs: [] }], links: [] };
+  assert.equal(Library.reconcileLinks(graph), 1);
+  assert.equal(graph.nodes[0].inputs[0].link, null);
+});
+
+test('连线修正：健康的工作流一个字节都不改', () => {
+  const graph = {
+    nodes: [
+      { id: 1, inputs: [], outputs: [{ links: [3] }] },
+      { id: 2, inputs: [{ name: 'model', link: 3 }], outputs: [] },
+    ],
+    links: [[3, 1, 0, 2, 0, 'MODEL']],
+  };
+  const before = JSON.stringify(graph);
+  assert.equal(Library.reconcileLinks(graph), 0);
+  assert.equal(JSON.stringify(graph), before);
+});
+
+test('连线修正：脏输入不炸', () => {
+  assert.equal(Library.reconcileLinks(null), 0);
+  assert.equal(Library.reconcileLinks(undefined), 0);
+  assert.equal(Library.reconcileLinks({}), 0);
+  assert.equal(Library.reconcileLinks({ nodes: 'x', links: 'y' }), 0);
+  assert.equal(Library.reconcileLinks({ nodes: [null, 3], links: [null, 'x'] }), 0);
+});

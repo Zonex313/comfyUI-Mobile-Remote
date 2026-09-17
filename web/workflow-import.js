@@ -349,6 +349,14 @@ export function createWorkflowImporter({ element, button, setText }) {
     paint();
   }
 
+  /** 画布内部的报错翻译成能照做的话；认不出来的原样抛出。 */
+  function describeError(error) {
+    const message = String(error?.message || error || "");
+    const broken = /No link found in parent graph for id \[(\d+)\] slot \[(\d+)\] (\S+)/.exec(message);
+    if (!broken) return message;
+    return t("这个工作流的连线记录不完整：节点 {node} 的输入「{input}」指向一条已经不存在的连线。请在电脑端打开它，把那条线重新连一次再保存，然后重新导入。", { node: broken[1], input: broken[3] });
+  }
+
   /** 电脑端浏览器里把画布格式的工作流转成可执行格式，用一张独立的图，不动当前画布。 */
   async function convert(entry) {
     const response = await fetch(`/userdata/${encodeURIComponent(`workflows/${entry.path}`)}`, { cache: "no-store" });
@@ -359,6 +367,7 @@ export function createWorkflowImporter({ element, button, setText }) {
     if (typeof app?.graphToPrompt !== "function") throw new Error(t("读不到 ComfyUI 的转换接口，刷新页面再试"));
 
     const graph = new factory.LGraph();
+    const dropped = Library.reconcileLinks(graphData);
     graph.configure(JSON.parse(JSON.stringify(graphData)));
     const expected = Array.isArray(graphData.nodes) ? graphData.nodes.length : 0;
     const built = Array.isArray(graph?._nodes) ? graph._nodes.length : 0;
@@ -370,7 +379,7 @@ export function createWorkflowImporter({ element, button, setText }) {
     if (!prompt || typeof prompt !== "object" || Object.keys(prompt).length === 0) {
       throw new Error(t("这个工作流里没有可执行的节点"));
     }
-    return { prompt, workflow: graphData };
+    return { prompt, workflow: graphData, dropped };
   }
 
   async function importEntry(model) {
@@ -396,9 +405,14 @@ export function createWorkflowImporter({ element, button, setText }) {
       });
       const body = await readJson(response);
       const name = body?.workflow?.name || entry.name;
-      setNotice(t("已导入「{name}」，手机端电脑不开也能用了", { name: name }), "success");
+      setNotice(
+        payload.dropped
+          ? t("已导入「{name}」（{count} 条失效连线已忽略）", { name: name, count: payload.dropped })
+          : t("已导入「{name}」，手机端电脑不开也能用了", { name: name }),
+        "success",
+      );
     } catch (error) {
-      setNotice(t("导入失败：{value}", { value: error?.message || error }), "error");
+      setNotice(t("导入失败：{value}", { value: describeError(error) }), "error");
     } finally {
       busyKey = "";
       busyName = "";
