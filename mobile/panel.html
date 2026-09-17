@@ -7,7 +7,7 @@
 <!-- 「高级」页的宿主页：参考项目（comfyui-mobile-frontend, MIT）的工作流面板
      在 iframe 里跑，这样它的整站样式既进不来也出不去，UI 与交互与参考项目完全一致。
      由 mobile/app.js 创建 iframe 打开，并通过 postMessage 切换工作流与语言。 -->
-<link rel="stylesheet" href="/mobile/assets/panel.css?v=202610131">
+<link rel="stylesheet" href="/mobile/assets/panel.css?v=202610132">
 <style>
   html, body { margin: 0; height: 100%; color: #e5e7eb; background: transparent; }
   #panel-root { display: flex; flex-direction: column; height: 100%; min-height: 0; background: transparent; }
@@ -25,7 +25,7 @@
 <body>
 <div id="panel-root"></div>
 <script type="module">
-  import "/mobile/assets/panel.js?v=202610131";
+  import "/mobile/assets/panel.js?v=202610132";
   const params = new URLSearchParams(location.search);
   const handle = globalThis.MobileRemotePanel.mount(document.getElementById("panel-root"), {locale: params.get("locale") || "zh"});
   addEventListener("message", event => {

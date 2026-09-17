@@ -2,8 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
 import type { Workflow, WorkflowNode } from "@/api/types";
 import { useWorkflowStore } from "@/hooks/useWorkflow";
-import { useI18n } from "@/i18n";
-import { ArrowRightIcon, CloseIcon, CaretDownIcon } from "@/components/icons";
+import { ArrowRightIcon } from "@/components/icons";
 import { connectionButtonDomId } from "@/utils/connectionFlash";
 import {
   collectPhoneRelations,
@@ -28,48 +27,42 @@ type Wire = {
   offscreen: boolean;
   wireless: boolean;
 };
-type Lane = { top: number; height: number; capacity: number };
+/** One vertical lane beside the focused card: every neighbour, never truncated. */
+type Lane = { top: number; height: number };
 type Geometry = {
   width: number;
   height: number;
-  rail: number;
-  edge: number;
+  /** Width of the sliver that stays on screen; the rest reads as cut off. */
+  strip: number;
   lanes: Record<Side, Lane>;
   wires: Wire[];
 };
+const DEFAULT_STRIP = 26;
 const emptyGeometry: Geometry = {
   width: 0,
   height: 0,
-  rail: 36,
-  edge: 0,
-  lanes: {
-    input: { top: 0, height: 0, capacity: 0 },
-    output: { top: 0, height: 0, capacity: 0 },
-  },
+  strip: DEFAULT_STRIP,
+  lanes: { input: { top: 0, height: 0 }, output: { top: 0, height: 0 } },
   wires: [],
 };
 const titleOf = (node: WorkflowNode) => node.title?.trim() || node.type;
 const identity = (side: Side, relation: PhoneRelation) =>
   side + ":" + relation.node.itemKey;
-function rowGeometry(
-  count: number,
-  index: number,
-  capacity: number,
-  height: number,
-) {
-  const single = count === 1;
-  const rows = Math.min(count, capacity) + (count > capacity ? 1 : 0);
-  const size = single
-    ? Math.min(228, height - 36)
-    : Math.min(76, (height - 36) / Math.max(1, rows));
+
+/** Fit every neighbour in the available lane, shrinking gaps with the rows. */
+function laneRow(count: number, index: number, lane: Lane, compact: boolean) {
+  const inset = Math.min(8, lane.height * 0.05);
+  const available = Math.max(0, lane.height - 2 * inset);
+  const maxSize = count === 1 ? 232 : compact ? 78 : 96;
+  const step = Math.min(maxSize, available / Math.max(1, count));
+  const gap = count === 1 ? 0 : Math.min(compact ? 3 : 5, step * 0.14);
+  const size = step - gap;
+  const total = step * count - gap;
   return {
-    top: Math.max(12, (height - rows * size) / 2) + index * size + 3,
-    height: size - 6,
+    top: lane.top + (lane.height - total) / 2 + index * step,
+    size,
+    height: size,
   };
-}
-function laneRow(count: number, index: number, lane: Lane) {
-  const row = rowGeometry(count, index, lane.capacity, lane.height);
-  return { ...row, top: row.top + lane.top };
 }
 
 export function PhoneConnectionPreview({
@@ -83,7 +76,6 @@ export function PhoneConnectionPreview({
   order: WorkflowNode[];
   enabled: boolean;
 }) {
-  const { t } = useI18n();
   const hidden = useWorkflowStore((s) => s.hiddenItems);
   const connectionsVisible = useWorkflowStore(
     (s) => s.connectionButtonsVisible,
@@ -93,7 +85,6 @@ export function PhoneConnectionPreview({
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const [geometry, setGeometry] = useState<Geometry>(emptyGeometry);
   const [highlight, setHighlight] = useState<string | null>(null);
-  const [overflow, setOverflow] = useState<Side | null>(null);
   const layerRef = useRef<HTMLDivElement>(null);
   const focusRef = useRef<string | null>(null);
   const forcedUntil = useRef(0);
@@ -229,12 +220,15 @@ export function PhoneConnectionPreview({
           pending = null;
         }
       } else pending = null;
-      const rail = width >= 900 ? 108 : 36;
-      const innerRect = inner!.getBoundingClientRect();
-      const edge = Math.max(0, (width - innerRect.width) / 2);
+      const strip =
+        Number.parseFloat(
+          getComputedStyle(scroller!).getPropertyValue(
+            "--phone-relation-strip",
+          ),
+        ) || DEFAULT_STRIP;
       const lanes: Record<Side, Lane> = {
-        input: { top: 0, height, capacity: 0 },
-        output: { top: 0, height, capacity: 0 },
+        input: { top: 0, height },
+        output: { top: 0, height },
       };
       const bookmark = scroller!
         .closest("#node-list-wrapper")
@@ -242,12 +236,11 @@ export function PhoneConnectionPreview({
       const bookmarkRect = bookmark?.getBoundingClientRect();
       for (const side of ["input", "output"] as const) {
         const lane = lanes[side];
-        const left =
-          origin.left + (side === "input" ? edge : width - edge - rail);
+        const left = origin.left + (side === "input" ? 0 : width - strip);
         if (
           bookmarkRect &&
           bookmarkRect.width > 0 &&
-          bookmarkRect.left < left + rail &&
+          bookmarkRect.left < left + strip &&
           bookmarkRect.right > left
         ) {
           const above = Math.max(
@@ -262,10 +255,6 @@ export function PhoneConnectionPreview({
             lane.height = below;
           }
         }
-        lane.capacity =
-          lane.height < 130
-            ? 0
-            : Math.max(1, Math.min(5, Math.floor((lane.height - 60) / 76) - 1));
       }
       const wires: Wire[] = [];
       const activeNode = live.current.workflow?.nodes.find(
@@ -279,8 +268,8 @@ export function PhoneConnectionPreview({
         for (const side of ["input", "output"] as const) {
           const sideRelations = live.current.relations[side];
           const lane = lanes[side];
-          sideRelations.slice(0, lane.capacity).forEach((relation, index) => {
-            const row = laneRow(sideRelations.length, index, lane);
+          sideRelations.forEach((relation, index) => {
+            const row = laneRow(sideRelations.length, index, lane, strip < 60);
             relation.connections.forEach((connection, lineIndex) => {
               const port = document.getElementById(
                 connectionButtonDomId(
@@ -301,12 +290,15 @@ export function PhoneConnectionPreview({
                 : (side === "input"
                     ? cardRect.left + 12
                     : cardRect.right - 12) - origin.left;
-              const start =
-                side === "input" ? edge + rail : width - edge - rail;
+              const start = side === "input" ? strip : width - strip;
               const fromY =
                 row.top +
                 row.height / 2 +
-                (lineIndex - (relation.connections.length - 1) / 2) * 5;
+                (lineIndex - (relation.connections.length - 1) / 2) *
+                  Math.min(
+                    5,
+                    row.size / Math.max(1, relation.connections.length),
+                  );
               const bend = side === "input" ? 1 : -1;
               const color = port ? getComputedStyle(port).backgroundColor : "";
               wires.push({
@@ -348,7 +340,7 @@ export function PhoneConnectionPreview({
             });
           });
         }
-      const value = { width, height, rail, edge, lanes, wires };
+      const value = { width, height, strip, lanes, wires };
       setGeometry((old) =>
         JSON.stringify(old) === JSON.stringify(value) ? old : value,
       );
@@ -406,7 +398,6 @@ export function PhoneConnectionPreview({
     scheduleRef.current();
   }, [relations, travelling]);
   useEffect(() => {
-    setOverflow(null);
     setHighlight(null);
     const scroller = scrollerRef.current;
     const card = [
@@ -418,28 +409,9 @@ export function PhoneConnectionPreview({
       card?.removeAttribute("data-phone-focus");
     };
   }, [focusKey, scrollerRef]);
-  useEffect(() => {
-    if (!overflow) return;
-    const close = (event: Event) => {
-      if (event instanceof KeyboardEvent && event.key !== "Escape") return;
-      if (
-        event.type === "pointerdown" &&
-        (event.target as Element)?.closest?.("[data-phone-relations-ui]")
-      )
-        return;
-      setOverflow(null);
-    };
-    window.addEventListener("keydown", close);
-    window.addEventListener("pointerdown", close);
-    return () => {
-      window.removeEventListener("keydown", close);
-      window.removeEventListener("pointerdown", close);
-    };
-  }, [overflow]);
 
   const go = (side: Side, relation: PhoneRelation) => {
     if (!relation.node.itemKey) return;
-    setOverflow(null);
     const first = relation.connections[0];
     const reciprocal = first?.targetSlotIndex;
     requestPhoneConnectionJump({
@@ -473,73 +445,86 @@ export function PhoneConnectionPreview({
     relation.connections
       .map((c) => c.type + ": " + c.label + " / " + c.targetLabel)
       .join(", ");
+  const compact = geometry.strip < 60;
   const previews = (side: Side) =>
-    relations[side]
-      .slice(0, geometry.lanes[side].capacity)
-      .map((relation, index) => {
-        const row = laneRow(
-          relations[side].length,
-          index,
-          geometry.lanes[side],
-        );
-        const single = relations[side].length === 1;
-        const key = identity(side, relation);
-        const definitions = single
-          ? getWidgetDefinitions(nodeTypes, relation.node)
-              .filter(
-                (d) =>
-                  !d.connected &&
-                  ["string", "number", "boolean"].includes(typeof d.value),
-              )
-              .slice(0, 2)
-          : [];
-        return (
-          <button
-            key={key}
-            type="button"
-            data-phone-relation={relation.node.id}
-            data-phone-side={side}
-            data-phone-relations-ui
-            className={
-              "phone-relation-preview " +
-              (single ? "is-single" : "is-stack") +
-              (relation.node.mode === 4 ? " is-bypassed" : "") +
-              (relation.hidden ? " is-hidden" : "") +
-              (highlight === key ? " is-highlighted" : "")
-            }
-            style={
-              {
-                top: row.top,
-                height: row.height,
-                [side === "input" ? "left" : "right"]: geometry.edge + 2,
-              } as CSSProperties
-            }
-            aria-label={
-              titleOf(relation.node) +
-              " #" +
-              relation.node.id +
-              "; " +
-              describe(relation)
-            }
-            title={
-              titleOf(relation.node) +
-              " #" +
-              relation.node.id +
-              " / " +
-              describe(relation)
-            }
-            onClick={() => go(side, relation)}
-            onPointerEnter={() => setHighlight(key)}
-            onPointerLeave={() => setHighlight(null)}
-            onFocus={() => setHighlight(key)}
-            onBlur={() => setHighlight(null)}
-          >
+    relations[side].map((relation, index) => {
+      const lane = geometry.lanes[side];
+      const row = laneRow(relations[side].length, index, lane, compact);
+      const single = relations[side].length === 1;
+      const key = identity(side, relation);
+      // Below a readable height the entry degrades to a colour bar rather than
+      // disappearing: the count on screen always matches the real connections.
+      const bar = row.size < 14;
+      const named = row.size >= (compact ? 42 : 30);
+      const roomy = row.size >= (compact ? 62 : 44);
+      const firstType = relation.connections[0]?.type ?? "";
+      const definitions = single
+        ? getWidgetDefinitions(nodeTypes, relation.node)
+            .filter(
+              (d) =>
+                !d.connected &&
+                ["string", "number", "boolean"].includes(typeof d.value),
+            )
+            .slice(0, 2)
+        : [];
+      return (
+        <button
+          key={key}
+          type="button"
+          data-phone-relation={relation.node.id}
+          data-phone-side={side}
+          data-phone-relations-ui
+          className={
+            "phone-relation-preview " +
+            (side === "input" ? "is-input " : "is-output ") +
+            (single ? "is-single " : "is-stack ") +
+            (bar ? "is-bar " : !named ? "is-tight " : "") +
+            (roomy ? "is-roomy " : "") +
+            (relation.node.mode === 4 ? "is-bypassed " : "") +
+            (relation.hidden ? "is-hidden " : "") +
+            (highlight === key ? "is-highlighted " : "") +
+            (bar ? getTypeClass(firstType) : "")
+          }
+          style={
+            {
+              top: row.top,
+              height: row.height,
+              [side === "input" ? "left" : "right"]: 0,
+            } as CSSProperties
+          }
+          aria-label={
+            titleOf(relation.node) +
+            " #" +
+            relation.node.id +
+            "; " +
+            describe(relation)
+          }
+          title={
+            titleOf(relation.node) +
+            " #" +
+            relation.node.id +
+            " / " +
+            describe(relation)
+          }
+          onClick={() => go(side, relation)}
+          onPointerEnter={() => setHighlight(key)}
+          onPointerLeave={() => setHighlight(null)}
+          onFocus={() => setHighlight(key)}
+          onBlur={() => setHighlight(null)}
+        >
+          {!bar && named && (
             <span className="phone-relation-caption">
               <span className="phone-relation-title">
-                {titleOf(relation.node)}
+                {roomy
+                  ? titleOf(relation.node)
+                  : titleOf(relation.node).slice(0, 14)}
               </span>
             </span>
+          )}
+          {!bar && (roomy || !named) && (
             <span className="phone-relation-id">#{relation.node.id}</span>
+          )}
+          {!bar && roomy && (
             <span className="phone-relation-ports">
               {[...new Set(relation.connections.map((c) => c.type))]
                 .slice(0, 3)
@@ -551,21 +536,23 @@ export function PhoneConnectionPreview({
                   />
                 ))}
             </span>
-            {relation.connections.length > 1 && (
-              <span className="phone-relation-count">
-                {relation.connections.length}
-              </span>
-            )}
-            {single && (
-              <span className="phone-relation-fields">
-                {definitions.map((d) => (
-                  <span key={d.name}>
-                    <small>{d.inputName || d.name}</small>
-                    <span>{String(d.value).slice(0, 70)}</span>
-                  </span>
-                ))}
-              </span>
-            )}
+          )}
+          {!bar && relation.connections.length > 1 && roomy && (
+            <span className="phone-relation-count">
+              {relation.connections.length}
+            </span>
+          )}
+          {!bar && single && (
+            <span className="phone-relation-fields">
+              {definitions.map((d) => (
+                <span key={d.name}>
+                  <small>{d.inputName || d.name}</small>
+                  <span>{String(d.value).slice(0, 70)}</span>
+                </span>
+              ))}
+            </span>
+          )}
+          {!bar && row.size >= 34 && (
             <span className="phone-relation-arrow">
               {side === "input" ? (
                 <ArrowRightIcon className="w-3 h-3 rotate-180" />
@@ -573,9 +560,10 @@ export function PhoneConnectionPreview({
                 <ArrowRightIcon className="w-3 h-3" />
               )}
             </span>
-          </button>
-        );
-      });
+          )}
+        </button>
+      );
+    });
   const hasRelations =
     enabled && focus && (relations.input.length || relations.output.length);
   return (
@@ -628,73 +616,6 @@ export function PhoneConnectionPreview({
             </svg>
             {previews("input")}
             {previews("output")}
-            {(["input", "output"] as const).map(
-              (side) =>
-                geometry.lanes[side].height >= 68 &&
-                relations[side].length > geometry.lanes[side].capacity && (
-                  <button
-                    type="button"
-                    key={side}
-                    data-phone-relations-ui
-                    data-phone-more={side}
-                    className="phone-relation-more"
-                    style={
-                      {
-                        top: laneRow(
-                          relations[side].length,
-                          geometry.lanes[side].capacity,
-                          geometry.lanes[side],
-                        ).top,
-                        [side === "input" ? "left" : "right"]:
-                          geometry.edge + 2,
-                      } as CSSProperties
-                    }
-                    aria-label={
-                      t("Connections") +
-                      " " +
-                      (relations[side].length - geometry.lanes[side].capacity)
-                    }
-                    title={t("Connections")}
-                    onClick={() => setOverflow(overflow === side ? null : side)}
-                  >
-                    <CaretDownIcon className="w-4 h-4" />
-                    <span>
-                      +{relations[side].length - geometry.lanes[side].capacity}
-                    </span>
-                  </button>
-                ),
-            )}
-            {overflow && (
-              <div
-                className="phone-relations-menu"
-                data-phone-relations-ui
-                role="dialog"
-                aria-label={t("Connections")}
-              >
-                <button
-                  type="button"
-                  className="phone-relations-menu-close"
-                  aria-label={t("Close")}
-                  title={t("Close")}
-                  onClick={() => setOverflow(null)}
-                >
-                  <CloseIcon className="w-4 h-4" />
-                </button>
-                {relations[overflow].map((relation) => (
-                  <button
-                    type="button"
-                    key={relation.node.itemKey}
-                    onClick={() => go(overflow, relation)}
-                  >
-                    <strong>
-                      {titleOf(relation.node)}{" "}
-                      <small>#{relation.node.id}</small>
-                    </strong>
-                    <span>{describe(relation)}</span>
-                  </button>
-                ))}
-              </div>
-            )}
           </>
         ) : null}
       </div>

@@ -1001,6 +1001,9 @@ svg {
 
 body:has(#view-advanced.active) .main-content {
   overflow: hidden;
+  /* Connection slivers meet the phone edge; the panel owns its inner gutters. */
+  padding-left: 0;
+  padding-right: 0;
   padding-bottom: 0;
 }
 

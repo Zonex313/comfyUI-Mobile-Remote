@@ -451,7 +451,7 @@ test('source seed mode agrees across pages and decrement batches stay at zero', 
   } finally {await stopFixture(server);await browser.close();}
 });
 
-function relationFixture() {
+function relationFixture(resultCount = 6) {
   const nativeWorkflow = structuredClone(NATIVE_WORKFLOW);
   const objectInfo = structuredClone(OBJECT_INFO);
   objectInfo.KSampler.input.required.notes = ['STRING', {multiline:true}];
@@ -462,7 +462,7 @@ function relationFixture() {
   nativeWorkflow.nodes[1].inputs[1].link=2;
   nativeWorkflow.nodes[1].inputs[2].link=3;
   nativeWorkflow.links.push([2,3,0,2,1,'CONDITIONING'],[3,4,0,2,2,'CONDITIONING']);
-  for (let id=5;id<=10;id++) {
+  for (let id=5;id<5+resultCount;id++) {
     nativeWorkflow.nodes.push({id,type:'RelationResult',title:'Result '+id,pos:[1600,(id-5)*180],size:[260,150],flags:{},order:id,mode:0,properties:{},inputs:[{name:'samples',type:'LATENT',link:id-1}],outputs:[],widgets_values:[1]});
     nativeWorkflow.nodes[1].outputs[0].links.push(id-1);
     nativeWorkflow.links.push([id-1,2,0,id,0,'LATENT']);
@@ -472,8 +472,8 @@ function relationFixture() {
   for(let index=0;index<14;index++)objectInfo.RelationLongResult.input.required['extra_'+index]=['FLOAT',{default:.5}];
   nativeWorkflow.nodes.at(-1).type='RelationLongResult';
   nativeWorkflow.nodes.at(-1).widgets_values.push(...Array(14).fill(.5));
-  nativeWorkflow.groups.push({id:2,title:'Sources',bounding:[980,-20,300,500],color:'#366454'},{id:3,title:'Results',bounding:[1580,-20,340,1180],color:'#67547e'});
-  nativeWorkflow.last_node_id=10;nativeWorkflow.last_link_id=9;
+  nativeWorkflow.groups.push({id:2,title:'Sources',bounding:[980,-20,300,500],color:'#366454'},{id:3,title:'Results',bounding:[1580,-20,340,Math.max(1180,resultCount*180+40)],color:'#67547e'});
+  nativeWorkflow.last_node_id=4+resultCount;nativeWorkflow.last_link_id=3+resultCount;
   return {nativeWorkflow,objectInfo};
 }
 
@@ -501,7 +501,8 @@ test('connection previews stay fixed, reveal grouped folded targets and interrup
     await focusPanelNode(frame,2);
     const input=frame.locator('[data-phone-side=input]');
     assert.deepEqual(await input.evaluateAll(nodes=>nodes.map(n=>n.dataset.phoneRelation)),['1','3','4']);
-    assert.ok(await frame.locator('[data-phone-more=output]').count());
+    assert.equal(await frame.locator('[data-phone-more]').count(),0,'no neighbour is folded behind a counter');
+    assert.deepEqual(await frame.locator('[data-phone-side=output]').evaluateAll(nodes=>nodes.map(n=>n.dataset.phoneRelation)),['5','6','7','8','9','10'],'every downstream neighbour is listed on the rail');
     await frame.locator('.phone-relation-wires path').nth(4).waitFor({state:'attached'});
     await page.waitForTimeout(180);
     const before=await input.first().boundingBox();
@@ -516,13 +517,21 @@ test('connection previews stay fixed, reveal grouped folded targets and interrup
       await page.setViewportSize({width,height:844});
       await focusPanelNode(frame,2,180);
       await page.waitForTimeout(100);
+      if (width <= 720) {
+        const viewport = await page.locator('#view-advanced .panel-frame').boundingBox();
+        assert.ok(Math.abs(viewport.x) < 1 && Math.abs(viewport.width - width) < 1, 'phone previews reach the screen edge, without a second outer gutter');
+      }
       const boxes=await frame.locator('#node-list-container').evaluate(scroll=>{
         const card=document.getElementById('node-card-2').getBoundingClientRect();
-        return {overflow:scroll.scrollWidth-scroll.clientWidth,card:{left:card.left,right:card.right},previews:[...document.querySelectorAll('[data-phone-relation]')].map(n=>{const r=n.getBoundingClientRect();return {side:n.dataset.phoneSide,left:r.left,right:r.right};})};
+        const box=scroll.getBoundingClientRect();
+        return {overflow:scroll.scrollWidth-scroll.clientWidth,edge:{left:box.left,right:box.right},card:{left:card.left,right:card.right},previews:[...document.querySelectorAll('[data-phone-relation]')].map(n=>{const r=n.getBoundingClientRect();return {side:n.dataset.phoneSide,left:r.left,right:r.right};})};
       });
       await page.screenshot({path:path.join(shotDir,'panel-relations-'+width+'.png')});
       assert.ok(boxes.overflow<=1,'no horizontal document overflow at '+width+': '+JSON.stringify(boxes));
-      for (const box of boxes.previews) assert.ok(box.side==='input'?box.right<=boxes.card.left+2:box.left>=boxes.card.right-2,'preview does not cover real controls at '+width);
+      for (const box of boxes.previews) {
+        assert.ok(box.side==='input'?box.right<=boxes.card.left+2:box.left>=boxes.card.right-2,'preview does not cover real controls at '+width);
+        assert.ok(box.side==='input'?box.left<=boxes.edge.left+1:box.right>=boxes.edge.right-1,'entry reads as cut off by the viewport edge at '+width+': '+JSON.stringify(boxes));
+      }
       assert.equal(await frame.locator('.phone-connection-port-row').evaluateAll(rows=>rows.some(row=>row.getBoundingClientRect().width>row.parentElement.getBoundingClientRect().width+1)),false,'port labels stay inside their original input/output columns at '+width);
       await page.screenshot({path:path.join(shotDir,'panel-relations-'+width+'.png')});
     }
@@ -550,9 +559,7 @@ test('connection previews stay fixed, reveal grouped folded targets and interrup
     await focusPanelNode(frame,2);
     await frame.locator('#node-title-container-10 button').first().evaluate(button=>button.click());
     await frame.locator('#node-card-wrapper-10[data-phone-expanded=false]').waitFor({state:'attached'});
-    await frame.locator('[data-phone-more=output]').click();
-    assert.equal(await frame.locator('.phone-relations-menu strong').count(),6);
-    await frame.locator('.phone-relations-menu button').filter({hasText:'Result 10'}).click();
+    await frame.locator('[data-phone-side=output][data-phone-relation="10"]').click();
     await frame.locator('[data-phone-focus-id="10"]').waitFor({state:'attached'});
     const lastOffset=await frame.locator('#node-card-10').evaluate(card=>card.getBoundingClientRect().top-card.closest('[data-node-list]').getBoundingClientRect().top);
     assert.ok(Math.abs(lastOffset)<30,'last folded long node stays aligned after expansion: '+lastOffset);
@@ -635,3 +642,47 @@ test('relation focus recovers after search, honors visibility and avoids bookmar
     await context.close();
   } finally {await browser.close();await stopFixture(fixture.server);}
 });
+
+for (const count of [14, 120]) {
+  test('crowded rails fit all ' + count + ' neighbours without an overflow menu', {timeout:120000}, async()=>{
+    const {chromium}=resolvePlaywright();
+    const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+    const fixture=await startFixture(relationFixture(count));
+    const shotDir=process.env.PANEL_SHOT_DIR||path.join(ROOT,'tests/screenshots/panel');
+    try {
+      const context=await browser.newContext({locale:'zh-CN',viewport:{width:390,height:count===14?844:640}});
+      const page=await context.newPage();const errors=[];
+      page.on('pageerror',error=>errors.push(error.message));
+      await page.goto(fixture.url);await page.click('.nav-button[data-target=advanced]');
+      const frame=page.frameLocator('#view-advanced .panel-frame');
+      await frame.locator('#node-card-'+(count+4)).waitFor();
+      await focusPanelNode(frame,2);
+      const previews=frame.locator('[data-phone-side=output]');
+      await previews.nth(count-1).waitFor();
+      assert.equal(await previews.count(),count,'all downstream neighbours are listed');
+      assert.equal(await frame.locator('[data-phone-more]').count(),0,'nothing is hidden behind a counter');
+      await frame.locator('.phone-relation-wires path').nth(count+2).waitFor({state:'attached'});
+      await page.waitForTimeout(220);
+      const rail=await frame.locator('.phone-relations-layer').evaluate(layer=>{
+        const box=layer.getBoundingClientRect();
+        return {top:box.top,bottom:box.bottom,rows:[...layer.querySelectorAll('[data-phone-side=output]')].map(n=>{
+          const r=n.getBoundingClientRect(),s=getComputedStyle(n);
+          return {top:r.top,bottom:r.bottom,height:r.height,outerBorder:s.borderRightWidth,color:s.backgroundColor};
+        })};
+      });
+      for (let index=1;index<rail.rows.length;index++) assert.ok(rail.rows[index].top>=rail.rows[index-1].bottom-0.5,'rows never overlap');
+      assert.ok(rail.rows[0].top>=rail.top && rail.rows.at(-1).bottom<=rail.bottom+1,'all entries stay above the reserved bottom controls');
+      assert.ok(rail.rows.every(row=>row.height>0 && row.outerBorder==='0px'),'every neighbour has a visible sliver with its outer border cut off');
+      const tallest=Math.max(...rail.rows.map(row=>row.height));
+      assert.ok(tallest<(count===14?50:5),'dense rows shrink to fit the shorter viewport: '+tallest);
+      if(count===120)assert.ok(rail.rows.every(row=>row.color==='rgb(236, 72, 153)'),'squeezed bars retain the LATENT port colour');
+      await fs.promises.mkdir(shotDir,{recursive:true});
+      await page.screenshot({path:path.join(shotDir,'panel-relations-crowded-'+count+'.png')});
+      await previews.nth(count-1).click();
+      await frame.locator('[data-phone-focus-id="'+(count+4)+'"]').waitFor({state:'attached'});
+      assert.equal(fixture.posted.length,0);
+      assert.deepEqual(errors,[]);
+      await context.close();
+    } finally {await browser.close();await stopFixture(fixture.server);}
+  });
+}

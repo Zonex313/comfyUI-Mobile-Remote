@@ -1,11 +1,17 @@
 /* Phone-only relationship presentation; no graph coordinates or widget state. */
 .phone-relations-enabled {
-  --phone-relation-rail: 36px;
+  /* The measurement code reads these back, so the layout and the wire start
+     points cannot drift apart. */
+  --phone-relation-strip: 26px;
+  --phone-relation-pad: 32px;
+  /* The slivers sit flush against the viewport edge, so the scroller's own
+     gutter moves into the content column instead of narrowing the cards twice. */
+  padding-inline: 0 !important;
   overflow-x: hidden;
 }
 .phone-relations-enabled #node-list-inner {
-  max-width: calc(48rem + 84px);
-  padding-inline: 40px;
+  max-width: calc(48rem + 2 * var(--phone-relation-pad));
+  padding-inline: var(--phone-relation-pad);
   box-sizing: border-box;
 }
 [data-phone-node-key][data-phone-focus="true"] > .node-card-inner {
@@ -48,36 +54,60 @@
   stroke-linejoin: round;
   font-size: 11px;
 }
-.phone-relation-preview,
-.phone-relation-more {
+/* One neighbour entry. It reads as a card pushed off the screen edge: only the
+   inward sliver is inside the viewport, and the outward side has no border and
+   no rounded corner. */
+.phone-relation-preview {
   position: absolute;
-  width: calc(var(--phone-relation-rail) - 4px);
+  width: var(--phone-relation-strip, 26px);
   padding: 5px 2px;
   border: 1px solid #4b596b;
   background: #17222e;
   color: #e9eef3;
-  border-radius: 5px;
   pointer-events: auto;
   touch-action: pan-y;
   cursor: pointer;
   overflow: hidden;
-  box-shadow: 0 2px 5px #0005;
-}
-.phone-relation-preview {
   display: flex;
   align-items: center;
   flex-direction: column;
   gap: 4px;
 }
-.phone-relation-preview.is-single {
-  border-inline-start: 3px solid #83afba;
-  background: #1a2733;
+.phone-relation-preview.is-input:not(.is-bar) {
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+  background: linear-gradient(90deg, #0d151d 0%, #17222e 55%);
+  box-shadow: 2px 1px 5px #0006;
 }
-.phone-relation-preview.is-stack {
-  box-shadow:
-    3px -2px 0 -1px #243545,
-    4px -2px 0 #53606e,
-    0 2px 5px #0005;
+.phone-relation-preview.is-output:not(.is-bar) {
+  border-right: 0;
+  border-radius: 6px 0 0 6px;
+  background: linear-gradient(270deg, #0d151d 0%, #17222e 55%);
+  box-shadow: -2px 1px 5px #0006;
+}
+/* A squeezed row keeps its slot colour so the count on screen still matches the
+   real connection count; the palette classes come from index.css. */
+.phone-relation-preview.is-tight {
+  padding-block: 2px;
+  gap: 1px;
+  justify-content: center;
+}
+.phone-relation-preview.is-bar {
+  padding: 0;
+  border: 0;
+  min-height: 0;
+  background: var(--conn-slot-fill, #94a3b8);
+  border-radius: 0 2px 2px 0;
+  justify-content: center;
+}
+.phone-relation-preview.is-bar.is-output {
+  border-radius: 2px 0 0 2px;
+}
+.phone-relation-preview.is-single.is-input {
+  border-right: 3px solid #83afba;
+}
+.phone-relation-preview.is-single.is-output {
+  border-left: 3px solid #83afba;
 }
 .phone-relation-preview.is-bypassed {
   border-color: #b981c4;
@@ -85,17 +115,18 @@
 .phone-relation-preview.is-hidden {
   border-style: dashed;
 }
-.phone-relation-preview.is-stack .phone-relation-arrow {
-  display: none;
-}
-.phone-relation-preview:hover,
-.phone-relation-preview:focus-visible,
-.phone-relation-preview.is-highlighted {
+.phone-relation-preview:hover:not(.is-bar),
+.phone-relation-preview:focus-visible:not(.is-bar),
+.phone-relation-preview.is-highlighted:not(.is-bar) {
   border-color: #88d9e4;
   background: #253b47;
 }
-.phone-relation-preview:focus-visible,
-.phone-relation-more:focus-visible {
+.phone-relation-preview.is-bar:hover,
+.phone-relation-preview.is-bar:focus-visible,
+.phone-relation-preview.is-bar.is-highlighted {
+  filter: brightness(1.4);
+}
+.phone-relation-preview:focus-visible {
   outline: 2px solid #8fdee8;
   outline-offset: 1px;
 }
@@ -104,6 +135,7 @@
   flex: 1;
   min-height: 0;
   align-items: center;
+  justify-content: center;
   gap: 5px;
   writing-mode: vertical-rl;
   overflow: hidden;
@@ -155,62 +187,6 @@
   flex-shrink: 0;
   color: #b1cbd8;
 }
-.phone-relation-more {
-  height: 48px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  gap: 2px;
-}
-.phone-relations-menu {
-  position: absolute;
-  top: 24px;
-  left: 40px;
-  right: 40px;
-  max-height: calc(100% - 48px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  background: #131e28;
-  border: 1px solid #60717e;
-  border-radius: 6px;
-  box-shadow: 0 8px 32px #0008;
-  pointer-events: auto;
-  padding: 6px;
-  touch-action: pan-y;
-}
-.phone-relations-menu > button {
-  width: 100%;
-  padding: 10px 8px;
-  border: 0;
-  background: transparent;
-  color: #e9eef3;
-  text-align: left;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  border-bottom: 1px solid #ffffff12;
-}
-.phone-relations-menu > button:hover {
-  background: #293b47;
-}
-.phone-relations-menu strong {
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-.phone-relations-menu small,
-.phone-relations-menu span {
-  font-size: 11px;
-  font-weight: 400;
-  color: #b4c4ce;
-  overflow-wrap: anywhere;
-}
-.phone-relations-menu .phone-relations-menu-close {
-  align-items: flex-end;
-  color: #b4c4ce;
-  padding-block: 6px;
-}
 [data-phone-travelling] #node-list-inner {
   will-change: transform, opacity;
   pointer-events: none;
@@ -220,11 +196,8 @@
 }
 @media (min-width: 900px) {
   .phone-relations-enabled {
-    --phone-relation-rail: 108px;
-  }
-  .phone-relations-enabled #node-list-inner {
-    max-width: calc(48rem + 228px);
-    padding-inline: 112px;
+    --phone-relation-strip: 104px;
+    --phone-relation-pad: 110px;
   }
   .phone-relation-preview {
     padding: 8px;
@@ -273,10 +246,6 @@
   }
   .phone-relation-ports {
     justify-content: center;
-  }
-  .phone-relations-menu {
-    left: max(120px, calc((100% - 500px) / 2));
-    right: max(120px, calc((100% - 500px) / 2));
   }
 }
 @media (prefers-reduced-motion: reduce) {
