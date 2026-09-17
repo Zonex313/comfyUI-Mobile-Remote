@@ -14,6 +14,8 @@
 - 手机和电脑界面都支持中文、英文、日文、韩文，语言可以各自选。
 - 高级页加载能看到真实进度，也修了导入工作流的失效连线、大图翻页闪图和长文字挤出按钮的问题。
 
+感谢 @cosmicbuffalo 开源 [comfyui-mobile-frontend](https://github.com/cosmicbuffalo/comfyui-mobile-frontend)（MIT）。本次高级页的节点面板使用并改编了它的组件代码，也参考了部分界面和交互设计。
+
 更新后重启 ComfyUI，再刷新手机页面。
 
 ### English
@@ -24,6 +26,8 @@ This update makes workflows a little easier to work with on your phone.
 - Generate and Advanced share a phone-only copy that survives refreshes without changing your desktop workflow. To start again from the desktop version, use the resync option in Settings; it replaces your current phone adjustments.
 - Both interfaces now support Chinese, English, Japanese, and Korean, with separate language choices for each device.
 - Advanced now shows real loading progress. This release also fixes stale links in imported workflows, flashes when browsing full-size images, and text spilling out of buttons.
+
+Thanks to @cosmicbuffalo for open-sourcing [comfyui-mobile-frontend](https://github.com/cosmicbuffalo/comfyui-mobile-frontend) (MIT). The Advanced tab's node panel uses and adapts its component code, and draws on parts of its UI and interaction design.
 
 Restart ComfyUI after updating, then refresh the page on your phone.
 

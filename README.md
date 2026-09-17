@@ -15,6 +15,10 @@ Use workflows, adjust parameters, and view results from your phone browser. Comf
 - 查看进度、历史和收藏，重新生成或全屏看图；也提供可选的随机标签 CLIP 编码节点。
 - 通过 Tailscale 或 Cloudflare 临时公网链接访问，界面支持中、英、日、韩四种语言。
 
+### 致谢
+
+「高级」页的节点面板使用并改编了 [comfyui-mobile-frontend](https://github.com/cosmicbuffalo/comfyui-mobile-frontend)（MIT）的组件代码，部分界面和交互也参考了该项目。感谢作者 [@cosmicbuffalo](https://github.com/cosmicbuffalo) 的开源分享。
+
 ### 安装与使用
 
 1. 将插件文件夹命名为 `ComfyUI-Mobile-Remote`，放入 `ComfyUI/custom_nodes/`，然后重启 ComfyUI。
@@ -42,6 +46,10 @@ Use workflows, adjust parameters, and view results from your phone browser. Comf
 - Generate and Advanced share a separate phone copy. Your adjustments survive refreshes without changing the original desktop workflow.
 - Check progress, browse history and favorites, regenerate images, or open them full-screen. An optional random-tag CLIP encoder is also included.
 - Connect through Tailscale or a temporary Cloudflare link. The interface supports Chinese, English, Japanese, and Korean.
+
+### Acknowledgements
+
+The Advanced tab's node panel uses and adapts component code from [comfyui-mobile-frontend](https://github.com/cosmicbuffalo/comfyui-mobile-frontend) (MIT), with parts of its UI and interactions also drawing on that project. Thanks to [@cosmicbuffalo](https://github.com/cosmicbuffalo) for sharing this work as open source.
 
 ### Install and Connect
 
