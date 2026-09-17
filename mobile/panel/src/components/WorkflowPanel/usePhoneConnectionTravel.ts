@@ -10,15 +10,27 @@ import {
   type PhoneConnectionJump,
 } from "@/utils/phoneConnectionNavigation";
 
+export interface PhoneTravelHandlers {
+  /** The list is starting to move: the rail hands its current tabs over now. */
+  onDepart: () => void;
+  /** The incoming card is in place and beginning its slide, so the new tabs
+   *  start sliding in on the same beat and the two finish together. */
+  onSwap: (key: string) => void;
+  /** The whole travel, slide in included, has finished. */
+  onArrive: (key: string) => void;
+  /** A gesture or a newer jump took over before the handover completed. */
+  onCancel: () => void;
+}
+
 export function usePhoneConnectionTravel(
   scrollerRef: RefObject<HTMLDivElement | null>,
   workflow: Workflow | null,
   enabled: boolean,
-  onArrive: (key: string) => void,
+  handlers: PhoneTravelHandlers,
 ) {
   const [travelling, setTravelling] = useState(false);
-  const live = useRef({ workflow, onArrive });
-  live.current = { workflow, onArrive };
+  const live = useRef({ workflow, handlers });
+  live.current = { workflow, handlers };
 
   useEffect(() => {
     const scroller = scrollerRef.current;
@@ -43,12 +55,14 @@ export function usePhoneConnectionTravel(
       }
     };
     const cancel = () => {
+      const wasActive = active;
       generation++;
       unblock?.();
       unblock = undefined;
       restore();
       active = false;
       if (!disposed) setTravelling(false);
+      if (wasActive && !disposed) live.current.handlers.onCancel();
     };
     const play = async (frames: Keyframe[], duration: number) => {
       if (!content?.animate) return;
@@ -86,6 +100,8 @@ export function usePhoneConnectionTravel(
       active = true;
       setTravelling(true);
       scroller.dataset.phoneTravelling = detail.direction;
+      // The rail leaves on the same beat the list does, not once the list lands.
+      live.current.handlers.onDepart();
       try {
         if (animate) {
           await play(
@@ -132,6 +148,7 @@ export function usePhoneConnectionTravel(
         }
         if (animate) {
           content!.style.opacity = "1";
+          live.current.handlers.onSwap(detail.itemKey);
           await play(
             [
               { transform: "translateX(" + -sign * 80 + "px)", opacity: 0 },
@@ -182,7 +199,7 @@ export function usePhoneConnectionTravel(
             detail: { nodeId: detail.nodeId, itemKey: detail.itemKey },
           }),
         );
-        live.current.onArrive(detail.itemKey);
+        live.current.handlers.onArrive(detail.itemKey);
       } finally {
         if (!isCancelled()) {
           restore();

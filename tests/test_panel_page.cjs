@@ -509,6 +509,11 @@ test('connection previews stay fixed, reveal grouped folded targets and interrup
     assert.deepEqual(await frame.locator('[data-phone-side=output]').evaluateAll(nodes=>nodes.map(n=>n.dataset.phoneRelation)),['5','6','7','8','9','10'],'every downstream neighbour is listed on the rail');
     await frame.locator('.phone-relation-wires path').nth(4).waitFor({state:'attached'});
     await page.waitForTimeout(180);
+    // A tab is flush with the edge, so 100% of its own width is exactly off screen.
+    const entering=await input.first().evaluate(el=>{const s=getComputedStyle(el);return {name:s.animationName,duration:s.animationDuration};});
+    assert.match(entering.name,/phone-relation-enter-left/,'the left tab slides in from off screen');
+    assert.equal(entering.duration,'0.18s');
+    assert.match(await frame.locator('[data-phone-side=output]').first().evaluate(el=>getComputedStyle(el).animationName),/phone-relation-enter-right/,'the right tab slides in from off screen on the same beat');
     const before=await input.first().boundingBox();
     await frame.locator('#node-list-container').evaluate(scroll=>{scroll.scrollTop+=190;});
     await page.waitForTimeout(200);
@@ -698,7 +703,34 @@ for (const count of [14, 120]) {
       await fs.promises.mkdir(shotDir,{recursive:true});
       await page.screenshot({path:path.join(shotDir,'panel-relations-crowded-'+count+'.png')});
       await previews.nth(count-1).click();
+      // The tabs slide out with the list, not after it lands, and only exist for
+      // the length of that slide — so watch from the click rather than sampling
+      // once after a fixed wait.
+      const target=String(count+4);
+      const leavingTabs=frame.locator('[data-phone-tab-leaving]');
+      let leavingNames=null;
+      let leftWhileMoving=false;
+      for(let attempt=0;attempt<160&&!leavingNames;attempt++){
+        const state=await frame.locator('.phone-relations-layer').evaluate((layer,expected)=>{
+          const scroll=document.getElementById('node-list-container');
+          return {
+            moving:Boolean(scroll&&scroll.dataset.phoneTravelling),
+            focus:layer.dataset.phoneFocusId,
+            names:[...layer.querySelectorAll('[data-phone-tab-leaving]')].map(node=>({side:node.className.includes('is-input')?'input':'output',name:getComputedStyle(node).animationName})),
+          };
+        },target);
+        if(state.names.length){
+          leavingNames=state.names;
+          leftWhileMoving=state.moving&&state.focus!==target;
+          if(leftWhileMoving)await page.screenshot({path:path.join(shotDir,'panel-relations-handover-'+count+'.png')});
+        }
+        if(!leavingNames)await page.waitForTimeout(12);
+      }
+      assert.ok(leavingNames,'the outgoing tabs are kept long enough to slide out');
+      assert.ok(leavingNames.every(entry=>entry.name==='phone-relation-leave-'+(entry.side==='input'?'left':'right')),'each outgoing tab slides out of its own side: '+JSON.stringify(leavingNames.slice(0,4)));
+      assert.ok(leftWhileMoving,'the tabs leave while the list is still moving, not once it has landed');
       await frame.locator('[data-phone-focus-id="'+(count+4)+'"]').waitFor({state:'attached'});
+      await leavingTabs.first().waitFor({state:'detached',timeout:3000});
       assert.equal(fixture.posted.length,0);
       assert.deepEqual(errors,[]);
       await context.close();

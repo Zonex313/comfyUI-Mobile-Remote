@@ -37,6 +37,77 @@
   width: 100%;
   pointer-events: none;
 }
+/* One clipping column per side. A tab sliding in or out is cut off exactly at
+   the viewport edge, and a half-out tab never widens the scroller. */
+.phone-relation-side {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+/* Switching the focused node swaps the whole rail, so the outgoing tabs slide
+   back out of the screen while the incoming ones slide in — both sides on the
+   same beat. A tab is flush with the edge, so 100% of its own width is exactly
+   off screen. */
+@keyframes phone-relation-enter-left {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+@keyframes phone-relation-enter-right {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+@keyframes phone-relation-leave-left {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+}
+@keyframes phone-relation-leave-right {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+.phone-relation-preview.is-entering.is-input {
+  animation: phone-relation-enter-left 180ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.phone-relation-preview.is-entering.is-output {
+  animation: phone-relation-enter-right 180ms cubic-bezier(0.2, 0.7, 0.2, 1)
+    both;
+}
+.phone-relation-preview.is-leaving {
+  animation-duration: 120ms;
+  animation-timing-function: ease-in;
+  animation-fill-mode: both;
+  pointer-events: none;
+}
+.phone-relation-preview.is-leaving.is-input {
+  animation-name: phone-relation-leave-left;
+}
+.phone-relation-preview.is-leaving.is-output {
+  animation-name: phone-relation-leave-right;
+}
 .phone-relation-wires {
   position: absolute;
   inset: 0;
@@ -249,6 +320,10 @@
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .phone-relation-preview.is-entering,
+  .phone-relation-preview.is-leaving {
+    animation: none;
+  }
   .phone-relation-wires path {
     transition: none;
   }
