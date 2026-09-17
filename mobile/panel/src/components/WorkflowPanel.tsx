@@ -29,6 +29,7 @@ import {
 } from "@/utils/grouping";
 import { collectAllWorkflowGroups } from "@/utils/workflowNodes";
 import { NodeCard } from "./WorkflowPanel/NodeCard";
+import { PhoneConnectionPreview } from "./WorkflowPanel/PhoneConnectionPreview";
 import { AddItemControls } from "./WorkflowPanel/AddItemControls";
 import { SubgraphConnectionsSection } from "./WorkflowPanel/SubgraphConnectionsSection";
 import { SubgraphScopeHeader } from "./WorkflowPanel/SubgraphScopeHeader";
@@ -1317,11 +1318,18 @@ export const WorkflowPanel = memo(function WorkflowPanel({
         <div
           id="node-list-container"
           ref={parentRef}
-          className="flex-1 overflow-auto px-1 pt-3 overscroll-contain scroll-container"
+          className="flex-1 overflow-auto px-1 pt-3 overscroll-contain scroll-container phone-relations-enabled"
           style={{ paddingBottom: "10rem" }}
           data-node-list="true"
           onScroll={handleNodeListScroll}
         >
+          <PhoneConnectionPreview
+            key={`${currentSubgraphId ?? "root"}:${nestedItems.length > 0}`}
+            scrollerRef={parentRef}
+            workflow={currentScopeWorkflow}
+            order={orderedNodes}
+            enabled={visible && !workflowSelectionMode}
+          />
           {nestedItems.length === 0 ? (
             <div className="flex items-center justify-center h-full text-slate-400">
               <div className="text-center p-6 rounded-xl border border-white/10 bg-slate-900/95">
@@ -1339,7 +1347,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
               // a flex item's automatic minimum size will not compress padding,
               // so padding here would grow the container past the viewport and
               // make the whole document scrollable.
-              style={{ paddingBottom: "var(--combo-open-scroll-space, 0px)" }}
+              style={{ paddingBottom: "calc(var(--combo-open-scroll-space, 0px) + var(--phone-arrival-scroll-space, 0px))" }}
             >
               {currentSubgraphId && !searchActive && (
                 <>
@@ -1515,6 +1523,7 @@ export const WorkflowPanel = memo(function WorkflowPanel({
       {bookmarkEntries.length > 0 && (
         <div
           ref={bookmarkBarRef}
+          data-phone-bookmark-bar="true"
           // `select-none` on the whole gutter, not just its buttons: the bar is
           // a drag surface (long-press to reposition) and nothing in it is worth
           // copying, so without it iOS starts a text selection mid-drag. The

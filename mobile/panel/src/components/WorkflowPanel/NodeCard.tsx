@@ -1402,6 +1402,9 @@ export const NodeCard = memo(function NodeCard({
   return (
     <div
       id={`node-card-wrapper-${node.id}`}
+      data-phone-node-id={node.id}
+      data-phone-node-key={nodeHierarchicalKey}
+      data-phone-expanded={!isCollapsed}
       className="relative node-card-outer"
     >
       <div id={`node-anchor-${node.id}`} className="absolute -top-3 left-0 right-0 h-0 node-scroll-anchor" />

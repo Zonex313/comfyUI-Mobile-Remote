@@ -721,6 +721,7 @@ export function createNodeControlActions(set: WorkflowSet, get: WorkflowGet) {
         itemKey,
         label,
         flashConnectionDomId,
+        presentation,
       ) => {
         const { hiddenItems, workflow, pointerByHierarchicalKey } = get();
         if (!workflow) return;
@@ -760,7 +761,7 @@ export function createNodeControlActions(set: WorkflowSet, get: WorkflowGet) {
         // editor, a node added from the add modal, an image assigned from the
         // picker) scrolled to a card that never appeared.
         get().revealNodeWithParents(itemKey);
-        get().setItemCollapsed(itemKey, false);
+        if (!presentation?.preserveFold) get().setItemCollapsed(itemKey, false);
         // If the user starts manually scrolling/dragging after this reveal kicks
         // off, abort: don't keep retrying to find the node or re-correcting the
         // alignment, which would fight them and yank the viewport back.
@@ -769,7 +770,7 @@ export function createNodeControlActions(set: WorkflowSet, get: WorkflowGet) {
           attemptsLeft: number,
           delayedAttemptsLeft: number,
         ) => {
-          if (userScrolledSince(startedAt)) return;
+          if (presentation?.cancelled?.() || userScrolledSince(startedAt)) return;
           const anchor =
             document.getElementById(`node-anchor-${nodeId}`) ??
             document.getElementById(`node-${nodeId}`);
@@ -815,9 +816,9 @@ export function createNodeControlActions(set: WorkflowSet, get: WorkflowGet) {
                 0,
                 container.scrollTop + measureOffset(),
               );
-              container.scrollTo({ top: targetTop, behavior: "smooth" });
+              container.scrollTo({ top: targetTop, behavior: presentation?.behavior ?? "smooth" });
             } else {
-              anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+              anchor.scrollIntoView({ behavior: presentation?.behavior ?? "smooth", block: "start" });
             }
           };
 
@@ -881,7 +882,7 @@ export function createNodeControlActions(set: WorkflowSet, get: WorkflowGet) {
           const flashOnArrival = () => {
             if (flashed) return;
             flashed = true;
-            highlight();
+            if (!presentation?.onAligned) highlight();
           };
 
           const cleanup = () => {
@@ -899,7 +900,7 @@ export function createNodeControlActions(set: WorkflowSet, get: WorkflowGet) {
             cleanup();
             // User took over the scroll — stop correcting (and skip the arrival
             // highlight); they're deliberately looking somewhere else.
-            if (userScrolledSince(startedAt)) return;
+            if (presentation?.cancelled?.() || userScrolledSince(startedAt)) return;
             const offset = measureOffset();
             // Flash before deciding on a corrective pass: the corrections are
             // sub-card nudges, and gating the cue on them is what made the
@@ -940,7 +941,7 @@ export function createNodeControlActions(set: WorkflowSet, get: WorkflowGet) {
           let lastHeight = -1;
           let stableFrames = 0;
           const settleThenAlign = (framesLeft: number) => {
-            if (userScrolledSince(startedAt)) return;
+            if (presentation?.cancelled?.() || userScrolledSince(startedAt)) return;
             const height = container
               ? container.scrollHeight
               : document.documentElement.scrollHeight;
@@ -948,6 +949,7 @@ export function createNodeControlActions(set: WorkflowSet, get: WorkflowGet) {
             lastHeight = height;
             if (stableFrames >= 2 || framesLeft <= 0) {
               alignNow();
+              if (presentation?.onAligned) { presentation.onAligned(); return; }
               // Already parked at the target: no scroll events are coming, so
               // don't sit through the settle fallback before lighting it up.
               if (Math.abs(measureOffset()) <= ARRIVAL_SLACK) flashOnArrival();

@@ -558,6 +558,12 @@ export interface WorkflowState {
     label?: string,
     // DOM id of a connection button to flash in sync with the node pulse.
     flashConnectionDomId?: string | null,
+    presentation?: {
+      behavior?: ScrollBehavior;
+      preserveFold?: boolean;
+      cancelled?: () => boolean;
+      onAligned?: () => void;
+    },
   ) => void;
   /**
    * Go to anything in the workflow: travel to its scope, reveal it, scroll it

@@ -11,6 +11,7 @@ import { useI18n } from '@/i18n';
 import { useConnectionSectionFoldsStore } from '@/hooks/useConnectionSectionFolds';
 import { useLongPress } from '@/hooks/useLongPress';
 import { connectionButtonDomId } from '@/utils/connectionFlash';
+import { requestPhoneConnectionJump } from '@/utils/phoneConnectionNavigation';
 import { subgraphBoundaryFoldKey } from '@/utils/subgraphBoundaryFold';
 import { findConnectedNode, findConnectedOutputNodes } from '@/utils/nodeOrdering';
 import { ConnectionModal } from '@/components/modals/ConnectionModal';
@@ -474,9 +475,10 @@ export const ConnectionButton = memo(function ConnectionButton({
       const flashId = reciprocal
         ? connectionButtonDomId(reciprocal.nodeId, reciprocal.direction, reciprocal.slotIndex)
         : null;
+      if (targetNodeId != null && requestPhoneConnectionJump({itemKey, nodeId:targetNodeId, direction, flashDomId:flashId})) return;
       scrollToNode(itemKey, undefined, flashId);
     },
-    [expandConnectionsSection, scrollToNode, resolveReciprocalConnection],
+    [expandConnectionsSection, scrollToNode, resolveReciprocalConnection, direction],
   );
 
   // A promoted slot points INWARD, to the subgraph's own connections section,
@@ -678,7 +680,7 @@ export const ConnectionButton = memo(function ConnectionButton({
   ) : undefined;
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="phone-connection-port-row flex items-center gap-2" title={resolvedLabel}>
       <ConnectionRow
         direction={direction}
         hasConnection={hasConnection}

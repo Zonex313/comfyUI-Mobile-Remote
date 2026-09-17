@@ -90,7 +90,7 @@ const OBJECT_INFO = {
   },
 };
 
-function startFixture({ originallyBypassed = false, sourceSeedMode = "fixed", repeatCount = 1 } = {}) {
+function startFixture({ originallyBypassed = false, sourceSeedMode = "fixed", repeatCount = 1, nativeWorkflow = NATIVE_WORKFLOW, objectInfo = OBJECT_INFO } = {}) {
   const files = new Map();
   for (const name of SCRIPT_ASSETS) {
     files.set(`/mobile/assets/${name}`, ["text/javascript; charset=utf-8", fs.readFileSync(path.join(ROOT, "mobile", name))]);
@@ -115,15 +115,15 @@ function startFixture({ originallyBypassed = false, sourceSeedMode = "fixed", re
     ] },
     // 生成页需要有和面板同一格参数的字段，才能验证"高级改完回生成页看得见"。
     [`/mobile/api/workflows/${WORKFLOW_ID}`]: { ok: true, workflow: {
-      id: WORKFLOW_ID, name: "夹具工作流", snapshot: "a".repeat(64), native_workflow: NATIVE_WORKFLOW,
+      id: WORKFLOW_ID, name: "夹具工作流", snapshot: "a".repeat(64), native_workflow: nativeWorkflow,
       fields: [{ id: "2::seed", node_id: "2", input: "seed", label: "种子", kind: "number", value: 12345 }, {id:"1::ckpt_name",node_id:"1",input:"ckpt_name",label:"模型",kind:"select",value:"sd_xl_base_1.0.safetensors",options:["sd_xl_base_1.0.safetensors"]}],
       node_titles: { "1": "Checkpoint 加载器", "2": "K 采样器" },
       graph: { nodes: [], groups: [] },
     } },
-    [`/mobile/api/panel/workflow/${WORKFLOW_ID}`]: { ok: true, id: WORKFLOW_ID, name: "夹具工作流", workflow: NATIVE_WORKFLOW },
-    "/api/object_info": OBJECT_INFO,
+    [`/mobile/api/panel/workflow/${WORKFLOW_ID}`]: { ok: true, id: WORKFLOW_ID, name: "夹具工作流", workflow: nativeWorkflow },
+    "/api/object_info": objectInfo,
   };
-  api['/mobile/api/workflows/' + WORKFLOW_ID].workflow.native_workflow = structuredClone(NATIVE_WORKFLOW);
+  api['/mobile/api/workflows/' + WORKFLOW_ID].workflow.native_workflow = structuredClone(nativeWorkflow);
   if (originallyBypassed) api['/mobile/api/workflows/' + WORKFLOW_ID].workflow.native_workflow.nodes[0].mode = 4;
   const detail = api['/mobile/api/workflows/' + WORKFLOW_ID].workflow;
   detail.native_workflow.nodes[1].widgets_values[1] = sourceSeedMode;
@@ -178,7 +178,7 @@ function startFixture({ originallyBypassed = false, sourceSeedMode = "fixed", re
       if (controls.failRefresh) return response.end(JSON.stringify({ok:false,error:'同步失败，手机副本未改变。'}));
       const detail = api['/mobile/api/workflows/' + WORKFLOW_ID].workflow;
       detail.snapshot = 'b'.repeat(64);
-      detail.native_workflow = structuredClone(NATIVE_WORKFLOW);
+      detail.native_workflow = structuredClone(nativeWorkflow);
       detail.native_workflow.nodes[1].widgets_values[0] = 999;
       detail.fields[0].value = 999;
       response.end(JSON.stringify({ok:true,snapshot:detail.snapshot}));
@@ -449,4 +449,189 @@ test('source seed mode agrees across pages and decrement batches stay at zero', 
       await page.click('#closeWorkflowHelpButton');
     }
   } finally {await stopFixture(server);await browser.close();}
+});
+
+function relationFixture() {
+  const nativeWorkflow = structuredClone(NATIVE_WORKFLOW);
+  const objectInfo = structuredClone(OBJECT_INFO);
+  objectInfo.KSampler.input.required.notes = ['STRING', {multiline:true}];
+  nativeWorkflow.nodes[1].widgets_values.push(Array.from({length:14},(_,i)=>'Long parameter line '+i).join('\n'));
+  objectInfo.RelationSource = {name:'RelationSource',display_name:'Source',input:{required:{text:['STRING',{multiline:true}]}},output:['CONDITIONING'],output_name:['CONDITIONING'],category:'fixture'};
+  objectInfo.RelationResult = {name:'RelationResult',display_name:'Result',input:{required:{samples:['LATENT'],strength:['FLOAT',{default:1}]}},output:[],output_name:[],category:'fixture'};
+  for (const id of [3,4]) nativeWorkflow.nodes.push({id,type:'RelationSource',title:'Source '+id,pos:[1000,(id-3)*220],size:[240,160],flags:{},order:id,mode:0,properties:{},inputs:[],outputs:[{name:'CONDITIONING',type:'CONDITIONING',links:[id-1]}],widgets_values:['Source text '+id]});
+  nativeWorkflow.nodes[1].inputs[1].link=2;
+  nativeWorkflow.nodes[1].inputs[2].link=3;
+  nativeWorkflow.links.push([2,3,0,2,1,'CONDITIONING'],[3,4,0,2,2,'CONDITIONING']);
+  for (let id=5;id<=10;id++) {
+    nativeWorkflow.nodes.push({id,type:'RelationResult',title:'Result '+id,pos:[1600,(id-5)*180],size:[260,150],flags:{},order:id,mode:0,properties:{},inputs:[{name:'samples',type:'LATENT',link:id-1}],outputs:[],widgets_values:[1]});
+    nativeWorkflow.nodes[1].outputs[0].links.push(id-1);
+    nativeWorkflow.links.push([id-1,2,0,id,0,'LATENT']);
+  }
+  objectInfo.RelationLongResult=structuredClone(objectInfo.RelationResult);
+  objectInfo.RelationLongResult.name='RelationLongResult';
+  for(let index=0;index<14;index++)objectInfo.RelationLongResult.input.required['extra_'+index]=['FLOAT',{default:.5}];
+  nativeWorkflow.nodes.at(-1).type='RelationLongResult';
+  nativeWorkflow.nodes.at(-1).widgets_values.push(...Array(14).fill(.5));
+  nativeWorkflow.groups.push({id:2,title:'Sources',bounding:[980,-20,300,500],color:'#366454'},{id:3,title:'Results',bounding:[1580,-20,340,1180],color:'#67547e'});
+  nativeWorkflow.last_node_id=10;nativeWorkflow.last_link_id=9;
+  return {nativeWorkflow,objectInfo};
+}
+
+async function focusPanelNode(frame,id,offset=0) {
+  await frame.locator('#node-card-'+id).evaluate((card,offset)=>{
+    const scroll=card.closest('[data-node-list]');
+    scroll.scrollTo({top:scroll.scrollTop+card.getBoundingClientRect().top-scroll.getBoundingClientRect().top+offset,behavior:'instant'});
+  },offset);
+  await frame.locator('[data-phone-focus-id="'+id+'"]').waitFor({state:'attached',timeout:10000});
+}
+
+test('connection previews stay fixed, reveal grouped folded targets and interrupt safely', {timeout:120000}, async()=>{
+  const {chromium}=resolvePlaywright();
+  const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+  const fixture=await startFixture(relationFixture());
+  const shotDir=process.env.PANEL_SHOT_DIR||path.join(ROOT,'tests/screenshots/panel');
+  try {
+    const context=await browser.newContext({locale:'zh-CN',viewport:{width:390,height:844},hasTouch:true});
+    const page=await context.newPage();const errors=[];
+    page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(fixture.url);
+    await page.click('.nav-button[data-target=advanced]');
+    const frame=page.frameLocator('#view-advanced .panel-frame');
+    await frame.locator('#node-card-10').waitFor();
+    await focusPanelNode(frame,2);
+    const input=frame.locator('[data-phone-side=input]');
+    assert.deepEqual(await input.evaluateAll(nodes=>nodes.map(n=>n.dataset.phoneRelation)),['1','3','4']);
+    assert.ok(await frame.locator('[data-phone-more=output]').count());
+    await frame.locator('.phone-relation-wires path').nth(4).waitFor({state:'attached'});
+    await page.waitForTimeout(180);
+    const before=await input.first().boundingBox();
+    await frame.locator('#node-list-container').evaluate(scroll=>{scroll.scrollTop+=190;});
+    await page.waitForTimeout(200);
+    const after=await input.first().boundingBox();
+    assert.ok(Math.abs(after.y-before.y)<2,'side entrance does not travel with long node content: '+JSON.stringify({before,after,geometry:await frame.locator('.phone-relations-layer').evaluate(el=>({rect:el.getBoundingClientRect().toJSON(),focus:el.dataset.phoneFocusId,scroll:document.getElementById('node-list-container').scrollTop}))}));
+    assert.equal(await frame.locator('.phone-relations-layer').getAttribute('data-phone-focus-id'),'2');
+    await fs.promises.mkdir(shotDir,{recursive:true});
+    await page.screenshot({path:path.join(shotDir,'panel-relations-390.png')});
+    for (const width of [320,430,1280]) {
+      await page.setViewportSize({width,height:844});
+      await focusPanelNode(frame,2,180);
+      await page.waitForTimeout(100);
+      const boxes=await frame.locator('#node-list-container').evaluate(scroll=>{
+        const card=document.getElementById('node-card-2').getBoundingClientRect();
+        return {overflow:scroll.scrollWidth-scroll.clientWidth,card:{left:card.left,right:card.right},previews:[...document.querySelectorAll('[data-phone-relation]')].map(n=>{const r=n.getBoundingClientRect();return {side:n.dataset.phoneSide,left:r.left,right:r.right};})};
+      });
+      await page.screenshot({path:path.join(shotDir,'panel-relations-'+width+'.png')});
+      assert.ok(boxes.overflow<=1,'no horizontal document overflow at '+width+': '+JSON.stringify(boxes));
+      for (const box of boxes.previews) assert.ok(box.side==='input'?box.right<=boxes.card.left+2:box.left>=boxes.card.right-2,'preview does not cover real controls at '+width);
+      assert.equal(await frame.locator('.phone-connection-port-row').evaluateAll(rows=>rows.some(row=>row.getBoundingClientRect().width>row.parentElement.getBoundingClientRect().width+1)),false,'port labels stay inside their original input/output columns at '+width);
+      await page.screenshot({path:path.join(shotDir,'panel-relations-'+width+'.png')});
+    }
+    await page.setViewportSize({width:390,height:844});
+    await frame.locator('#node-title-container-5 button').first().evaluate(button=>button.click());
+    await frame.locator('#node-card-wrapper-5[data-phone-expanded=false]').waitFor({state:'attached'});
+    await frame.locator('#group-header-3 button').first().evaluate(button=>button.click());
+    await frame.locator('#node-card-5').waitFor({state:'detached'});
+    await focusPanelNode(frame,2);
+    await frame.locator('#node-list-container').evaluate(scroll=>{
+      window.__foldedArrival=false;
+      window.__arrivalObserver=new MutationObserver(()=>{
+        if(scroll.dataset.phoneTravelling==='output'&&document.getElementById('node-card-wrapper-5')?.dataset.phoneExpanded==='false')window.__foldedArrival=true;
+      });
+      window.__arrivalObserver.observe(scroll,{subtree:true,childList:true,attributes:true});
+    });
+    await frame.locator('[data-phone-side=output][data-phone-relation="5"]').click();
+    await frame.locator('[data-phone-focus-id="5"]').waitFor({state:'attached'});
+    assert.equal(await frame.locator('#node-card-wrapper-5').getAttribute('data-phone-expanded'),'true');
+    assert.equal(await frame.locator('body').evaluate(()=>{window.__arrivalObserver.disconnect();return window.__foldedArrival;}),true,'target is revealed folded before arrival completes');
+    assert.ok(await frame.locator('#group-header-3').count(),'destination remains in its original group');
+    const savedScroll=await frame.locator('#node-list-container').evaluate(s=>s.scrollTop);
+    await frame.locator('#node-list-container').evaluate(s=>{s.scrollTop+=35;});
+    assert.ok(await frame.locator('#node-list-container').evaluate(s=>s.scrollTop)>savedScroll,'normal vertical scrolling resumes');
+    await focusPanelNode(frame,2);
+    await frame.locator('#node-title-container-10 button').first().evaluate(button=>button.click());
+    await frame.locator('#node-card-wrapper-10[data-phone-expanded=false]').waitFor({state:'attached'});
+    await frame.locator('[data-phone-more=output]').click();
+    assert.equal(await frame.locator('.phone-relations-menu strong').count(),6);
+    await frame.locator('.phone-relations-menu button').filter({hasText:'Result 10'}).click();
+    await frame.locator('[data-phone-focus-id="10"]').waitFor({state:'attached'});
+    const lastOffset=await frame.locator('#node-card-10').evaluate(card=>card.getBoundingClientRect().top-card.closest('[data-node-list]').getBoundingClientRect().top);
+    assert.ok(Math.abs(lastOffset)<30,'last folded long node stays aligned after expansion: '+lastOffset);
+    await focusPanelNode(frame,2);
+    await frame.locator('[data-phone-side=input][data-phone-relation="3"]').click();
+    await frame.locator('[data-phone-side=input]').first().dispatchEvent('wheel',{deltaY:80});
+    await frame.locator('#node-list-container').evaluate(s=>{s.scrollTop+=60;});
+    await page.waitForTimeout(1100);
+    assert.equal(await frame.locator('#node-list-container').getAttribute('data-phone-travelling'),null);
+    assert.equal(await frame.locator('#node-list-inner').evaluate(el=>getComputedStyle(el).transform),'none');
+    await focusPanelNode(frame,2);
+    // The original port button and side entrance share the same navigation path.
+    await frame.locator('#connection-button-2-input-0').click();
+    await frame.locator('[data-phone-focus-id="1"]').waitFor({state:'attached'});
+    assert.equal(fixture.posted.length,0,'relation navigation never writes to desktop');
+    assert.deepEqual(errors,[]);
+    await context.close();
+  } finally {await browser.close();await stopFixture(fixture.server);}
+});
+
+
+test('relation focus recovers after search, honors visibility and avoids bookmarks', {timeout:120000}, async()=>{
+  const {chromium}=resolvePlaywright();
+  const browser=await chromium.launch({executablePath:chromePath(),headless:true});
+  const fixture=await startFixture(relationFixture());
+  try {
+    const context=await browser.newContext({locale:'zh-CN',viewport:{width:390,height:844},reducedMotion:'reduce'});
+    const page=await context.newPage();const errors=[];
+    page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(fixture.url);await page.click('.nav-button[data-target=advanced]');
+    const frame=page.frameLocator('#view-advanced .panel-frame');
+    await frame.locator('#node-card-2').waitFor();
+    await focusPanelNode(frame,2);
+    const options=frame.getByRole('button',{name:'工作流选项'});
+    await options.click();await frame.getByRole('button',{name:'搜索',exact:true}).click();
+    const search=frame.locator('.node-search-bar input');
+    await search.fill('no-node-matches-this-query');
+    await frame.locator('#node-list-inner').waitFor({state:'detached'});
+    assert.equal(await frame.locator('[data-phone-relation]').count(),0);
+    await search.fill('KSampler');await search.evaluate(el=>el.blur());
+    await focusPanelNode(frame,2);
+    await frame.locator('[data-phone-side=input][data-phone-relation="1"]').waitFor();
+    await frame.locator('body').evaluate(()=>{
+      window.__travelAnimations=0;const original=Element.prototype.animate;
+      Element.prototype.animate=function(...args){window.__travelAnimations++;return original.apply(this,args);};
+    });
+    await frame.locator('[data-phone-side=input][data-phone-relation="1"]').click();
+    await frame.locator('[data-phone-focus-id="1"]').waitFor({state:'attached'});
+    assert.equal(await frame.locator('body').evaluate(()=>window.__travelAnimations),0,'reduced motion skips horizontal animation');
+    assert.equal(await frame.locator('[data-phone-node-key]').count(),10,'explicit connection jump clears the search filter');
+    const foreignAccepted=await frame.locator('body').evaluate(()=>!window.dispatchEvent(new CustomEvent('phone-connection-jump',{cancelable:true,detail:{itemKey:'foreign-scope/node:2',nodeId:2,direction:'output'}})));
+    assert.equal(foreignAccepted,false,'unknown scope is not accepted by the phone transition');
+    await focusPanelNode(frame,2);
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    await options.click();await frame.getByRole('button',{name:'隐藏 / 显示',exact:true}).click();
+    await frame.locator('body').evaluate(()=>window.dispatchEvent(new CustomEvent('phone-connection-jump',{cancelable:true,detail:{itemKey:document.getElementById('node-card-wrapper-3').dataset.phoneNodeKey,nodeId:3,direction:'input'}})));
+    await frame.getByRole('button',{name:'隐藏连接按钮',exact:true}).click();
+    await frame.locator('[data-phone-relation]').first().waitFor({state:'detached'});
+    await frame.getByRole('button',{name:'显示连接按钮',exact:true}).click();
+    await frame.getByRole('button',{name:'取消',exact:true}).click();
+    await focusPanelNode(frame,2);
+    await frame.locator('[data-phone-relation]').first().waitFor();
+    await frame.locator('#node-header-2 button').last().click();
+    await frame.getByRole('button',{name:'添加书签',exact:true}).click();
+    const bar=frame.locator('[data-phone-bookmark-bar]');await bar.waitFor();
+    await bar.evaluate(el=>{el.style.top='180px';el.style.left='0px';el.style.right='auto';});
+    await page.waitForTimeout(150);
+    const collision=await bar.evaluate(bar=>{
+      const b=bar.getBoundingClientRect();
+      return [...document.querySelectorAll('[data-phone-relation],[data-phone-more]')].some(el=>{
+        const r=el.getBoundingClientRect();return r.left<b.right&&r.right>b.left&&r.top<b.bottom&&r.bottom>b.top;
+      });
+    });
+    assert.equal(collision,false,'side relations yield space to the retained bookmark bar');
+    assert.ok(await bar.locator('button').count(),'bookmark controls remain present');
+    await options.click();await frame.getByRole('button',{name:'全部折叠',exact:true}).click();
+    await frame.locator('[data-phone-relation]').first().waitFor({state:'detached'});
+    assert.equal(fixture.posted.length,0);
+    assert.deepEqual(errors,[]);
+    await context.close();
+  } finally {await browser.close();await stopFixture(fixture.server);}
 });
