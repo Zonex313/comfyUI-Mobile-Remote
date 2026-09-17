@@ -726,15 +726,19 @@ for (const count of [14, 120]) {
       const leavingTabs=frame.locator('[data-phone-tab-leaving]');
       let leavingNames=null;
       let leftWhileMoving=false;
+      // 连线属于当前焦点卡片的位置，过渡期间画出来就是留在旧位置上的那一段。
+      let wiresGoneWhileMoving=false;
       for(let attempt=0;attempt<160&&!leavingNames;attempt++){
         const state=await frame.locator('.phone-relations-layer').evaluate((layer,expected)=>{
           const scroll=document.getElementById('node-list-container');
           return {
             moving:Boolean(scroll&&scroll.dataset.phoneTravelling),
             focus:layer.dataset.phoneFocusId,
+            wires:layer.querySelectorAll('.phone-relation-wires').length,
             names:[...layer.querySelectorAll('[data-phone-tab-leaving]')].map(node=>({side:node.className.includes('is-input')?'input':'output',name:getComputedStyle(node).animationName})),
           };
         },target);
+        if(state.moving&&state.wires===0)wiresGoneWhileMoving=true;
         if(state.names.length){
           leavingNames=state.names;
           leftWhileMoving=state.moving&&state.focus!==target;
@@ -745,6 +749,10 @@ for (const count of [14, 120]) {
       assert.ok(leavingNames,'the outgoing tabs are kept long enough to slide out');
       assert.ok(leavingNames.every(entry=>entry.name==='phone-relation-leave-'+(entry.side==='input'?'left':'right')),'each outgoing tab slides out of its own side: '+JSON.stringify(leavingNames.slice(0,4)));
       assert.ok(leftWhileMoving,'the tabs leave while the list is still moving, not once it has landed');
+      assert.ok(wiresGoneWhileMoving,'no wires are left hanging at the old position while the list moves');
+      await frame.locator('[data-phone-focus-id="'+target+'"]').waitFor({state:'attached'});
+      await frame.locator('.phone-relation-wires path').first().waitFor({state:'attached',timeout:5000});
+      assert.ok(await frame.locator('.phone-relation-wires path').count()>0,'the wires come back once the new card has been measured');
       await frame.locator('[data-phone-focus-id="'+(count+4)+'"]').waitFor({state:'attached'});
       await leavingTabs.first().waitFor({state:'detached',timeout:3000});
       assert.equal(fixture.posted.length,0);

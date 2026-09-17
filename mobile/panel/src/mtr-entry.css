@@ -262,9 +262,6 @@
   will-change: transform, opacity;
   pointer-events: none;
 }
-[data-phone-travelling] .phone-relation-wires {
-  opacity: 0.25;
-}
 @media (min-width: 900px) {
   .phone-relations-enabled {
     --phone-relation-strip: 104px;

@@ -128,8 +128,22 @@ export function PhoneConnectionPreview({
   // list's own incoming slide, so both land together.
   const [departing, setDeparting] = useState(false);
   const travelActive = useRef(false);
+  // Wires belong to the focused card's geometry, so they are wrong the moment a
+  // travel starts and stay wrong until the new card has been measured. Drawing
+  // them in between is what left them hanging at the old spot, and what flashed
+  // there for a frame once the travel released its dimming. They are simply not
+  // drawn until the measurement catches up.
+  const [wiresHidden, setWiresHidden] = useState(false);
+  const wiresHiddenRef = useRef(false);
   const onDepart = useCallback(() => {
     travelActive.current = true;
+    wiresHiddenRef.current = true;
+    // Drop them on this frame, not the next React one: the scroller flag that
+    // starts the list sliding is written synchronously, and these wires belong
+    // to the card that is on its way out.
+    const svg = layerRef.current?.querySelector<SVGElement>(".phone-relation-wires");
+    if (svg) svg.style.display = "none";
+    setWiresHidden(true);
     setDeparting(true);
   }, []);
   const onSwap = useCallback((key: string) => {
@@ -390,6 +404,10 @@ export function PhoneConnectionPreview({
             });
           });
         }
+      if (wiresHiddenRef.current) {
+        wiresHiddenRef.current = false;
+        setWiresHidden(false);
+      }
       const value = { width, height, strip, lanes, wires };
       setGeometry((old) =>
         JSON.stringify(old) === JSON.stringify(value) ? old : value,
@@ -668,43 +686,50 @@ export function PhoneConnectionPreview({
       >
         {hasRelations ? (
           <>
-            <svg
-              className="phone-relation-wires"
-              width={geometry.width}
-              height={geometry.height}
-              aria-hidden="true"
-            >
-              {geometry.wires.map((wire) => (
-                <g
-                  key={wire.key}
-                  opacity={
-                    highlight && highlight !== wire.relation ? 0.16 : 0.72
-                  }
-                >
-                  <path
-                    d={wire.d}
-                    fill="none"
-                    stroke={wire.color}
-                    strokeWidth={highlight === wire.relation ? 2.4 : 1.5}
-                    strokeDasharray={wire.wireless ? "4 4" : undefined}
-                  />
-                  {wire.offscreen && (
-                    <>
-                      <circle cx={wire.x} cy={wire.y} r="3" fill={wire.color} />
-                      {highlight === wire.relation && (
-                        <text
-                          x={wire.x + (wire.side === "input" ? 6 : -6)}
-                          y={wire.y < 20 ? wire.y + 14 : wire.y - 6}
-                          textAnchor={wire.side === "input" ? "start" : "end"}
-                        >
-                          {wire.label}
-                        </text>
-                      )}
-                    </>
-                  )}
-                </g>
-              ))}
-            </svg>
+            {!wiresHidden && (
+              <svg
+                className="phone-relation-wires"
+                width={geometry.width}
+                height={geometry.height}
+                aria-hidden="true"
+              >
+                {geometry.wires.map((wire) => (
+                  <g
+                    key={wire.key}
+                    opacity={
+                      highlight && highlight !== wire.relation ? 0.16 : 0.72
+                    }
+                  >
+                    <path
+                      d={wire.d}
+                      fill="none"
+                      stroke={wire.color}
+                      strokeWidth={highlight === wire.relation ? 2.4 : 1.5}
+                      strokeDasharray={wire.wireless ? "4 4" : undefined}
+                    />
+                    {wire.offscreen && (
+                      <>
+                        <circle
+                          cx={wire.x}
+                          cy={wire.y}
+                          r="3"
+                          fill={wire.color}
+                        />
+                        {highlight === wire.relation && (
+                          <text
+                            x={wire.x + (wire.side === "input" ? 6 : -6)}
+                            y={wire.y < 20 ? wire.y + 14 : wire.y - 6}
+                            textAnchor={wire.side === "input" ? "start" : "end"}
+                          >
+                            {wire.label}
+                          </text>
+                        )}
+                      </>
+                    )}
+                  </g>
+                ))}
+              </svg>
+            )}
             <div className="phone-relation-side is-input">
               {leavingPreviews("input")}
               {previews("input")}
