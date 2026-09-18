@@ -11,6 +11,11 @@ Use workflows, adjust parameters, and view results from your phone browser. Comf
   <a href="docs/preview/3.gif"><img src="docs/preview/3.gif" width="31%" alt="历史与全屏看图"></a>
 </p>
 
+<p align="center">
+  <a href="docs/preview/1.png"><img src="docs/preview/1.png" width="46%" alt="电脑端面板（中文）：连接方式与随机标签节点"></a>
+  <a href="docs/preview/2.png"><img src="docs/preview/2.png" width="46%" alt="Desktop panel (English): connection options and the random tag node"></a>
+</p>
+
 ## 中文
 
 ### 能做什么
