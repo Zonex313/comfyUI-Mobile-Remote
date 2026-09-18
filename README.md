@@ -5,6 +5,12 @@ Use workflows, adjust parameters, and view results from your phone browser. Comf
 
 [中文](#中文) | [English](#english) | [更新记录 / Changelog](CHANGELOG.md)
 
+<p align="center">
+  <a href="docs/preview/1.gif"><img src="docs/preview/1.gif" width="31%" alt="手机生成页：改提示词、模型与尺寸"></a>
+  <a href="docs/preview/2.gif"><img src="docs/preview/2.gif" width="31%" alt="高级页：节点参数与工作流小地图"></a>
+  <a href="docs/preview/3.gif"><img src="docs/preview/3.gif" width="31%" alt="历史与全屏看图"></a>
+</p>
+
 ## 中文
 
 ### 能做什么
