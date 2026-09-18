@@ -3078,6 +3078,66 @@ dialog:not([open]) {
   letter-spacing: 0.01em;
 }
 
+/* 标签语言：圆形按钮、不加彩色高亮，点开是浮层菜单。
+   跟随系统语言时只显示地球图标，选定语言后显示那个语言的简码（CN/EN/JA/KO）。 */
+.preset-lang-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  min-height: 26px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.05);
+  font-family: inherit;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0;
+  cursor: pointer;
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+.preset-lang-button:hover { background: rgba(255, 255, 255, 0.11); }
+.preset-lang-button:active { transform: scale(0.92); }
+
+.preset-lang-button .preset-lang-icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 跟随系统语言只显示图标，选了语言只显示简码 */
+.preset-lang-button[data-mode="auto"] .preset-lang-code { display: none; }
+.preset-lang-button[data-mode="fixed"] .preset-lang-icon { display: none; }
+
+/* 浮层挂在 body 上（标签面板自身 overflow:hidden 会裁掉它），所以是 fixed。
+   这里复用 .language-menu 的外观，但两个都是单类选择器、优先级相同，
+   .language-menu 的 position:absolute 写在后面会盖掉它——所以要写成组合选择器。
+   right/top 也必须一起复位：.language-menu 的 right:0 会和我们的 left 一起把宽度
+   拉到屏幕右边，菜单右边就空出一大片。 */
+.language-menu.preset-lang-menu {
+  position: fixed;
+  top: auto;
+  right: auto;
+  min-width: 0;
+  padding: 3px;
+  gap: 1px;
+}
+
+/* 比设置页那份再紧凑一点，五个短选项不需要那么高的行 */
+.preset-lang-menu .language-option {
+  padding: 6px 10px;
+  font-size: 12.5px;
+}
+
 .preset-random-button {
   min-width: 52px;
   height: auto;

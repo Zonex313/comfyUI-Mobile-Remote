@@ -1,9 +1,9 @@
-import { t } from "./i18n.js?v=202610130";
+import { t } from "./i18n.js?v=202610144";
 import "/mobile/assets/preset-catalog.js?v=202610130";
 import { sharedCatalogStore } from "./preset-store.js?v=202610130";
 
 const Model = globalThis.MobilePresetCatalog;
-const CATALOG_URL = "/mobile/assets/prompt-presets.json?v=202610130";
+const CATALOG_URL = "/mobile/assets/prompt-presets.json?v=202610148";
 const keyOf = (category, slot) => `${category.id}.${slot.id}`;
 const unique = (tags) => [...new Set(tags)];
 const sameMembers = (a, b) => a.length === b.length && a.every((tag) => b.includes(tag));
@@ -127,7 +127,7 @@ export function createPresetManager({ element, button, setText, store = sharedCa
     const draft = editor.draft;
     form.replaceChildren();
     const heading = element("h3", "mobile-remote-card-title", t("{mode} · {category} / {slot}", {
-      mode: tag ? t("标签规则") : t("新增标签"), category: category.label, slot: slot.label,
+      mode: tag ? t("标签规则") : t("新增标签"), category: t(category.label), slot: t(slot.label),
     }));
     const fieldLabel = element("label", "mobile-remote-tags-label", t("标签"));
     const input = element("input", "mobile-remote-tags-input");
@@ -155,9 +155,10 @@ export function createPresetManager({ element, button, setText, store = sharedCa
       box.dataset.members = group.join("\u0000");
       box.disabled = Boolean(tag && group.includes(tag));
       box.checked = box.disabled || Boolean(draft?.groups?.includes(box.dataset.members));
-      label.title = visibleMembers.join(t("、"));
+      const memberText = visibleMembers.map((member) => t(member)).join(t("、"));
+      label.title = memberText;
       label.append(box, element("span", "", t("组 {index} ({count}) · {members}", {
-        index: index + 1, count: visibleMembers.length, members: visibleMembers.join(t("、")),
+        index: index + 1, count: visibleMembers.length, members: memberText,
       })));
       groupSection.append(label);
     });
@@ -182,7 +183,9 @@ export function createPresetManager({ element, button, setText, store = sharedCa
       return Math.max(0, MAX_MUTEX_GROUP - members.size);
     }
     function renderPeers() {
-      const visible = candidates.filter((t) => t.toLocaleLowerCase().includes(peerSearch.value.trim().toLocaleLowerCase()));
+      const peerNeedle = peerSearch.value.trim().toLocaleLowerCase();
+      const visible = candidates.filter((text) => text.toLocaleLowerCase().includes(peerNeedle)
+        || t(text).toLocaleLowerCase().includes(peerNeedle));
       peerList.replaceChildren();
       visible.slice(0, limit).forEach((text) => {
         const row = element("label", "mobile-remote-tags-toggle");
@@ -200,7 +203,7 @@ export function createPresetManager({ element, button, setText, store = sharedCa
           if (box.checked) selected.add(text); else selected.delete(text);
           setText(peerCount, t("{length} 个候选 · 已选 {size}", { length: visible.length, size: selected.size, n: visible.length }));
         });
-        row.append(box, element("span", "", text));
+        row.append(box, element("span", "", t(text)));
         peerList.append(row);
       });
       setText(peerCount, t("{visible} 个候选 · 已选 {selected}", { visible: visible.length, selected: selected.size, n: visible.length })
@@ -234,7 +237,7 @@ export function createPresetManager({ element, button, setText, store = sharedCa
       box.checked = skipTargets.has(target.id) || Boolean(draft?.skips?.includes(target.id));
       const builtin = (rules.skipCategories || []).some((r) => (r.whenAny || [r.whenTag]).includes(tag) && r.skip.includes(target.id));
       if (builtin) { box.checked = true; box.disabled = true; }
-      label.append(box, element("span", "", target.label));
+      label.append(box, element("span", "", t(target.label)));
       skipChecks.push(box);
       advanced.append(label);
     }
@@ -309,31 +312,31 @@ export function createPresetManager({ element, button, setText, store = sharedCa
     const key = keyOf(category, slot);
     const skipped = (catalog.skipped[key] || []).includes(text);
     const item = element("div", `mobile-remote-chip${removed ? " is-removed" : skipped ? " is-skipped" : ""}`);
-    const name = element("button", "mobile-remote-chip-name", text);
+    const name = element("button", "mobile-remote-chip-name", t(text));
     name.type = "button";
     name.title = t("{text} · {kind} · 编辑规则", {
-      text, kind: isBuiltin(category, slot, text) ? t("内置") : t("自定义"),
+      text: t(text), kind: isBuiltin(category, slot, text) ? t("内置") : t("自定义"),
     });
     name.dataset.focus = focusId(key, text, "edit");
     name.addEventListener("click", () => openEditor(category, slot, text, name.dataset.focus));
     item.append(name);
     if (removed) {
-      const restore = smallButton(t("恢复 {text}", { text: text }), "undo", focusId(key, text, "restore"));
+      const restore = smallButton(t("恢复 {text}", { text: t(text) }), "undo", focusId(key, text, "restore"));
       restore.addEventListener("click", () => change((next) => {
         for (const kind of ["removed", "removedCustom"]) setTags(next[kind], key, (next[kind][key] || []).filter((t) => t !== text));
       }, focusId(key, text, "edit")));
       item.append(restore);
     } else {
-      const skip = smallButton(t("{action} {text}", { action: skipped ? t("取消跳过") : t("跳过随机"), text }), "ban", focusId(key, text, "skip"));
+      const skip = smallButton(t("{action} {text}", { action: skipped ? t("取消跳过") : t("跳过随机"), text: t(text) }), "ban", focusId(key, text, "skip"));
       skip.setAttribute("aria-pressed", String(skipped));
       skip.addEventListener("click", () => change((next) => {
         const tags = new Set(next.skipped[key] || []);
         if (tags.has(text)) tags.delete(text); else tags.add(text);
         setTags(next.skipped, key, [...tags]);
       }, skip.dataset.focus));
-      const remove = smallButton(t("删除 {text}", { text: text }), "times", focusId(key, text, "remove"));
+      const remove = smallButton(t("删除 {text}", { text: t(text) }), "times", focusId(key, text, "remove"));
       remove.addEventListener("click", () => {
-        if (!window.confirm(t("删除“{text}”？可在“已删除”中恢复。", { text: text }))) return;
+        if (!window.confirm(t("删除“{text}”？可在“已删除”中恢复。", { text: t(text) }))) return;
         change((next) => {
           const kind = isBuiltin(category, slot, text) ? "removed" : "removedCustom";
           setTags(next[kind], key, [...(next[kind][key] || []), text]);
@@ -355,17 +358,20 @@ export function createPresetManager({ element, button, setText, store = sharedCa
     painting = true;
     list.replaceChildren();
     categories.forEach((category) => {
-      const matchesCategory = (category.label || "").toLocaleLowerCase().includes(needle);
+      // 搜索同时试「当前语言的说法」和「中文原文」：切到英文的人能用英文找，
+      // 记得中文原名的人照样找得到。
+      const hits = (value) => Boolean(needle) && String(value || "").toLocaleLowerCase().includes(needle);
+      const matchesCategory = hits(category.label) || hits(t(category.label));
       const slots = (category.slots || []).map((slot) => {
-        const matches = matchesCategory || (slot.label || "").toLocaleLowerCase().includes(needle);
-        const match = (text) => !needle || matches || text.toLocaleLowerCase().includes(needle);
+        const matches = matchesCategory || hits(slot.label) || hits(t(slot.label));
+        const match = (text) => !needle || matches || hits(text) || hits(t(text));
         return { slot, visible: pool(category, slot).filter(match), removed: removedTags(category, slot).filter(match) };
       }).filter((item) => !needle || item.visible.length || (showRemoved.checked && item.removed.length));
       if (!slots.length) return;
       const detail = element("details", "mobile-remote-tag-category");
       const summary = element("summary", "mobile-remote-tag-summary");
       summary.dataset.focus = focusId(category.id, "summary");
-      summary.append(element("span", "mobile-remote-tag-summary-name", category.label),
+      summary.append(element("span", "mobile-remote-tag-summary-name", t(category.label)),
         element("span", "mobile-remote-tag-summary-count", String(slots.reduce((sum, s) => sum + s.visible.length, 0))));
       detail.append(summary);
       let body = null;
@@ -375,9 +381,9 @@ export function createPresetManager({ element, button, setText, store = sharedCa
         for (const { slot, visible, removed } of slots) {
           const block = element("div", "mobile-remote-tag-slot");
           const head = element("div", "mobile-remote-tag-slot-head");
-          head.append(element("h4", "mobile-remote-tag-slot-title", slot.label));
+          head.append(element("h4", "mobile-remote-tag-slot-title", t(slot.label)));
           const id = focusId(keyOf(category, slot), "add");
-          const add = smallButton(t("新增{label} / {label1}标签", { label: category.label, label1: slot.label }), "plus", id);
+          const add = smallButton(t("新增{label} / {label1}标签", { label: t(category.label), label1: t(slot.label) }), "plus", id);
           add.addEventListener("click", () => openEditor(category, slot, "", id));
           head.append(add);
           const wrap = element("div", "mobile-remote-chip-wrap");

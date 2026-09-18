@@ -22,6 +22,9 @@ const DICT_TIMEOUT_MS = 5000;
 
 let locale = "zh";
 let catalog = {};
+/* 每份词典只取一次：界面语言之外的语言也要用——提示词可以指定拼成别的语言。
+   键是 locale id，值是那份词典（zh 是空对象，中文就是原文）。 */
+const catalogs = Object.create(null);
 let storage = null;
 try { storage = globalThis.localStorage || null; } catch { storage = null; }
 
@@ -161,9 +164,36 @@ function setDocumentLang() {
   try { document.documentElement.setAttribute("lang", currentHtmlLang()); } catch { /* Not a document: fine. */ }
 }
 
+async function ensureCatalog(id) {
+  const next = LOCALE_IDS.includes(id) ? id : DEFAULT_LOCALE;
+  if (!catalogs[next]) catalogs[next] = await loadCatalog(next);
+  return catalogs[next];
+}
+
+/* 先按 locale 取词：拿不到词典就退回原文（中文），绝不拿界面语言的词去顶，
+   否则日文界面配英文提示词会拼出一个三不像的东西。 */
+function translateIn(id, source, params) {
+  if (typeof source !== "string" || !source) return source;
+  const key = LOCALE_IDS.includes(id) ? id : DEFAULT_LOCALE;
+  if (key === "zh") return source;
+  const dict = catalogs[key];
+  if (!dict) return source;
+  const value = Object.prototype.hasOwnProperty.call(dict, source) ? dict[source] : source;
+  let text = typeof value === "string" && value ? value : source;
+  if (params && Object.prototype.hasOwnProperty.call(params, "n") && text.includes("|")) {
+    const forms = text.split("|");
+    const count = Number(params.n);
+    text = forms[Number.isFinite(count) && count === 1 ? 0 : 1] ?? forms[0];
+  }
+  if (!params) return text;
+  return text.replace(/\{(\w+)\}/g, (match, name) => (
+    Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match
+  ));
+}
+
 async function useLocale(id, options = {}) {
   const next = LOCALE_IDS.includes(id) ? id : DEFAULT_LOCALE;
-  catalog = await loadCatalog(next);
+  catalog = await ensureCatalog(next);
   locale = next;
   if (options.persist !== false) persistLocale(next);
   setDocumentLang();
@@ -189,6 +219,10 @@ const runtime = {
   get htmlLang() { return currentHtmlLang(); },
   get ready() { return readyPromise; },
   t: translate,
+  /* 指定语言取词：提示词语言要和界面语言分开，所以不能只有一个当前词典。 */
+  tIn: translateIn,
+  ensureLocale: ensureCatalog,
+  hasLocale(id) { return Boolean(catalogs[LOCALE_IDS.includes(id) ? id : DEFAULT_LOCALE]); },
   set: useLocale,
   onChange(listener) { listeners.add(listener); return () => listeners.delete(listener); },
   applyStatic,

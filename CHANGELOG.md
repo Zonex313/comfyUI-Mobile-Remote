@@ -3,6 +3,32 @@
 <!-- 每次发布都保留中文和 English 两段，写实际变化，尽量简短。
      Keep both language sections for every release. Focus on real changes and keep it brief. -->
 
+## v0.3.1 · 2026-09-18
+
+### 中文
+
+这一版主要在收拾标签，顺手把「停止全部」和翻历史这两个老毛病一起解决了。
+
+- 标签可以单独选语言了：界面语言和标签语言是两件事。手机和电脑的标签面板里，「随机」左边都有个圆形按钮，默认跟随界面语言，也可以固定成中文、英文、日文或韩文。选了别的语言，屏幕上的标签和它拼出来的提示词都会跟着换，但你自己在文本框里写的那段字不动。
+- 词库做了一次大扫除：删掉 335 个画不出来或者容易画丑的词（性格、关系、内心戏、鱼眼镜头、监控视角、脏滤镜这类），把 189 个太抽象的词改写成模型看得懂的具体画面，英 / 日 / 韩词典同步更新。之后按反馈又分两波加回了 42 个标签（幼态、极度下垂、女高中生、美女、病娇、翻白眼……）。
+- 「停止全部」现在真的全部停：以前队列里排了多少条也只清掉一条，剩下的照样往下跑；现在先把排队区清空再中断正在跑的那个，而且两步在一次操作里做完，不会漏掉一条。
+- 历史每页补满 60 个批次：以前一页可能只有 58、59 个，因为没出图的记录不占位置；现在会自动补满 60，翻到底也照实显示真实的批次数。
+- 电脑端「随机标签」节点：列表滚到最底再点「随机」，不会再自己往上溜了。那是浏览器的滚动锚定在列表整块重建时偷偷改了滚动位置，现在关掉它，位置由节点自己记住。
+
+更新后重启 ComfyUI，再刷新页面。
+
+### English
+
+This one is mostly about the tag library, plus two long-standing annoyances we finally put to rest.
+
+- Tags can now use a language of their own. The interface language and the tag language are separate settings: both the phone panel and the desktop tag node have a round button to the left of Random, following the interface language by default, or pinned to Chinese, English, Japanese, or Korean. Pick one and both the tags on screen and the prompt they build follow it — whatever you typed into the text box stays untouched.
+- The tag library got a cleanup: 335 tags removed that either could not be drawn or tended to look bad (personality, relationships, inner monologue, fisheye lenses, security-camera angles, muddy filters), and 189 vague ones rewritten into concrete things a model can draw. The English, Japanese, and Korean dictionaries follow along. After feedback, 42 tags came back in two rounds (youthful, extremely saggy, high school girl, beauty, yandere, eye roll, and more).
+- Stop-all now really stops everything. It used to clear a single queued item no matter how many were waiting, so the rest kept going; now it empties the pending queue and interrupts the running job in one go, leaving nothing behind.
+- History pages now fill up to 60 batches. A page could show only 58 or 59 because records without images did not take a slot; the gaps are filled in now, and the end of history still reports the real number.
+- The desktop random-tags node no longer creeps upward. Scrolling to the bottom and clicking Random used to nudge the list, because the browser's scroll anchoring rewrote the offset every time the list was rebuilt. It now opts out and restores the position itself.
+
+Restart ComfyUI after updating, then refresh the page.
+
 ## v0.3.0 · 2026-09-17
 
 ### 中文

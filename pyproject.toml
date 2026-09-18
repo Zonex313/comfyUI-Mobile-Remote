@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-mobile-remote"
-version = "0.3.0"
+version = "0.3.1"
 description = "通过手机浏览器使用电脑上的 ComfyUI。Use desktop ComfyUI from your phone browser."
 requires-python = ">=3.10"
 readme = "README.md"

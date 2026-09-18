@@ -687,21 +687,43 @@ def _record_from_payload(payload: dict[str, Any]) -> tuple[dict[str, Any] | None
     return record, ""
 
 
+def _wipe_pending(queue: Any, limit: int) -> None:
+    """整体清空排队区。
+
+    ComfyUI 的 delete_queue_item 命中一条就立刻 return（它是给「删掉某一条」用的，
+    顺带把堆重新排序），所以拿 lambda item: True 调它一次只会清掉一条：
+    点「停止全部」时队列里剩下多少条，就只有一条被清掉，
+    用户看到的就是「只停了一两个任务」。
+    整体清空要用官方的 wipe_queue；没有它的版本才退回逐条删除，而且必须循环到底。
+    """
+    wipe = getattr(queue, "wipe_queue", None)
+    if callable(wipe):
+        wipe()
+        return
+    for _ in range(limit + 1):
+        if not queue.delete_queue_item(lambda item: True):
+            break
+
+
 def _stop_all_jobs(queue: Any) -> tuple[int, bool]:
     """先清空排队中的任务，再中断正在执行的那一个，返回（清掉几条, 是否中断成功）。
 
     顺序绝不能反：先中断的话，队列里的下一条会立刻开始执行，
     紧接着的清队列就会把它一起清掉——用户点一次按钮本意是「全部停下」。
+
+    两件事必须在同一个队列锁里做完：中途放锁的话，执行线程会从队列里取出
+    下一条开始跑，那一条就漏掉了（它会一直跑下去，看起来就像「没停干净」）。
     """
-    running, pending = queue.get_current_queue_volatile()
-    removed = len(pending)
-    if removed:
-        queue.delete_queue_item(lambda item: True)
-    interrupted = False
-    for item in running:
-        if queue.interrupt_if_running(item[1]):
-            interrupted = True
-            break
+    with queue.mutex:
+        running, pending = queue.get_current_queue_volatile()
+        removed = len(pending)
+        if removed:
+            _wipe_pending(queue, removed)
+        interrupted = False
+        for item in running:
+            if queue.interrupt_if_running(item[1]):
+                interrupted = True
+                break
     return removed, interrupted
 
 

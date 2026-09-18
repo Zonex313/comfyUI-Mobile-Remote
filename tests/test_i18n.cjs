@@ -94,7 +94,32 @@ function collectSourceKeys() {
       keys.add(value);
     }
   }
+  /* 标签词库也走同一本词典：界面按当前语言显示词条，提示词仍用中文原文。
+   * 漏翻的标签会直接露中文，所以和文案一样纳入一致性检查。 */
+  for (const value of catalogStrings()) keys.add(value);
   return keys;
+}
+
+/* prompt-presets.json 里全部给人看的字符串：分类名、栏位名、标签、规则成员。 */
+function catalogStrings() {
+  const file = path.join(ROOT, "mobile", "prompt-presets.json");
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  const out = new Set();
+  const add = (value) => {
+    if (typeof value === "string" && value.trim()) out.add(value.trim());
+  };
+  for (const category of parsed.categories || []) {
+    add(category.label);
+    for (const slot of category.slots || []) {
+      add(slot.label);
+      for (const tag of slot.pool || []) add(tag);
+    }
+  }
+  const rules = parsed.rules || {};
+  for (const group of rules.mutex || []) for (const tag of group) add(tag);
+  for (const tag of rules.singletons || []) add(tag);
+  for (const rule of rules.skipCategories || []) for (const tag of rule.whenAny || []) add(tag);
+  return out;
 }
 
 function placeholders(text) {

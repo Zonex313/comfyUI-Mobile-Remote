@@ -1,4 +1,4 @@
-import { t } from "./i18n.js?v=202610130";
+import { t } from "./i18n.js?v=202610144";
 import "/mobile/assets/preset-catalog.js?v=202610130";
 
 const Model = globalThis.MobilePresetCatalog;

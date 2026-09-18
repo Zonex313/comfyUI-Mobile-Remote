@@ -54,6 +54,81 @@
 .mtr-copy:hover { background: rgba(255, 255, 255, 0.12); }
 .mtr-copy:active { background: rgba(255, 255, 255, 0.2); }
 
+/* 标签语言：圆形按钮、不加彩色高亮，点开是浮层菜单。
+   跟随系统语言时只显示地球图标，选定语言后显示那个语言的简码（CN/EN/JA/KO）。 */
+.mtr-lang {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50%;
+  color: #aeb5c8;
+  background: rgba(255, 255, 255, 0.06);
+  font-family: inherit;
+  font-size: 8.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.mtr-lang:hover { background: rgba(255, 255, 255, 0.14); }
+
+.mtr-lang .mtr-lang-icon {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 跟随系统语言只显示图标，选了语言只显示简码 */
+.mtr-lang[data-mode="auto"] .mtr-lang-code { display: none; }
+.mtr-lang[data-mode="fixed"] .mtr-lang-icon { display: none; }
+
+/* 语言浮层：挂在 body 上（面板自身 overflow:hidden 会裁掉它），所以是 fixed */
+.mtr-lang-menu {
+  position: fixed;
+  z-index: 10000;
+  /* 不用 min-width：几个短选项按内容收窄，右边不留空 */
+  width: max-content;
+  padding: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: #1b1e2a;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+}
+
+.mtr-lang-option {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  white-space: nowrap;
+  text-align: left;
+  font-family: inherit;
+  font-size: 11px;
+  color: #d6dae8;
+  background: transparent;
+  cursor: pointer;
+}
+
+.mtr-lang-option:hover,
+.mtr-lang-option:focus-visible { background: rgba(255, 255, 255, 0.09); }
+
+.mtr-lang-option[aria-checked="true"] {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .mtr-random {
   flex: 0 1 auto;
   height: auto;
@@ -77,6 +152,10 @@
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
+  /* 每次点「随机」这里都会整块重建。开着滚动锚定时，浏览器会自己"帮"我们挪 scrollTop：
+     实测每点一次就往上跑 10px（scrollHeight / clientHeight 全程不变，只有 scrollTop 被改写）。
+     位置由 render() 自己守，这里关掉浏览器的猜测。 */
+  overflow-anchor: none;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 2.5px 3.5px;

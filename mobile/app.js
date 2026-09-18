@@ -14,6 +14,8 @@
   const GALLERY_CLOSE_GUARD_MS = 450;
   // 队列/历史首屏只拉最近这么多条，翻历史时再用 offset 分段往更早的补（省流量）。
   // 「加载更多」每次也是这么多：loadMoreJobsOnce 拿它当 limit 并把游标推进这么多。
+  // 一页的「条数」和「批次数」不一定相等：没有出图的记录不占卡片，
+  // fetchJobWindow 会按差额往后补，保证每页凑满 60 个能出卡的批次。
   // 取 60 是为了它是 12 的倍数：每页拉的是「批次」，而网格卡片是「图片」，
   // 出图张数固定时每页卡片数 = 批数 × 每批张数，能被 2/3/4 整除才不会在翻页
   // 边界上留半截行（50 就不是，3 列/4 列下会剩 2 张）。
@@ -69,11 +71,14 @@
     presetEnabled: false,
     presetState: { slots: {}, custom: {}, freeText: "", extraText: "", catalog: {} },
     presetCatalogKeyPresent: false,
+    // 拼进提示词的语言：空串 = 跟随界面语言。
+    presetPromptLocale: "",
     lastCatalogBaseline: null,
     effectiveRulesCache: null,
     presetField: null,
     presetTextarea: null,
     presetPanel: null,
+    presetLangButton: null,
     presetEditing: null,
     randomGenerate: false,
     repeatCount: 1,
@@ -85,6 +90,9 @@
 
   let hydratingSettings = 0;
   let submittingBatch = false;
+  // 点了「停止全部」之后，还在上传的批量任务必须立刻停下：
+  // 否则请求回来时它还在继续提交，刚清空的队列又会被塞满。
+  let batchAbort = false;
   let applyingRemoteSettings = false;
   let catalogInvalidNotified = false;
   // MobileSettingsSync 构造时就会回调一次 onStatus，所以这个变量必须先声明，
@@ -1151,6 +1159,17 @@
 
   const PRESET_STORAGE_KEY = "comfy-mobile-remote.preset";
   const PRESET_CATALOG_KEY = "comfy-mobile-remote.presetCatalog";
+  // 提示词用哪种语言拼，和界面语言分开存：空串表示跟随界面语言。
+  const PRESET_PROMPT_LOCALE_KEY = "comfy-mobile-remote.tagPromptLocale";
+  const PROMPT_LOCALES = ["zh", "en", "ja", "ko"];
+  // 按钮上只放简码，不铺全称
+  const PROMPT_LOCALE_CODES = { zh: "CN", en: "EN", ja: "JA", ko: "KO" };
+  // 跟随系统语言时按钮上只有这个地球图标；选定了语言就换成那个语言的简码。
+  const PROMPT_LOCALE_ICON = [
+    '<svg class="preset-lang-icon" viewBox="0 0 24 24" aria-hidden="true">',
+    '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/>',
+    '<path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>',
+  ].join("");
   function presetCatalogApi() {
     return globalThis.MobilePresetCatalog;
   }
@@ -1318,7 +1337,7 @@
   async function loadPresetCatalog() {
     loadPresetState();
     try {
-      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610130", { cache: "no-store" });
+      const response = await fetch("/mobile/assets/prompt-presets.json?v=202610148", { cache: "no-store" });
       if (!response.ok) throw new Error(t("标签目录读取失败"));
       const body = await response.json();
       state.presetCatalog = Array.isArray(body?.categories) ? body.categories : [];
@@ -1455,8 +1474,41 @@
     return presetEngine().composePhrase(category, values);
   }
 
+  function normalizePromptLocale(value) {
+    const id = String(value == null ? "" : value).trim().toLowerCase();
+    return PROMPT_LOCALES.includes(id) ? id : "";
+  }
+
+  // 没自己选过就跟界面语言走；界面语言不在四种之内时用中文。
+  function presetPromptLocale() {
+    const chosen = normalizePromptLocale(state.presetPromptLocale);
+    if (chosen) return chosen;
+    const ui = String(i18n()?.locale || "").trim().toLowerCase();
+    return PROMPT_LOCALES.includes(ui) ? ui : "zh";
+  }
+
+  function promptTranslator() {
+    const api = i18n();
+    const id = presetPromptLocale();
+    if (!api || typeof api.tIn !== "function" || id === "zh") return null;
+    return (text) => api.tIn(id, text);
+  }
+
   function composePresetPrompt() {
-    return presetEngine().compose();
+    return presetEngine().compose({ locale: presetPromptLocale(), translate: promptTranslator() });
+  }
+
+  /* 提示词语言可能是界面语言之外的一种，那份词典要先取回来再拼，
+     否则会先按中文拼一版、等词典到了再跳一次。 */
+  function ensurePromptDictionary() {
+    const api = i18n();
+    const id = presetPromptLocale();
+    const ready = !api || typeof api.ensureLocale !== "function" || id === "zh"
+      ? Promise.resolve()
+      : api.ensureLocale(id);
+    return Promise.resolve(ready).catch(() => {}).then(() => {
+      if (state.presetEnabled) applyPresetPrompt();
+    });
   }
 
   function applyPresetPrompt() {
@@ -1501,6 +1553,7 @@
     if (state.presetEnabled) {
       renderPresetPanel();
       applyPresetPrompt();
+      void ensurePromptDictionary();
     } else {
       autoGrow(textarea);
     }
@@ -1517,6 +1570,8 @@
   function renderPresetPanel() {
     const panel = state.presetPanel;
     if (!panel) return;
+    // 整块重画时浮层留着会指向旧位置，先收起来。
+    closePresetLangMenu();
     let rows = panel.querySelector("#presetRows");
     if (rows) rows.classList.add("preset-rows");
     if (!rows) {
@@ -1525,12 +1580,24 @@
       bar.className = "preset-panel-bar";
       const hint = document.createElement("span");
       hint.textContent = t("点分类名随机，点标签修改");
+      // 标签语言：放在「随机」左边，决定拼进提示词的标签用哪种语言。
+      // 只放图标 + 简码（CN/EN/JA/KO），点一下循环切换，款式跟「随机」一致。
+      const langButton = document.createElement("button");
+      langButton.type = "button";
+      langButton.id = "presetPromptLocale";
+      langButton.className = "preset-lang-button";
+      langButton.innerHTML = PROMPT_LOCALE_ICON + '<span class="preset-lang-code"></span>';
+      langButton.setAttribute("aria-haspopup", "menu");
+      langButton.setAttribute("aria-expanded", "false");
+      langButton.addEventListener("click", (event) => { event.stopPropagation(); openPresetLangMenu(); });
+      // 存一份引用：这会儿整个工具条还没挂进页面，getElementById 找不到它。
+      state.presetLangButton = langButton;
       const randomButton = document.createElement("button");
       randomButton.type = "button";
       randomButton.className = "preset-random-button";
       randomButton.textContent = t("随机");
       randomButton.addEventListener("click", () => randomizePresetSlots());
-      bar.append(hint, randomButton);
+      bar.append(hint, langButton, randomButton);
 
       const customWrap = document.createElement("details");
       customWrap.className = "advanced-section preset-custom";
@@ -1562,6 +1629,7 @@
       rows.id = "presetRows";
       rows.className = "preset-rows";
       panel.append(bar, rows, customWrap);
+      paintPresetPromptLocale();
     }
 
      rows.replaceChildren();
@@ -1574,8 +1642,8 @@
       const label = document.createElement("button");
       label.type = "button";
       label.className = "preset-row-label";
-      label.append(textSpan("preset-row-label-text", category.label));
-      label.setAttribute("aria-label", t("随机{label}", { label: category.label }));
+      label.append(textSpan("preset-row-label-text", t(category.label)));
+      label.setAttribute("aria-label", t("随机{label}", { label: t(category.label) }));
       label.addEventListener("click", () => randomizePresetSlots(category.id));
       const divider = document.createElement("span");
       divider.className = "preset-row-divider";
@@ -1594,23 +1662,25 @@
         chip.type = "button";
         chip.className = "preset-chip";
         const val = current.value || t("未选");
+        // 标签原文留在存档与提示词里，界面只显示当前语言的说法。
+        const valText = current.value ? t(current.value) : val;
         const status = presetTagStatus(category.id, slot.id, current.value);
         const conflict = conflicts.has(slotStorageKey(category.id, slot.id));
-        if (val.length <= 2) chip.classList.add("no-ellipsis");
+        if (valText.length <= 2) chip.classList.add("no-ellipsis");
         if (status === "deleted") chip.classList.add("deleted");
         if (status === "free") chip.classList.add("free");
         if (conflict) chip.classList.add("conflict");
         if ((category.slots || []).length >= 3) chip.classList.add("tight");
         if (current.locked) chip.classList.add("locked");
         if (current.ignored) chip.classList.add("ignored");
-        chip.append(textSpan("preset-chip-text", status === "deleted" ? t("{val}（已删除）", { val: val }) : val));
+        chip.append(textSpan("preset-chip-text", status === "deleted" ? t("{val}（已删除）", { val: valText }) : valText));
         chip.title = [
           status === "deleted" ? t("当前标签已从目录删除，但仍保留在提示词中") : "",
           status === "free" ? t("自由标签") : "",
           conflict ? t("与其他已选标签互斥，请编辑其中一个") : "",
         ].filter(Boolean).join(t("；"));
         const chipLabel = [
-          t("编辑{category}{slot}", { category: category.label, slot: slot.label }),
+          t("编辑{category}{slot}", { category: t(category.label), slot: t(slot.label) }),
           status === "deleted" ? t("，已删除") : "",
           conflict ? t("，存在互斥") : "",
         ].join("");
@@ -1623,6 +1693,109 @@
     });
   }
 
+  function promptLocaleLabel(id) {
+    const entry = (i18n()?.locales || []).find((item) => item.id === id);
+    return entry ? entry.label : id;
+  }
+
+  // 跟随系统语言时只显示图标，选定语言后显示那个语言的简码。
+  function paintPresetPromptLocale() {
+    const button = state.presetLangButton || $("presetPromptLocale");
+    if (!button) return;
+    const chosen = normalizePromptLocale(state.presetPromptLocale);
+    const effective = presetPromptLocale();
+    button.dataset.mode = chosen ? "fixed" : "auto";
+    const code = button.querySelector(".preset-lang-code");
+    if (code) code.textContent = PROMPT_LOCALE_CODES[effective] || effective.toUpperCase();
+    const label = promptLocaleLabel(effective);
+    const text = chosen
+      ? t("标签语言：固定 {language}", { language: label })
+      : t("标签语言：跟随系统语言（当前 {language}）", { language: label });
+    button.title = text;
+    button.setAttribute("aria-label", text);
+  }
+
+  /* 浮层挂在 body 上：标签面板自己有 overflow:hidden，挂在按钮里会被裁掉一半。 */
+  const langMenu = { node: null, outside: null, key: null, scroll: null };
+
+  function closePresetLangMenu() {
+    const button = state.presetLangButton;
+    if (!langMenu.node) {
+      if (button) button.setAttribute("aria-expanded", "false");
+      return;
+    }
+    langMenu.node.remove();
+    langMenu.node = null;
+    document.removeEventListener("pointerdown", langMenu.outside, true);
+    document.removeEventListener("keydown", langMenu.key, true);
+    window.removeEventListener("scroll", langMenu.scroll, true);
+    langMenu.outside = langMenu.key = langMenu.scroll = null;
+    if (button) button.setAttribute("aria-expanded", "false");
+  }
+
+  function openPresetLangMenu() {
+    const button = state.presetLangButton || $("presetPromptLocale");
+    if (!button) return;
+    if (langMenu.node) { closePresetLangMenu(); return; }
+    const menu = document.createElement("div");
+    menu.className = "language-menu preset-lang-menu";
+    menu.setAttribute("role", "menu");
+    const chosen = normalizePromptLocale(state.presetPromptLocale);
+    for (const id of ["", ...PROMPT_LOCALES]) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "language-option";
+      option.setAttribute("role", "menuitemradio");
+      option.setAttribute("aria-checked", String(id === chosen));
+      option.dataset.locale = id;
+      option.textContent = id ? promptLocaleLabel(id) : t("跟随系统语言");
+      option.addEventListener("click", (event) => {
+        event.stopPropagation();
+        closePresetLangMenu();
+        state.presetPromptLocale = id;
+        try { phoneSettings.setItem(PRESET_PROMPT_LOCALE_KEY, id); } catch { /* 存不下也不影响本次拼装 */ }
+        paintPresetPromptLocale();
+        void ensurePromptDictionary();
+      });
+      menu.append(option);
+    }
+    document.body.append(menu);
+    const rect = button.getBoundingClientRect();
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8));
+    const above = rect.top - height - 6;
+    const top = above >= 8 ? above : Math.min(rect.bottom + 6, window.innerHeight - height - 8);
+    menu.style.left = Math.round(left) + "px";
+    menu.style.top = Math.round(top) + "px";
+    langMenu.node = menu;
+    button.setAttribute("aria-expanded", "true");
+    langMenu.outside = (event) => {
+      if (!menu.contains(event.target) && !button.contains(event.target)) closePresetLangMenu();
+    };
+    langMenu.key = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closePresetLangMenu();
+      button.focus();
+    };
+    langMenu.scroll = () => closePresetLangMenu();
+    document.addEventListener("pointerdown", langMenu.outside, true);
+    document.addEventListener("keydown", langMenu.key, true);
+    window.addEventListener("scroll", langMenu.scroll, true);
+  }
+
+  // 标签编辑弹层开着时切语言：标题与备选跟着换，输入框里仍是中文原文。
+  function paintPresetEditorTexts() {
+    if (!state.presetEditing) return;
+    const category = findPresetCategory(state.presetEditing.categoryId);
+    const slot = findPresetSlot(state.presetEditing.categoryId, state.presetEditing.slotId);
+    if (!category || !slot) return;
+    setText("presetTagEyebrow", t(category.label));
+    setText("presetTagTitle", t(slot.label));
+    renderPresetPool();
+  }
+
   function openPresetTagEditor(categoryId, slotId) {
     const category = findPresetCategory(categoryId);
     const slot = findPresetSlot(categoryId, slotId);
@@ -1630,8 +1803,8 @@
     if (!category || !slot || !dialog) return;
     state.presetEditing = { categoryId, slotId };
     const current = getSlotState(categoryId, slotId);
-    setText("presetTagEyebrow", category.label);
-    setText("presetTagTitle", slot.label);
+    setText("presetTagEyebrow", t(category.label));
+    setText("presetTagTitle", t(slot.label));
     $("presetTagInput").value = current.value || "";
     paintPresetEditorFlags();
     renderPresetPool();
@@ -1666,7 +1839,7 @@
       const status = presetTagStatus(categoryId, slotId, item);
       if (item === current.value) chip.classList.add("active");
       if (status === "deleted") chip.classList.add("deleted");
-      chip.append(textSpan("preset-pool-chip-text", status === "deleted" ? t("{item}（已删除）", { item: item }) : item));
+      chip.append(textSpan("preset-pool-chip-text", status === "deleted" ? t("{item}（已删除）", { item: t(item) }) : t(item)));
       chip.title = status === "deleted" ? t("已删除，仅用于恢复当前提示词") : t("选择此标签");
       chip.addEventListener("click", () => {
         if (!canSelectPresetTag(categoryId, slotId, item)) return;
@@ -2171,13 +2344,36 @@
     button.title = t("停止全部");
   }
 
+  // 等批量提交真正收尾（点了停止后它会很快跳出循环）。
+  function waitForBatchIdle(timeoutMs = 10000) {
+    if (!submittingBatch) return Promise.resolve();
+    return new Promise((resolve) => {
+      const startedAt = Date.now();
+      const tick = () => {
+        if (!submittingBatch || Date.now() - startedAt > timeoutMs) return resolve();
+        window.setTimeout(tick, 100);
+      };
+      window.setTimeout(tick, 100);
+    });
+  }
+
   async function stopAllJobs() {
     if (stoppingAllJobs) return;
     stoppingAllJobs = true;
     paintStopAllButton(true);
+    // 先掐掉还在继续提交的批量循环，免得请求回来之后它又把任务塞进队列。
+    batchAbort = true;
     try {
-      await requestJson("/mobile/api/jobs/stop-all", { method: "POST" });
-      toast(t("所有任务已停止"), "success");
+      let body = await requestJson("/mobile/api/jobs/stop-all", { method: "POST" });
+      // 可能还有一条提交已经在路上：等批量循环收尾后再扫一次，保证一条都不剩。
+      if (submittingBatch) {
+        await waitForBatchIdle();
+        body = await requestJson("/mobile/api/jobs/stop-all", { method: "POST" });
+      }
+      const removed = Number(body?.removed || 0);
+      toast(removed
+        ? t("已取消 {removed} 个排队任务，当前任务也已停止", { removed, n: removed })
+        : t("所有任务已停止"), "success");
       // 服务器已经不认这些任务了，乐观条目留着只会在顶栏显示幽灵任务。
       state.optimisticJobs.clear();
       await Promise.all([loadStatus(), loadJobs(true), loadProgress(true)]);
@@ -3025,6 +3221,61 @@
   }
 
   let jobsLoadSequence = 0;
+
+  // 手机端的一「页」是 60 个能出卡的批次，而不是 60 条记录：
+  // 取消/失败这类没有出图的记录在画廊里本来就没有卡片（collectHistoryEntries 直接跳过），
+  // 让它们占位的话，用户点开历史看到的「N 个批次」就会比约定的 60 少——
+  // 60 条里有 2 条没出图，顶部就显示成 58，看起来像丢了两个任务。
+  // 所以卡片不够就按差额继续往后补，补到 60 个为止。差额请求很小（通常 2 条），
+  // 不会让首屏多拉一整页；额度上限兜底，免得整段历史都是取消任务时越滚越多。
+  const HISTORY_FILL_BUDGET = JOBS_PAGE;
+
+  function jobMakesHistoryCard(job) {
+    if (!job) return false;
+    const status = String(job.status || "");
+    if (status === "pending" || status === "in_progress") return false;
+    if (!state.favoritesOnly && job.favorite_extra) return false;
+    return jobGallery(job).length > 0;
+  }
+
+  // 口径必须和 renderHistory 数「N 个批次」的那行完全一致，否则补页会补不准。
+  function historyCardBatches(jobs) {
+    const seen = new Set();
+    let count = 0;
+    for (const job of jobs) {
+      const id = String((job && job.id) || "");
+      if (!id || seen.has(id) || !jobMakesHistoryCard(job)) continue;
+      seen.add(id);
+      count += 1;
+    }
+    return count;
+  }
+
+  // 拉一条「够一页卡片」的窗口。offset 始终按服务器列表的记录位置推进：
+  // 运行中/排队中的任务会被服务器额外塞进这一页，窗口消费量只能是请求的 limit。
+  async function fetchJobWindow(startOffset) {
+    const favoritesOnly = Boolean(state.favoritesOnly);
+    const jobs = [];
+    let offset = startOffset;
+    let hasMore = false;
+    let total = 0;
+    let budget = HISTORY_FILL_BUDGET;
+    for (let round = 0; ; round += 1) {
+      const short = JOBS_PAGE - historyCardBatches(jobs);
+      if (round > 0 && (short <= 0 || budget <= 0)) break;
+      const limit = round === 0 ? JOBS_PAGE : Math.min(short, budget);
+      const body = await requestJson(`/mobile/api/jobs?limit=${limit}&offset=${offset}&summary=1&favorites=${favoritesOnly ? 1 : 0}&_=${Date.now()}`);
+      const incoming = Array.isArray(body.jobs) ? body.jobs : [];
+      jobs.push(...incoming);
+      offset += limit;
+      if (round > 0) budget -= limit;
+      hasMore = Boolean(body.has_more);
+      if (Number.isFinite(Number(body.total))) total = Number(body.total);
+      if (incoming.length === 0 || !hasMore) break;
+    }
+    return { favoritesOnly, jobs, offset, hasMore, total };
+  }
+
   async function loadJobsOnce() {
     const sequence = ++jobsLoadSequence;
     const favoritesOnly = Boolean(state.favoritesOnly);
@@ -3037,20 +3288,20 @@
       state.jobsPageOffset = 0;
       state.jobsHasMore = false;
     }
-    const body = await requestJson(`/mobile/api/jobs?limit=${JOBS_PAGE}&summary=1&favorites=${favoritesOnly ? 1 : 0}&_=${Date.now()}`);
+    const page = await fetchJobWindow(0);
     // Do not let a response for the previous filter repaint the new mode.
     if (sequence !== jobsLoadSequence || favoritesOnly !== Boolean(state.favoritesOnly)) return;
-    const incoming = Array.isArray(body.jobs) ? body.jobs : [];
+    const incoming = page.jobs;
     const incomingIds = new Set(incoming.map((job) => String(job.id)));
     for (const [id, job] of state.optimisticJobs) {
       if (incomingIds.has(id) || Date.now() - job.create_time > 30000) state.optimisticJobs.delete(id);
     }
     // 轮询只覆盖第一页，已经翻出来的更早页（state.jobsOlderPages）原样留着。
     state.jobsFirstPage = incoming;
-    state.totalJobs = Math.max(Number(body.total) || 0, incoming.length);
-    state.jobsHasMore = Boolean(body.has_more);
+    state.totalJobs = Math.max(Number(page.total) || 0, incoming.length);
+    state.jobsHasMore = page.hasMore;
     // 翻页游标只往前：刷新第一页不能把它退回去，否则会把翻过的旧页再拉一遍。
-    state.jobsPageOffset = Math.max(state.jobsPageOffset, JOBS_PAGE);
+    state.jobsPageOffset = Math.max(state.jobsPageOffset, page.offset);
     applyJobPages();
   }
 
@@ -3064,16 +3315,14 @@
     // offset 用「已消费的服务器列表窗口位置」，而不是 state.jobs.length：
     // 运行中/排队中的任务和收藏置顶每一页都会被塞回来，去重后的条数可能大于窗口位置，
     // 拿它当 offset 会把夹在窗口中间的那几条永久跳过。
-    const offset = state.jobsPageOffset;
-    const body = await requestJson(`/mobile/api/jobs?limit=${JOBS_PAGE}&offset=${offset}&summary=1&favorites=${favoritesOnly ? 1 : 0}&_=${Date.now()}`);
+    const page = await fetchJobWindow(state.jobsPageOffset);
     // A filter change invalidates this page request as well; leave its offset
     // untouched so the next first-page request can establish a clean window.
     if (favoritesOnly !== Boolean(state.favoritesOnly) || state.jobsMode !== favoritesOnly) return;
-    const incoming = Array.isArray(body.jobs) ? body.jobs : [];
-    appendOlderJobs(incoming);
-    state.jobsPageOffset = offset + JOBS_PAGE;
-    state.jobsHasMore = Boolean(body.has_more);
-    const total = Number(body.total);
+    appendOlderJobs(page.jobs);
+    state.jobsPageOffset = page.offset;
+    state.jobsHasMore = page.hasMore;
+    const total = Number(page.total);
     if (Number.isFinite(total) && total > 0) state.totalJobs = total;
     applyJobPages();
   }
@@ -3621,6 +3870,7 @@
     }
     const button = $("generateButton");
     submittingBatch = true;
+    batchAbort = false;
     phoneSettings.beginBatch();
     button.disabled = true;
     button.classList.remove("is-pressing");
@@ -3668,6 +3918,8 @@
       savePresetState();
       let nextBatchSeeds = {};
       for (const payload of payloads) {
+        // 用户中途按了「停止全部」：剩下的不再提交。
+        if (batchAbort) break;
         Object.assign(payload.values, nextBatchSeeds);
         if (state.randomGenerate) {
           paintPresetFromSnapshot(payload.preset);
@@ -3702,8 +3954,11 @@
         if (!state.jobs.some((job) => String(job.id) === promptId)) state.jobs.unshift(optimistic);
         updateActiveJob();
       }
-      toast(submitted > 1 ? t("已加入 {submitted} 个任务", { submitted, n: submitted }) : t("任务已加入队列"), "success");
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      // 被「停止全部」打断时不报「已加入」：那批任务马上就被清掉了，会误导。
+      if (!batchAbort) {
+        toast(submitted > 1 ? t("已加入 {submitted} 个任务", { submitted, n: submitted }) : t("任务已加入队列"), "success");
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
     } catch (error) {
       if (submitted === 0) {
         state.values = originalValues;
@@ -3906,6 +4161,9 @@
     paintHistoryMore();
     renderHistory();
     renderPresetPanel();
+    paintPresetPromptLocale();
+    paintPresetEditorTexts();
+    void ensurePromptDictionary();
     if (state.workflow) renderWorkflow(state.workflow);
   }
 
@@ -4393,6 +4651,7 @@
   }
 
   function applyPhonePreferences() {
+    state.presetPromptLocale = normalizePromptLocale(phoneSettings.getItem(PRESET_PROMPT_LOCALE_KEY));
     state.randomGenerate = phoneSettings.getItem("comfy-mobile-remote.randomGenerate") === "1";
     state.multiModel = phoneSettings.getItem("comfy-mobile-remote.multiModel") === "1";
     state.fixedSeed = phoneSettings.getItem("comfy-mobile-remote.fixedSeed") === "1";

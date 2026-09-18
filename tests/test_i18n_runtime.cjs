@@ -18,6 +18,7 @@ const CATALOGS = {
     "更新失败：{error}": "Update failed: {error}",
   },
   ja: { "设置": "設定" },
+  ko: { "设置": "설정" },
 };
 
 function installFixture() {
@@ -72,6 +73,25 @@ test("切换语言后立即生效，并记住选择", async () => {
   assert.equal(MobileI18n.t("设置"), "設定");
   assert.deepEqual(changes, ["ja"]);
   assert.equal(globalThis.localStorage, undefined);
+});
+
+test("按指定语言取词：界面语言和提示词语言各走各的", async () => {
+  const calls = installFixture();
+  const { MobileI18n } = await import(RUNTIME);
+  await MobileI18n.ready;
+  const uiBefore = MobileI18n.t("设置");
+  // 词典还没取回来时，绝不能拿界面语言的词去顶：宁可退回原文。
+  assert.equal(MobileI18n.hasLocale("ko"), false, "还没取过韩文词典");
+  assert.equal(MobileI18n.tIn("ko", "设置"), "设置");
+  await MobileI18n.ensureLocale("ko");
+  assert.equal(MobileI18n.hasLocale("ko"), true);
+  assert.equal(MobileI18n.tIn("ko", "设置"), "설정");
+  assert.equal(MobileI18n.t("设置"), uiBefore, "取别的语言的词不能改动界面语言");
+  assert.equal(MobileI18n.tIn("ko", "没有翻译过的文案"), "没有翻译过的文案");
+  assert.equal(MobileI18n.tIn("zh", "设置"), "设置", "中文就是原文，不需要词典");
+  // 同一份词典只取一次
+  await MobileI18n.ensureLocale("ko");
+  assert.equal(calls.filter((url) => url.endsWith("/i18n/ko")).length, 1, "ensureLocale 应该复用已取回的词典");
 });
 
 test("同一个页面里多次加载只保留一份运行时", async () => {

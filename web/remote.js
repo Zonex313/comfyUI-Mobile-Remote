@@ -1,9 +1,9 @@
-import { ready as i18nReady, t } from "./i18n.js?v=202610130";
+import { ready as i18nReady, t } from "./i18n.js?v=202610144";
 
 // 词典到位后再注册界面，否则侧边栏标题会先渲染成中文原文。
 await i18nReady;
 import { app } from "../../scripts/app.js";
-import { createPresetManager } from "./preset-manager.js?v=202610130";
+import { createPresetManager } from "./preset-manager.js?v=202610144";
 import { createWorkflowImporter } from "./workflow-import.js?v=202610130";
 
 const TAB_ID = "mobile-remote";

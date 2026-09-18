@@ -1,4 +1,4 @@
-import { ready as i18nReady, t } from "./i18n.js?v=202610130";
+import { ready as i18nReady, t, MobileI18n } from "./i18n.js?v=202610144";
 
 // 词典到位后再注册界面，否则侧边栏标题会先渲染成中文原文。
 await i18nReady;
@@ -17,7 +17,21 @@ function textSpan(className, text) {
 }
 
 const NODE_TYPE = "MobileTagCLIPTextEncode";
-const VERSION = "202610130";
+// 拼进提示词的标签语言；空串 = 跟随界面语言。
+const PROMPT_LOCALES = ["zh", "en", "ja", "ko"];
+// 按钮上只放简码，不铺全称
+const PROMPT_LOCALE_CODES = { zh: "CN", en: "EN", ja: "JA", ko: "KO" };
+// 跟随系统语言时按钮上只有这个地球图标；选定了语言就换成那个语言的简码。
+const PROMPT_LOCALE_ICON = [
+  '<svg class="mtr-lang-icon" viewBox="0 0 24 24" aria-hidden="true">',
+  '<path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/>',
+  '<path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg>',
+].join("");
+function normalizePromptLocale(value) {
+  const id = String(value == null ? "" : value).trim().toLowerCase();
+  return PROMPT_LOCALES.includes(id) ? id : "";
+}
+const VERSION = "202610149";
 const PANEL_HEIGHT = 202;
 
 let libraryPromise = null;
@@ -60,7 +74,7 @@ async function loadLibrary() {
 }
 
 function emptyState() {
-  const state = { slots: {}, custom: {}, freeText: "", extraText: "" };
+  const state = { slots: {}, custom: {}, freeText: "", extraText: "", promptLocale: "" };
   Object.defineProperty(state, "catalog", { value: null, writable: true, configurable: true, enumerable: false });
   return state;
 }
@@ -94,7 +108,16 @@ class TagPanel {
     this.randomButton.textContent = t("随机");
     this.randomButton.title = t("重新随机所有标签");
     this.randomButton.addEventListener("click", () => this.randomizeAll());
-    bar.append(hint, this.copyButton, this.randomButton);
+    // 标签语言：圆形按钮，点开是浮层菜单；跟随系统语言显示图标，选定语言显示简码。
+    this.langButton = document.createElement("button");
+    this.langButton.type = "button";
+    this.langButton.className = "mtr-lang";
+    this.langButton.innerHTML = PROMPT_LOCALE_ICON + '<span class="mtr-lang-code"></span>';
+    this.langButton.setAttribute("aria-haspopup", "menu");
+    this.langButton.setAttribute("aria-expanded", "false");
+    this.langButton.addEventListener("click", (event) => { event.stopPropagation(); this.openLanguageMenu(); });
+    this.paintLanguage();
+    bar.append(hint, this.copyButton, this.langButton, this.randomButton);
     this.root.append(bar, this.rows);
     this.rows.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
     void this.load();
@@ -108,7 +131,119 @@ class TagPanel {
     if (!state.custom || typeof state.custom !== "object") state.custom = {};
     if (typeof state.freeText !== "string") state.freeText = "";
     if (typeof state.extraText !== "string") state.extraText = "";
+    if (typeof state.promptLocale !== "string") state.promptLocale = "";
     return state;
+  }
+
+  promptLocale() {
+    const chosen = normalizePromptLocale(this.state.promptLocale);
+    if (chosen) return chosen;
+    const ui = String(MobileI18n?.locale || "").toLowerCase();
+    return PROMPT_LOCALES.includes(ui) ? ui : "zh";
+  }
+
+  promptLocaleLabel(id) {
+    const entry = (MobileI18n?.locales || []).find((item) => item.id === id);
+    return entry ? entry.label : id;
+  }
+
+  // 跟随系统语言时只显示图标，选定语言后显示那个语言的简码。
+  paintLanguage() {
+    const button = this.langButton;
+    if (!button) return;
+    const chosen = normalizePromptLocale(this.state.promptLocale);
+    const effective = this.promptLocale();
+    button.dataset.mode = chosen ? "fixed" : "auto";
+    const code = button.querySelector(".mtr-lang-code");
+    if (code) code.textContent = PROMPT_LOCALE_CODES[effective] || effective.toUpperCase();
+    const label = this.promptLocaleLabel(effective);
+    const text = chosen
+      ? t("标签语言：固定 {language}", { language: label })
+      : t("标签语言：跟随系统语言（当前 {language}）", { language: label });
+    button.title = text;
+    button.setAttribute("aria-label", text);
+  }
+
+  chooseLanguage(id) {
+    this.state.promptLocale = normalizePromptLocale(id);
+    this.node.setDirtyCanvas?.(true, true);
+    this.paintLanguage();
+    void this.ensureDictionary();
+  }
+
+  /* 浮层挂在 body 上：节点面板自己有 overflow:hidden，挂在面板里会被裁掉。 */
+  closeLanguageMenu() {
+    const menu = langMenuRuntime.menu;
+    if (menu) {
+      menu.remove();
+      document.removeEventListener("pointerdown", langMenuRuntime.outside, true);
+      document.removeEventListener("keydown", langMenuRuntime.key, true);
+      window.removeEventListener("scroll", langMenuRuntime.scroll, true);
+      langMenuRuntime.menu = null;
+      langMenuRuntime.outside = langMenuRuntime.key = langMenuRuntime.scroll = null;
+    }
+    this.langButton?.setAttribute("aria-expanded", "false");
+  }
+
+  openLanguageMenu() {
+    const button = this.langButton;
+    if (!button) return;
+    if (langMenuRuntime.menu) { this.closeLanguageMenu(); return; }
+    closeAnyLanguageMenu();
+    const menu = document.createElement("div");
+    menu.className = "mtr-lang-menu";
+    menu.setAttribute("role", "menu");
+    const chosen = normalizePromptLocale(this.state.promptLocale);
+    for (const id of ["", ...PROMPT_LOCALES]) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "mtr-lang-option";
+      option.setAttribute("role", "menuitemradio");
+      option.setAttribute("aria-checked", String(id === chosen));
+      option.dataset.locale = id;
+      option.textContent = id ? this.promptLocaleLabel(id) : t("跟随系统语言");
+      option.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.closeLanguageMenu();
+        this.chooseLanguage(id);
+      });
+      menu.append(option);
+    }
+    document.body.append(menu);
+    const rect = button.getBoundingClientRect();
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    const above = rect.top - height - 6;
+    const top = above >= 8 ? above : Math.min(rect.bottom + 6, window.innerHeight - height - 8);
+    menu.style.left = Math.round(left) + "px";
+    menu.style.top = Math.round(top) + "px";
+    langMenuRuntime.menu = menu;
+    langMenuRuntime.owner = this;
+    button.setAttribute("aria-expanded", "true");
+    langMenuRuntime.outside = (event) => {
+      if (!menu.contains(event.target) && !button.contains(event.target)) this.closeLanguageMenu();
+    };
+    langMenuRuntime.key = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      this.closeLanguageMenu();
+      button.focus();
+    };
+    langMenuRuntime.scroll = () => this.closeLanguageMenu();
+    document.addEventListener("pointerdown", langMenuRuntime.outside, true);
+    document.addEventListener("keydown", langMenuRuntime.key, true);
+    window.addEventListener("scroll", langMenuRuntime.scroll, true);
+  }
+
+  /* 选的语言不是界面语言时，那份词典要先取回来：tIn 拿不到词典会退回中文原文，
+     入队那一刻才发现语言不对就晚了。 */
+  async ensureDictionary() {
+    const id = this.promptLocale();
+    if (id !== "zh" && typeof MobileI18n?.ensureLocale === "function") {
+      try { await MobileI18n.ensureLocale(id); } catch { /* 拿不到就按中文原文拼 */ }
+    }
+    this.render();
   }
 
   engine() {
@@ -137,6 +272,7 @@ class TagPanel {
       this.error = error?.message || t("标签引擎加载失败");
     }
     this.render();
+    void this.ensureDictionary();
   }
 
   nodeText() {
@@ -162,7 +298,11 @@ class TagPanel {
   // 标签部分 + 节点文本框里的自定义文字
   finalPrompt() {
     const engine = this.engine();
-    const tags = engine ? String(engine.compose() || "").trim() : "";
+    const locale = this.promptLocale();
+    const translate = locale === "zh" || typeof MobileI18n?.tIn !== "function"
+      ? null
+      : (text) => MobileI18n.tIn(locale, text);
+    const tags = engine ? String(engine.compose({ locale, translate }) || "").trim() : "";
     const custom = this.nodeText();
     if (tags && custom) return tags + ", " + custom;
     return custom || tags;
@@ -241,13 +381,26 @@ class TagPanel {
     this.render();
   }
 
+  // 整块重建会把滚动位置交给浏览器重算，它算不准（见 .mtr-rows 上的 overflow-anchor 注释）。
+  // 自己记下再放回：滚到底点「随机」时就该还在底部，而不是一次往上挪一点。
+  restoreScroll(position) {
+    const rows = this.rows;
+    if (!rows || !Number.isFinite(position) || position <= 0) return;
+    // 先读一次 scrollHeight 把布局结清，再夹到新的上限内，避免还原到不存在的位置。
+    const max = Math.max(0, rows.scrollHeight - rows.clientHeight);
+    const next = Math.min(position, max);
+    if (rows.scrollTop !== next) rows.scrollTop = next;
+  }
+
   render() {
+    const scrollTop = this.rows.scrollTop;
     this.rows.replaceChildren();
     if (this.error) {
       const tip = document.createElement("div");
       tip.className = "mtr-error";
       tip.textContent = this.error;
       this.rows.append(tip);
+      this.restoreScroll(scrollTop);
       this.resize();
       return;
     }
@@ -257,6 +410,7 @@ class TagPanel {
       tip.className = "mtr-error";
       tip.textContent = t("载入中…");
       this.rows.append(tip);
+      this.restoreScroll(scrollTop);
       this.resize();
       return;
     }
@@ -267,8 +421,8 @@ class TagPanel {
       const label = document.createElement("button");
       label.type = "button";
       label.className = "mtr-row-label";
-      label.append(textSpan("mtr-row-label-text", category.label));
-      label.title = t("随机") + category.label;
+      label.append(textSpan("mtr-row-label-text", t(category.label)));
+      label.title = t("随机") + t(category.label);
       label.addEventListener("click", () => this.randomizeCategory(category.id));
       const divider = document.createElement("span");
       divider.className = "mtr-divider";
@@ -283,15 +437,17 @@ class TagPanel {
         }
         const current = engine.slotState(category.id, slot.id);
         const value = current.value || t("未选");
+        // 提示词仍用中文原文，界面按当前语言显示。
+        const valueText = current.value ? t(current.value) : value;
         const chip = document.createElement("button");
         chip.type = "button";
         chip.className = "mtr-chip";
-        if (value.length <= 2) chip.classList.add("no-ellipsis");
+        if (valueText.length <= 2) chip.classList.add("no-ellipsis");
         if ((category.slots || []).length >= 3) chip.classList.add("tight");
         if (current.locked) chip.classList.add("locked");
         if (current.ignored) chip.classList.add("ignored");
-        chip.append(textSpan("mtr-chip-text", value));
-        chip.title = current.locked ? t("已锁定") : current.ignored ? t("已忽略") : value;
+        chip.append(textSpan("mtr-chip-text", valueText));
+        chip.title = current.locked ? t("已锁定") : current.ignored ? t("已忽略") : valueText;
         chip.addEventListener("click", (event) => {
           event.stopPropagation();
           openEditor(this, category, slot, chip);
@@ -301,6 +457,7 @@ class TagPanel {
       row.append(label, divider, values);
       this.rows.append(row);
     });
+    this.restoreScroll(scrollTop);
     this.resize();
   }
 
@@ -336,6 +493,13 @@ class TagPanel {
 // ---- 标签编辑弹层（对齐手机端的「点标签修改」）----
 const tagRuntime = globalThis.__MTR_TAG_RUNTIME || (globalThis.__MTR_TAG_RUNTIME = { popup: null, popupOwner: null });
 
+// 标签语言浮层：同一时刻只允许开一个（多个节点各自有按钮）。
+const langMenuRuntime = globalThis.__MTR_LANG_MENU || (globalThis.__MTR_LANG_MENU = { menu: null, owner: null, outside: null, key: null, scroll: null });
+function closeAnyLanguageMenu() {
+  const owner = langMenuRuntime.owner;
+  if (owner && typeof owner.closeLanguageMenu === "function") owner.closeLanguageMenu();
+}
+
 function closePopup() {
   if (!tagRuntime.popup) return;
   tagRuntime.popup.remove();
@@ -369,9 +533,9 @@ function openEditor(panel, category, slot, anchor) {
   head.className = "mtr-popup-head";
   const eyebrow = document.createElement("span");
   eyebrow.className = "mtr-popup-eyebrow";
-  eyebrow.textContent = category.label;
+  eyebrow.textContent = t(category.label);
   const title = document.createElement("strong");
-  title.textContent = slot.label;
+  title.textContent = t(slot.label);
   head.append(eyebrow, title);
 
   const flags = document.createElement("div");
@@ -398,7 +562,7 @@ function openEditor(panel, category, slot, anchor) {
 
   const poolHead = document.createElement("div");
   poolHead.className = "mtr-pool-head";
-  poolHead.textContent = (slot.label || t("标签")) + t(" 词库");
+  poolHead.textContent = (t(slot.label) || t("标签")) + t(" 词库");
   const pool = document.createElement("div");
   pool.className = "mtr-pool";
   let chosen = current.value || "";
@@ -418,7 +582,7 @@ function openEditor(panel, category, slot, anchor) {
     chip.type = "button";
     chip.className = "mtr-pool-chip";
     chip.dataset.tag = tag;
-    chip.append(textSpan("mtr-pool-chip-text", tag));
+    chip.append(textSpan("mtr-pool-chip-text", t(tag)));
     chip.addEventListener("click", () => { chosen = tag; input.value = tag; paint(); commit(); });
     pool.append(chip);
   });
@@ -554,6 +718,7 @@ app.registerExtension({
     proto.__mtrHooksInstalled = true;
     const removed = proto.onRemoved;
     proto.onRemoved = function (...rest) {
+      if (langMenuRuntime.owner === this.__mtrPanel) this.__mtrPanel.closeLanguageMenu();
       if (tagRuntime.popupOwner === this) closePopup();
       if (this.__mtrPanel) this.__mtrPanel = null;
       return removed?.apply(this, rest);
@@ -599,4 +764,13 @@ app.registerExtension({
       return out;
     };
   },
+});
+
+// 语言换了要把画布上的标签节点按新语言重画：节点是常驻的，不会自己重建。
+globalThis.MobileI18n?.onChange?.(() => {
+  closeAnyLanguageMenu();
+  for (const node of listNodes()) {
+    if (!node || node.type !== NODE_TYPE || !node.__mtrPanel) continue;
+    try { node.__mtrPanel.paintLanguage(); node.__mtrPanel.render(); } catch { /* 单个节点失败不影响其它节点 */ }
+  }
 });

@@ -33,6 +33,65 @@
     return presetCatalogApi().normalize(raw);
   }
 
+  /* 提示词可以按别的语言拼：标签本身查词典，连接词和语序换模板。
+     中文这套是原始实现（「的」会去重、所有空格都会被删掉）；其它语言的模板
+     绝不能沿用「删空格」，否则英文会被压成一整串，日文则要保留「の」。 */
+  const PROMPT_TEMPLATES = {
+    zh: {
+      slotJoin: "",
+      person: (age, origin, look) => (age && (origin || look) ? `${age}的${origin}${look}` : `${origin}${look}` || age),
+      breast: (shape, size) => (shape && size ? `${shape}的${size}` : size || shape),
+      nipple: (state, look) => {
+        const bare = String(state || "").replace(/乳头/g, "");
+        if (bare && look) return /乳头|乳晕/.test(look) ? `${bare}的${look}` : `${bare}的${look}乳头`;
+        return look || state || "";
+      },
+      ofColor: (color, rest) => (color && rest ? `${color}的${rest}` : color || rest),
+      peek: (bottom, panties) => `${bottom}的边缘漏出${panties}`,
+      tidy: (text) => String(text || "").replace(/的+/g, "的").replace(/^的+|的+$/g, "").replace(/\s+/g, "").trim(),
+    },
+    en: {
+      slotJoin: " ",
+      person: (...parts) => parts.filter(Boolean).join(" "),
+      breast: (shape, size) => [shape, size].filter(Boolean).join(" "),
+      nipple: (state, look) => [state, look].filter(Boolean).join(" "),
+      ofColor: (color, rest) => [color, rest].filter(Boolean).join(" "),
+      peek: (bottom, panties) => `${panties} peeking out from under ${bottom}`,
+      tidy: (text) => String(text || "").replace(/\s+/g, " ").replace(/\s+([,.])/g, "$1").trim(),
+    },
+    ja: {
+      slotJoin: "",
+      person: (age, origin, look) => (age && (origin || look) ? `${age}の${origin}${look}` : `${origin}${look}` || age),
+      breast: (shape, size) => (shape && size ? `${shape}の${size}` : size || shape),
+      nipple: (state, look) => [state, look].filter(Boolean).join(""),
+      ofColor: (color, rest) => (color && rest ? `${color}の${rest}` : color || rest),
+      peek: (bottom, panties) => `${bottom}の裾から${panties}がのぞく`,
+      tidy: (text) => String(text || "").replace(/の+/g, "の").replace(/^の+|の+$/g, "").replace(/\s+/g, "").trim(),
+    },
+    ko: {
+      slotJoin: " ",
+      person: (...parts) => parts.filter(Boolean).join(" "),
+      breast: (shape, size) => [shape, size].filter(Boolean).join(" "),
+      nipple: (state, look) => [state, look].filter(Boolean).join(" "),
+      ofColor: (color, rest) => [color, rest].filter(Boolean).join(" "),
+      peek: (bottom, panties) => `${bottom} 밑으로 ${panties}가 살짝 보이는`,
+      tidy: (text) => String(text || "").replace(/\s+/g, " ").replace(/\s+([,.])/g, "$1").trim(),
+    },
+  };
+  const PROMPT_LOCALES = ["zh", "en", "ja", "ko"];
+
+  /* 只认这四种：语言没选或选了不认识的一种时，整个拼装回到中文原样，
+     绝不拿别的语言的词去套中文语法（那会拼出「29ans的韩国美女」这种东西）。 */
+  function promptLocaleId(locale) {
+    const key = String(locale == null ? "" : locale).trim().toLowerCase();
+    return PROMPT_LOCALES.includes(key) ? key : "";
+  }
+
+  function promptTemplateOf(locale) {
+    const key = promptLocaleId(locale);
+    return key ? PROMPT_TEMPLATES[key] : PROMPT_TEMPLATES.zh;
+  }
+
   function create(options) {
     const settings = options || {};
     const presetCategories = settings.categories;
@@ -363,12 +422,16 @@
         markPresetConflicts();
       }
 
-      function tidyPhrase(text) {
-        return String(text || "")
-          .replace(/的+/g, "的")
-          .replace(/^的+|的+$/g, "")
-          .replace(/\s+/g, "")
-          .trim();
+      /* context 决定「拼成哪种语言」：没有 context 时就是原来的中文行为。 */
+      function composeContext(context) {
+        const template = (context && context.template) || PROMPT_TEMPLATES.zh;
+        const translate = context && context.translate;
+        const say = typeof translate === "function"
+          ? (text) => { const raw = String(text == null ? "" : text); return raw ? String(translate(raw) || raw) : ""; }
+          : (text) => String(text == null ? "" : text);
+        // translate 要原样留着：这个 context 还会被 composeCategoryPhrase 再包一次，
+        // 只留 say 的话第二次包装就取不到翻译函数了。
+        return { template, translate, say, tidy: (text) => template.tidy(text) };
       }
 
       function activeSlotValues(category) {
@@ -384,46 +447,36 @@
         return values;
       }
 
-      function composeCategoryPhrase(category, values = null) {
+      function composeCategoryPhrase(category, values = null, context = null) {
+        const { template, say, tidy } = composeContext(context);
         values = values || activeSlotValues(category);
         const rules = effectivePresetRules();
         const singles = Array.isArray(rules.singletons) ? rules.singletons : [];
         if (singles.includes(values.type) || singles.includes(values.state) || singles.includes(values.item)) {
-          return values.type || values.state || values.item || "";
+          return say(values.type || values.state || values.item || "");
         }
         const join = category.join || "";
         if (join === "person") {
-          const age = values.age || "";
-          const origin = values.origin || "";
-          const look = values.look || "";
-          if (age && (origin || look)) return tidyPhrase(`${age}的${origin}${look}`);
-          return tidyPhrase(`${origin}${look}`) || age;
+          return tidy(template.person(say(values.age || ""), say(values.origin || ""), say(values.look || "")));
         }
         if (join === "breast") {
-          const size = values.size || "";
-          const shape = values.shape || "";
-          if (shape && size) return tidyPhrase(`${shape}的${size}`);
-          return size || shape;
+          return tidy(template.breast(say(values.shape || ""), say(values.size || "")));
         }
         if (join === "nipple") {
-          const state = String(values.state || "").replace(/乳头/g, "");
-          const look = values.look || "";
-          if (state && look) {
-            if (/乳头|乳晕/.test(look)) return tidyPhrase(`${state}的${look}`);
-            return tidyPhrase(`${state}的${look}乳头`);
-          }
-          return look || values.state || "";
+          return tidy(template.nipple(say(values.state || ""), say(values.look || "")));
         }
         if (join === "of-color") {
-          const color = values.color || "";
+          const color = say(values.color || "");
           const rest = (category.slots || [])
-            .map((slot) => slot.id === "color" ? "" : values[slot.id] || "")
+            .map((slot) => slot.id === "color" ? "" : say(values[slot.id] || ""))
             .filter(Boolean)
-            .join("");
-          if (color && rest) return tidyPhrase(`${color}的${rest}`);
-          return color || rest;
+            .join(template.slotJoin);
+          return tidy(template.ofColor(color, rest));
         }
-        return (category.slots || []).map((slot) => values[slot.id]).filter(Boolean).join("");
+        return tidy((category.slots || [])
+          .map((slot) => say(values[slot.id] || ""))
+          .filter(Boolean)
+          .join(template.slotJoin));
       }
 
       function isPantsType(type) {
@@ -431,7 +484,15 @@
         return /裤/.test(text) && !/裙/.test(text);
       }
 
-      function composePresetPrompt() {
+      /* options.locale 决定拼成哪种语言，options.translate 负责把标签换成该语言的词。
+         不给就是原来的中文行为（手机端与电脑端默认都走界面语言）。 */
+      function composePresetPrompt(options = null) {
+        const locale = promptLocaleId(options && options.locale);
+        const context = composeContext({
+          template: promptTemplateOf(locale),
+          // 中文就是词典的键，不需要翻译；只有真的选了别的语言才换词。
+          translate: locale && locale !== "zh" ? options && options.translate : null,
+        });
         const parts = [];
         const accepted = [];
         const skip = skippedCategoryIds();
@@ -447,14 +508,14 @@
           if (category.id === "panties" && skipPanties) continue;
           const values = filterSlotValues(activeSlotValues(category), accepted);
           if (category.id === "bottom") {
-            const bottomPhrase = composeCategoryPhrase(category, values);
+            const bottomPhrase = composeCategoryPhrase(category, values, context);
             const pantyValues = panties && !skip.has("panties")
               ? filterSlotValues(activeSlotValues(panties), accepted.concat(Object.values(values)))
               : {};
-            const pantiesPhrase = panties ? composeCategoryPhrase(panties, pantyValues) : "";
+            const pantiesPhrase = panties ? composeCategoryPhrase(panties, pantyValues, context) : "";
             const type = values.type || "";
             if (isPantsType(type) && bottomPhrase && pantiesPhrase) {
-              const phrase = tidyPhrase(`${bottomPhrase}的边缘漏出${pantiesPhrase}`);
+              const phrase = context.tidy(context.template.peek(bottomPhrase, pantiesPhrase));
               if (phrase && !parts.includes(phrase)) parts.push(phrase);
               take(values);
               take(pantyValues);
@@ -465,7 +526,7 @@
             take(values);
             continue;
           }
-          const phrase = composeCategoryPhrase(category, values);
+          const phrase = composeCategoryPhrase(category, values, context);
           if (phrase && !parts.includes(phrase)) parts.push(phrase);
           take(values);
         }

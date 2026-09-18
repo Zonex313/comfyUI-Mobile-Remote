@@ -1,4 +1,4 @@
-import { t } from "./i18n.js?v=202610130";
+import { t } from "./i18n.js?v=202610144";
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
